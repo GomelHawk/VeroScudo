@@ -1,0 +1,13 @@
+{
+  "vpn": {
+    "profile": "MyCompanyVPN",
+    "server": "vpn.example.com",
+    "port": 443,
+    "username": "jdoe"
+  },
+  "retrySeconds": 10,
+  "vm": "auto",
+  "wifiRecoveryFix": true,
+  "updateCheck": true,
+  "lanAllow": []
+}

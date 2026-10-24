@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    name: Windows (Pester + PSScriptAnalyzer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+      - name: Lint
+        shell: pwsh
+        run: |
+          $r = Invoke-ScriptAnalyzer -Path windows -Recurse -Settings windows/PSScriptAnalyzerSettings.psd1
+          $r | Format-Table -AutoSize
+          if ($r | Where-Object Severity -in 'Error','Warning') { throw "PSScriptAnalyzer found $($r.Count) issue(s)" }
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'windows/tests'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          $cfg.TestResult.Enabled = $true
+          $cfg.TestResult.OutputPath = 'TestResults.xml'
+          Invoke-Pester -Configuration $cfg
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pester-results
+          path: TestResults.xml
+
+  linux:
+    name: Linux (pytest + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install
+        working-directory: linux
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Unit tests
+        working-directory: linux
+        run: python -m pytest -q
+      - name: Lint (ruff)
+        working-directory: linux
+        run: python -m ruff check .
+      - name: shellcheck
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck linux/*.sh

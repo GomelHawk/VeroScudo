@@ -1,0 +1,26 @@
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# runtime state (never commit)
+state/
+*.log
+cred.xml
+config.json
+!config.example.json
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# pester
+TestResults.xml
+.ruff_cache/

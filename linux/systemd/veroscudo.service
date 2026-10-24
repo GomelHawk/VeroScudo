@@ -1,0 +1,18 @@
+[Unit]
+Description=VeroScudo - strict VPN kill-switch and auto-reconnect
+After=network-manager.service NetworkManager.service nftables.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/veroscudo daemon
+Restart=always
+RestartSec=3
+RuntimeDirectory=veroscudo
+StateDirectory=veroscudo
+# keep the reconnect lock's directory across restarts; the armed flag itself is in StateDirectory (survives reboot)
+RuntimeDirectoryPreserve=restart
+Environment=VEROSCUDO_HOME=/run/veroscudo
+
+[Install]
+WantedBy=multi-user.target

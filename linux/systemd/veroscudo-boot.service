@@ -1,0 +1,15 @@
+[Unit]
+Description=VeroScudo - re-apply the kill-switch at boot, before the network starts (when armed)
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service nftables.service
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/veroscudo boot
+StateDirectory=veroscudo
+
+[Install]
+WantedBy=sysinit.target

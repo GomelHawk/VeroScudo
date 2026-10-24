@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build release archives
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Version from tag
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Windows archive
+        run: |
+          mkdir -p dist/VeroScudo-windows/icons
+          cp -r windows/*.ps1 windows/*.psm1 windows/run.vbs windows/config.example.json windows/tests-local dist/VeroScudo-windows/
+          cp -r assets/icons/png assets/icons/badge assets/icons/app dist/VeroScudo-windows/icons/
+          cp README.md LICENSE dist/VeroScudo-windows/
+          cp docs/ARCHITECTURE.md docs/TESTING.md dist/VeroScudo-windows/
+          (cd dist && zip -qr "VeroScudo-${{ steps.v.outputs.version }}-windows.zip" VeroScudo-windows)
+      - name: Linux archive
+        run: |
+          mkdir -p dist/VeroScudo-linux/assets/icons
+          cp -r linux/. dist/VeroScudo-linux/
+          cp -r assets/icons/png dist/VeroScudo-linux/assets/icons/
+          cp README.md LICENSE docs/ARCHITECTURE.md dist/VeroScudo-linux/
+          (cd dist && tar -czf "VeroScudo-${{ steps.v.outputs.version }}-linux.tar.gz" VeroScudo-linux)
+      - name: Checksums
+        run: (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v='${{ steps.v.outputs.version }}'
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on=1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > dist/notes.md
+          if [ ! -s dist/notes.md ]; then echo "No CHANGELOG.md section for $v" >&2; exit 1; fi
+          cat dist/notes.md
+      - name: GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: VeroScudo ${{ steps.v.outputs.version }}
+          body_path: dist/notes.md
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
