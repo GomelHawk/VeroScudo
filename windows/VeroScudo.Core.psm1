@@ -538,18 +538,18 @@ function Sync-VeroKillSwitch {
        tunnel is up: a lookup made before the switch would hang on the filters still in force (seen live: 23 s after a drop,
        12 s after a reconnect, all traffic blocked meanwhile). One sync at a time (watchdog and event tasks run in parallel). #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Force, [switch]$NoRefresh)
-    $again = Invoke-VeroLocked { Sync-VeroKillSwitchCore -Config $Config -Action $Action -Force:$Force -NoRefresh:$NoRefresh }
+    $again = Invoke-VeroLocked { param($c, $a, $f, $n) Sync-VeroKillSwitchCore -Config $c -Action $a -Force:$f -NoRefresh:$n } -Arguments @($Config, $Action, $Force.IsPresent, $NoRefresh.IsPresent)
     if ($again) { Sync-VeroKillSwitch -Config $Config -Action $Action -NoRefresh }
 }
 
-function Invoke-VeroLocked([scriptblock]$Script) {
+function Invoke-VeroLocked([scriptblock]$Script, [object[]]$Arguments = @()) {
     <# Applying and removing filters never overlap (watchdog, event tasks and On/Off run in parallel processes). Seen live:
        a slow disarm finished after a re-arm had applied its filters and left an armed machine without any. #>
     $mutex = New-Object System.Threading.Mutex($false, 'Local\VeroScudo-Sync')
     $owned = $false
     try {
         try { $owned = $mutex.WaitOne(60000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
-        & $Script
+        & $Script @Arguments                       # values passed explicitly, not read from the caller's scope
     } finally {
         if ($owned) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
@@ -607,14 +607,15 @@ $script:VmAllowed = $null
 function Disable-VeroKillSwitch {
     [CmdletBinding()] param([string]$Action = 'core')
     Invoke-VeroLocked {
+        param($a)
         # re-checked under the lock: if something armed again meanwhile (On pressed right after a hang-up), its filters stay
-        if (Test-VeroArmed) { Write-VeroLog 'armed again meanwhile - kill-switch kept' $Action; return }
+        if (Test-VeroArmed) { Write-VeroLog 'armed again meanwhile - kill-switch kept' $a; return }
         Clear-VeroWfpFilter
         Remove-Item (Get-VeroPath).WfpState -Force -ErrorAction SilentlyContinue
-        Remove-VeroLegacyFirewall -Action $Action
+        Remove-VeroLegacyFirewall -Action $a
         Restore-VeroVmAccess
-        Write-VeroLog 'kill-switch OFF (filters removed)' $Action
-    }
+        Write-VeroLog 'kill-switch OFF (filters removed)' $a
+    } -Arguments @($Action)
 }
 
 function Test-VeroKillSwitchPresent {
