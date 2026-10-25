@@ -1,4 +1,4 @@
-"""veroscudo on|off|status|arm|disarm|reconnect|watchdog|daemon|boot"""
+"""veroscudo on|off|status|profiles|use <profile>|arm|disarm|reconnect|watchdog|daemon|boot"""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,8 @@ import logging.handlers
 import os
 import sys
 
-from . import __version__, firewall, nm
+from . import __version__
+from .backend import firewall, nm
 from .config import Config
 from .daemon import Guard
 from .state import StateStore
@@ -29,6 +30,7 @@ def status(cfg: Config, store: StateStore) -> int:
     armed, up = store.armed, nm.is_connected(cfg.profile)
     state = "off" if not armed else ("protected" if up else "blocked")
     print(f"profile    : {cfg.profile}")
+    print(f"profiles   : {', '.join(cfg.names)}")
     print(f"armed      : {armed}")
     print(f"connected  : {up}")
     print(f"state      : {state}")
@@ -40,18 +42,33 @@ def status(cfg: Config, store: StateStore) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
-    ap.add_argument("action", choices=["on", "off", "status", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("name", nargs="?", help="profile name (for 'use')")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
     _setup_logging()
-    cfg = Config.load()
     store = StateStore()
+    cfg = Config.load(active=store.active)
     if a.action == "status":
         return status(cfg, store)
+    if a.action == "profiles":
+        for n in cfg.names:
+            print(("* " if n == cfg.profile else "  ") + n)
+        return 0
+    if a.action == "use" and not a.name:
+        print("veroscudo use <profile>   (see: veroscudo profiles)", file=sys.stderr)
+        return 2
     if os.geteuid() != 0:
-        print("veroscudo: this action needs root (install.sh adds a sudoers rule: sudo veroscudo on|off)", file=sys.stderr)
+        print("veroscudo: this action needs root (install.sh adds a sudoers rule: sudo veroscudo on|off|use <profile>)", file=sys.stderr)
         return 2
     g = Guard(cfg, store)
+    if a.action == "use":
+        try:
+            g.use(a.name)
+        except ValueError as e:
+            print(f"veroscudo: {e}", file=sys.stderr)
+            return 2
+        return 0
     {"on": g.on, "off": g.off, "arm": g.arm, "disarm": g.disarm, "reconnect": g.reconnect,
      "watchdog": g.watchdog, "daemon": g.run, "boot": g.boot}[a.action]()
     return 0

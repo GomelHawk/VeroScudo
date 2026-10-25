@@ -12,12 +12,15 @@ firewalls, so a careless merge can lock someone out of their own laptop.
    the safe order and restore the machine in a `finally` block.
 3. Keep "strict" strict: with the VPN on, a lost connection must never lead to raw internet
    unless the user turns the VPN off. No timers, no fallbacks, no rescue buttons.
+4. Answer the hardening checklist in `docs/SECURITY.md` (fail closed? who can influence the input?
+   every permit scoped?) in the PR description.
 
 ## Development
 
 - Windows: PowerShell 5.1 compatible (ships with Windows). Unit tests use Pester 5 with
   mocked cmdlets (`windows/tests/`). `Invoke-ScriptAnalyzer -Path windows -Recurse` must be clean.
-- Linux: Python 3.10+. `cd linux && pip install -e '.[dev]' && pytest && ruff check .`
+- Linux and macOS share the Python package in `linux/` (backends: `firewall.py`+`nm.py` / `pf.py`+`scutil.py`).
+  Python 3.10+. `cd linux && pip install -e '.[dev]' && pytest && ruff check .`
 - CI runs both on every pull request. The real end-to-end tests cannot run in CI; run the
   local ones on your machine and paste the log into the PR.
 

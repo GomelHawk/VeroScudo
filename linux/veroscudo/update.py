@@ -3,13 +3,24 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 from . import __version__
 
 REPO = "GomelHawk/VeroScudo"
+RELEASES = f"https://github.com/{REPO}/releases/"
 _TAG = re.compile(r"^v?(\d+(?:\.\d+){1,3})$")
+
+
+def is_release_url(url: str) -> bool:
+    """Only this project's GitHub release pages may be opened from an update notice."""
+    try:
+        u = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return u.scheme == "https" and u.netloc == "github.com" and url.startswith(RELEASES) and "@" not in u.netloc
 
 
 def _tuple(v: str) -> tuple[int, ...]:
@@ -40,6 +51,7 @@ def fetch_latest(repo: str = REPO, timeout: float = 10.0) -> Release | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             j = json.load(r)
-        return Release(tag=str(j["tag_name"]), url=str(j["html_url"]))
+        rel = Release(tag=str(j["tag_name"]), url=str(j["html_url"]))
+        return rel if is_release_url(rel.url) else None
     except Exception:  # noqa: BLE001 - any network/parse problem just means "no notice this time"
         return None

@@ -15,7 +15,17 @@ sudo ./install.sh            # asks for the NetworkManager connection name, inst
 veroscudo on                 # connect + protect     (sudoers drop-in lets your user run on/off)
 veroscudo status
 veroscudo off                # deliberately off -> raw internet
+veroscudo profiles           # configured profiles, * = active
+sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 ```
+
+More profiles: add entries to the `"profiles"` list in `/etc/veroscudo/config.json` (see
+`../docs/ARCHITECTURE.md`); the tray shows them under *VPN profile*.
+
+What it guarantees: an nftables table with `policy drop` output and forward chains - a drop
+there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel is down and only
+from `systemd-resolved` (or only to the resolvers in `resolv.conf`); the tunnel is allowed only by
+its own virtual interface, never the Wi-Fi/Ethernet card; the ruleset is re-checked every 15 s.
 
 **Status: beta.** The state machine and the nftables ruleset are unit-tested; the daemon has
 not yet been through the real-machine tests on Ubuntu (see `tests-local/`). Treat it as a

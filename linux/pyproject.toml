@@ -28,5 +28,8 @@ include = ["veroscudo*"]
 line-length = 110
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = ["E702"]     # one-line GTK widget setup in tray.py (and compact test asserts) is the house style
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

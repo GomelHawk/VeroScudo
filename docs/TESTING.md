@@ -4,8 +4,8 @@
 
 | Layer | Where | Runs in CI | What it pins |
 |---|---|---|---|
-| Unit (Windows) | `windows/tests/` (Pester 5) | yes | config defaults/validation, the decision table, the allow-list shape, flag/log plumbing |
-| Unit (Linux) | `linux/tests/` (pytest) | yes | same, plus the rendered nftables ruleset (policy drop, scoped accepts, forward chain) |
+| Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | config defaults/validation, the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports), struct layout of the native helper, sync/fail-closed, profile switching, lock, update URLs |
+| Unit (Linux/macOS) | `linux/tests/` (pytest) | yes | same, plus the rendered nftables and pf rulesets, tunnel-interface checks, the guard's event handling and switching with fakes |
 | Lint | PSScriptAnalyzer, ruff, shellcheck | yes | |
 | Real machine | `windows/tests-local/` | **no** | the actual firewall, VPN and scheduled tasks |
 
@@ -27,11 +27,46 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
    - server unblocked → must reconnect by itself with the kill-switch still on;
    - `Off` task → raw internet; `On` task → protected;
    - `rasdial /disconnect` (same as the Settings UI, RAS 631) → disarmed; `On` → protected.
+   - new in 1.1: a firewall *allow* rule for the probing PowerShell (1.0 leaked through rules like it),
+     TCP 53 and IPv6 probes, a DNS query to the LAN resolver while protected (must fail), a forged
+     RAS 631 while up (must be ignored), the firewall default forced to Allow mid-outage, all filters
+     deleted mid-outage (watchdog must restore them within 30 s), a profile switch when 2+ are configured.
 
-Expected: every leak probe `False` while blocked, `dns=True` (documented), `outbound=Block`
+Expected: every leak probe `False` while blocked, `dns=True` (documented), filters present
 throughout, all phases `PASS`.
 
 ## Record of the last full run
+
+2026-10-26, Windows 11 (26200), SSTP profile, 1.1.0 (WFP engine) installed over 1.0.0, through the real tasks:
+
+```
+Pester (Windows PowerShell 5.1)                  90 passed
+Test-Offline  1 hang-up disarms                  PASS  (2.1 s)
+              2 redial under kill-switch         PASS  (77 leak probes while down, 0 leaks; up in 2.8 s)
+Test-Live     0 no DNS leak while protected      PASS
+              0 forged 631 ignored               PASS
+              1 strict outage                    PASS  (3 min; tcp443/80/53, ping, WSL all False every 15 s - from a
+                                                        PowerShell with its own firewall allow rule; firewall default
+                                                        forced to Allow mid-outage; watchdog triggered)
+              2 self-heal                        PASS  (all filters deleted -> restored in 2 s)
+              1 auto-recover                     PASS  (tunnel back 6 s after the server was reachable)
+              4 off / 4 on / 5 manual disconnect / 5 on   PASS
+WSL while off                                    301 (internet) - after the fix below
+Test-Upgrade  v1.0.0 (GitHub) -> 1.1.0, twice    PASS  (49 checks; no VPN drop; config converted and restored)
+```
+
+The IPv6 probe was `False` even while off: that network has no IPv6, so IPv6 blocking is covered by the
+unit tests only.
+
+Bugs this run found (all fixed before the record above): the 1.0 -> 1.1 migration removed the old allow
+rules before restoring the firewall default (the VPN dropped once, RAS 829); the filters waited for a DNS
+lookup that the filters in force blocked (23 s idle after a drop, 12 s after a reconnect); a crash when no DNS
+server was known yet; one watchdog started per minute because the launcher returned at once; a disarm could
+finish after a parallel re-arm and leave it without filters; the saved "original" WSL setting could be
+VeroScudo's own Block, leaving WSL offline while VeroScudo was off. `Test-Offline`/`Test-Reconnect` raced the
+always-on watchdog and were rewritten to drive the scheduled tasks.
+
+### 1.0.0 run
 
 2026-10-23, Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
 

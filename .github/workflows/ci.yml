@@ -5,12 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+# read-only token: CI never needs to write anything
+permissions:
+  contents: read
+
 jobs:
   windows:
     name: Windows (Pester + PSScriptAnalyzer)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install Pester and PSScriptAnalyzer
         shell: pwsh
         run: |
@@ -23,9 +29,10 @@ jobs:
           $r = Invoke-ScriptAnalyzer -Path windows -Recurse -Settings windows/PSScriptAnalyzerSettings.psd1
           $r | Format-Table -AutoSize
           if ($r | Where-Object Severity -in 'Error','Warning') { throw "PSScriptAnalyzer found $($r.Count) issue(s)" }
-      - name: Unit tests
-        shell: pwsh
+      - name: Unit tests (Windows PowerShell 5.1, the runtime the guard uses)
+        shell: powershell
         run: |
+          Import-Module Pester -MinimumVersion 5.5
           $cfg = New-PesterConfiguration
           $cfg.Run.Path = 'windows/tests'
           $cfg.Run.Exit = $true
@@ -33,18 +40,20 @@ jobs:
           $cfg.TestResult.Enabled = $true
           $cfg.TestResult.OutputPath = 'TestResults.xml'
           Invoke-Pester -Configuration $cfg
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: pester-results
           path: TestResults.xml
 
   linux:
-    name: Linux (pytest + shellcheck)
+    name: Linux + macOS backends (pytest + ruff + shellcheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
       - name: Install
@@ -61,4 +70,4 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck linux/*.sh
+          shellcheck linux/*.sh macos/*.sh

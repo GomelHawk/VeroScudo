@@ -37,8 +37,8 @@ def main() -> int:
     from gi.repository import AyatanaAppIndicator3 as AppIndicator  # type: ignore
     from gi.repository import GLib, Gtk
 
-    cfg = Config.load()
     store = StateStore()
+    cfg = Config.load(active=store.active)
     ind = AppIndicator.Indicator.new("veroscudo", str(ICONS / "off.png"), AppIndicator.IndicatorCategory.APPLICATION_STATUS)
     ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
     menu = Gtk.Menu()
@@ -46,6 +46,24 @@ def main() -> int:
     menu.append(Gtk.SeparatorMenuItem())
     on_item = Gtk.MenuItem(label="Turn VPN on"); on_item.connect("activate", lambda *_: subprocess.Popen(["sudo", "-n", "veroscudo", "on"])); menu.append(on_item)
     off_item = Gtk.MenuItem(label="Turn VPN off"); off_item.connect("activate", lambda *_: subprocess.Popen(["sudo", "-n", "veroscudo", "off"])); menu.append(off_item)
+    prof_item = Gtk.MenuItem(label="VPN profile"); prof_menu = Gtk.Menu(); prof_item.set_submenu(prof_menu); menu.append(prof_item)
+    shown = {"active": None}
+
+    def fill_profiles(active: str) -> None:
+        for child in prof_menu.get_children():
+            prof_menu.remove(child)
+        group = None
+        for name in cfg.names:
+            it = Gtk.RadioMenuItem.new_with_label_from_widget(group, name)
+            group = group or it
+            it.set_active(name == active)
+            # the switch itself runs as root (sudoers: veroscudo use *); the name is checked there against config.json
+            it.connect("toggled", lambda w, n=name: w.get_active() and n != shown["active"] and subprocess.Popen(["sudo", "-n", "veroscudo", "use", n]))
+            prof_menu.append(it)
+        prof_item.set_label(f"VPN profile: {active}")
+        prof_menu.show_all()
+        shown["active"] = active
+    fill_profiles(cfg.profile)
     menu.append(Gtk.SeparatorMenuItem())
     st_item = Gtk.MenuItem(label="Status…"); st_item.connect("activate", lambda *_: subprocess.Popen(["x-terminal-emulator", "-e", "sh", "-c", "veroscudo status; read -p 'Enter to close' _"])); menu.append(st_item)
     upd_item = Gtk.MenuItem(label="Check for updates"); menu.append(upd_item)
@@ -80,7 +98,7 @@ def main() -> int:
 
     def on_update_click(*_):
         check_updates(force=True)
-        if latest["rel"]:
+        if latest["rel"] and update.is_release_url(latest["rel"].url):
             subprocess.Popen(["xdg-open", latest["rel"].url])
     upd_item.connect("activate", on_update_click)
     quit_item = Gtk.MenuItem(label="Exit tray (guard keeps running)"); quit_item.connect("activate", Gtk.main_quit); menu.append(quit_item)
@@ -88,6 +106,12 @@ def main() -> int:
     last = {"state": None}
 
     def refresh():
+        nonlocal cfg
+        active = store.active
+        if active in cfg.names and active != cfg.profile:
+            cfg = cfg.with_active(active)
+        if cfg.profile != shown["active"]:
+            fill_profiles(cfg.profile)
         armed, up = store.armed, nm.is_connected(cfg.profile)
         state = "off" if not armed else ("protected" if up else "blocked")
         if state != last["state"]:

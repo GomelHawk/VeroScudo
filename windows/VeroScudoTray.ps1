@@ -62,6 +62,7 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var r = e.TextRectangle; r.X += S(10); r.Width = e.Item.Width - r.X - S(10);
         TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Enabled ? t.Text : t.Sub, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding); }
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor = e.Item != null && e.Item.Enabled ? t.Text : t.Sub; base.OnRenderArrow(e); }
     int S(double v) { return (int)Math.Round(v * scale); }
     static GraphicsPath Round(Rectangle r, int d) { var p = new GraphicsPath(); p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90); p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); p.CloseFigure(); return p; }
 
@@ -87,6 +88,8 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
                 case "sync": g.DrawArc(pen, 2.5f, 2.5f, 11, 11, 200, 230); g.FillPolygon(br, new[] { new PointF(13.8f, 2.2f), new PointF(14.2f, 7.2f), new PointF(9.6f, 5.4f) }); break;
                 case "help": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawArc(pen, 5.6f, 4.6f, 4.8f, 4.4f, 200, 230); g.DrawLine(pen, 8, 8.6f, 8, 10f); g.FillEllipse(br, 7.1f, 11.2f, 1.8f, 1.8f); break;
                 case "power": g.DrawArc(pen, 2.5f, 3, 11, 11, -60, 300); g.DrawLine(pen, 8, 1.5f, 8, 7.5f); break;
+                case "check": g.DrawLines(pen, new[] { new PointF(3, 8.5f), new PointF(6.5f, 12), new PointF(13, 4.5f) }); break;
+                case "globe": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawEllipse(pen, 5.2f, 2, 5.6f, 12); g.DrawLine(pen, 2, 8, 14, 8); break;
             }
         }
         g.Restore(st);
@@ -108,7 +111,16 @@ $global:Last    = $null
 $global:Icons   = @{}
 $global:Images  = @{}
 $global:Update  = $null
-$global:UpdateFile = Join-Path $global:Paths.State 'update.json'
+$global:UpdateFile = $global:Paths.UpdateFile                         # per user: the state folder is read-only for the tray
+$global:ConfigStamp = ''
+function Update-ConfigCache {
+    <# Re-reads config.json when it or the active-profile selection (written by the guard on a switch) changed. #>
+    $stamp = (@($global:Paths.Config, $global:Paths.ActiveProfile) | ForEach-Object { if (Test-Path $_) { (Get-Item $_).LastWriteTimeUtc.Ticks } else { 0 } }) -join '/'
+    if ($stamp -eq $global:ConfigStamp) { return $false }
+    $global:ConfigStamp = $stamp
+    try { $global:Config = Get-VeroConfig } catch { Write-Verbose "config: $($_.Exception.Message)" }
+    $true
+}
 $global:Dark    = $true
 try { $global:Dark = ((Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction Stop).AppsUseLightTheme -ne 1) } catch { Write-Verbose 'theme key missing' }
 $global:TaskbarDark = $true
@@ -162,13 +174,14 @@ function Get-StateImage([string]$state, [int]$size) {
 function Get-State {
     if (-not $global:Config) { return [pscustomobject]@{ State = 'attention'; Title = 'Not configured'; Text = 'Run Install.ps1 to create config.json'; Armed = $false; Connected = $false } }
     $armed = Test-VeroArmed; $up = Test-VeroVpnConnected $global:Config.Profile
-    $cred = Test-Path $global:Paths.Cred
+    $cp = Get-VeroPath -VpnProfile $global:Config.Profile
+    $cred = (Test-Path $cp.Cred) -or (Test-Path $cp.LegacyCred)
     $state = if (-not $cred) { 'attention' } elseif (-not $armed) { 'off' } elseif ($up) { 'protected' } else { 'blocked' }
     $title, $text = switch ($state) {
         'protected' { 'Protected', "$($global:Config.Profile) connected - kill-switch on" }
         'blocked'   { 'Blocked - reconnecting', "$($global:Config.Profile) lost - nothing leaves this PC until it is back" }
         'off'       { 'Off', 'VPN turned off by you - normal network, not protected' }
-        default     { 'Attention', 'VPN password not stored - open Settings' }
+        default     { 'Attention', "VPN password for '$($global:Config.Profile)' not stored - open Settings" }
     }
     [pscustomobject]@{ State = $state; Title = $title; Text = $text; Armed = $armed; Connected = $up }
 }
@@ -259,53 +272,113 @@ function Show-Status {
 }
 
 # ---------------------------------------------------------------- settings window
+function Read-Password([string]$who) {
+    <# Small modal: returns a SecureString or $null. #>
+    $pf = New-Form 'VPN password' 360 150
+    New-Label $pf "Password for $who (stored encrypted for your Windows account)" 20 16 320 36 $FontSmall $global:Theme.Sub | Out-Null
+    $tp = New-Input $pf 20 58 320 '' $true
+    $ok = New-Button $pf 'Save' 230 100 110 $true
+    $result = @{ Value = $null }
+    $ok.Add_Click(({ $sec = New-Object System.Security.SecureString; foreach ($ch in $tp.Text.ToCharArray()) { $sec.AppendChar($ch) }; $sec.MakeReadOnly(); $tp.Text = ''; $result.Value = $sec; $pf.Close() }).GetNewClosure())
+    $pf.ShowDialog() | Out-Null
+    $result.Value
+}
+
+function Edit-VpnProfile($entry) {
+    <# Modal editor for one profile entry; returns the edited entry or $null (cancel). #>
+    $ef = New-Form 'VPN profile' 420 300
+    New-Label $ef 'Windows VPN profile' 20 16 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $cb = New-Object System.Windows.Forms.ComboBox; $cb.Location = (P 20 36); $cb.Size = (Z 380 30); $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $global:Theme.Bg; $cb.ForeColor = $global:Theme.Text; $cb.Font = $FontUI
+    $names = @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    if ($entry -and $names -notcontains $entry.Profile) { $names += $entry.Profile }
+    $names | ForEach-Object { [void]$cb.Items.Add($_) }
+    if ($entry) { $cb.SelectedItem = $entry.Profile } elseif ($names.Count -gt 0) { $cb.SelectedIndex = 0 }
+    $ef.Controls.Add($cb)
+    New-Label $ef 'Server host name' 20 80 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $tServer = New-Input $ef 20 100 290 $(if ($entry) { $entry.Server } else { '' })
+    New-Label $ef 'Port' 320 80 60 18 $FontSmall $global:Theme.Sub | Out-Null
+    $tPort = New-Input $ef 320 100 80 $(if ($entry) { [string]$entry.Port } else { '443' })
+    New-Label $ef 'Username' 20 144 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $tUser = New-Input $ef 20 164 380 $(if ($entry) { $entry.Username } else { '' })
+    $res = @{ Value = $null }
+    $bOk = New-Button $ef 'OK' 290 240 110 $true; $bCancel = New-Button $ef 'Cancel' 170 240 110
+    $bCancel.Add_Click(({ $ef.Close() }).GetNewClosure())
+    $bOk.Add_Click(({
+        $port = 0
+        if (-not $cb.SelectedItem -or -not $tServer.Text.Trim() -or -not $tUser.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [System.Windows.Forms.MessageBox]::Show('Profile, server, port and username are required.', 'VeroScudo') | Out-Null; return }
+        $pins = if ($entry) { @($entry.ServerIps) } else { @() }
+        $res.Value = [pscustomobject]@{ Profile = [string]$cb.SelectedItem; Server = $tServer.Text.Trim(); Port = $port; Username = $tUser.Text.Trim(); ServerIps = $pins }
+        $ef.Close()
+    }).GetNewClosure())
+    $ef.ShowDialog() | Out-Null
+    $res.Value
+}
+
+function Save-ConfigElevated([string]$json) {
+    <# The tray runs without admin rights: config.json is written by an elevated PowerShell (UAC prompt) that validates it
+       again. The JSON travels Base64-encoded inside -EncodedCommand - no temp file another process could swap. #>
+    $null = Get-VeroConfig -Raw $json                                       # validate here first for a readable error
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
+    $script = "try { Import-Module '$mod' -Force; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
+    if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
+}
+
 $global:SettingsForm = $null
 function Show-Settings {
     if ($global:SettingsForm -and -not $global:SettingsForm.IsDisposed) { $global:SettingsForm.Activate(); return }
-    $f = New-Form 'VeroScudo settings' 520 560
-    New-Label $f 'VPN' 20 16 200 22 $FontBold | Out-Null
-    $card = New-Card $f 20 42 480 196
-    New-Label $card 'Windows VPN profile' 12 10 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $cbProfile = New-Object System.Windows.Forms.ComboBox; $cbProfile.Location = (P 12 30); $cbProfile.Size = (Z 452 30); $cbProfile.DropDownStyle = 'DropDownList'; $cbProfile.FlatStyle = 'Flat'; $cbProfile.BackColor = $global:Theme.Bg; $cbProfile.ForeColor = $global:Theme.Text; $cbProfile.Font = $FontUI
-    $profiles = @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
-    if ($global:Config -and $profiles -notcontains $global:Config.Profile) { $profiles += $global:Config.Profile }
-    $profiles | ForEach-Object { [void]$cbProfile.Items.Add($_) }
-    if ($global:Config) { $cbProfile.SelectedItem = $global:Config.Profile }
-    $card.Controls.Add($cbProfile)
-    New-Label $card 'Server host name' 12 70 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tServer = New-Input $card 12 90 300 $(if ($global:Config) { $global:Config.Server } else { '' })
-    New-Label $card 'Port' 324 70 60 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tPort = New-Input $card 324 90 70 $(if ($global:Config) { [string]$global:Config.Port } else { '443' })
-    New-Label $card 'Username' 12 130 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tUser = New-Input $card 12 150 300 $(if ($global:Config) { $global:Config.Username } else { '' })
-    $bPw = New-Button $card 'Set password...' 324 148 140
+    $f = New-Form 'VeroScudo settings' 520 600
+    New-Label $f 'VPN profiles' 20 16 200 22 $FontBold | Out-Null
+    $card = New-Card $f 20 42 480 236
+    $work = New-Object System.Collections.ArrayList
+    if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add($pr) } }
+    $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }) }
+    $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 300 210); $lb.BorderStyle = 'FixedSingle'
+    $lb.BackColor = $global:Theme.Bg; $lb.ForeColor = $global:Theme.Text; $lb.Font = $FontUI; $lb.IntegralHeight = $false
+    $card.Controls.Add($lb)
+    $fill = ({
+        $sel = $lb.SelectedIndex; $lb.Items.Clear()
+        foreach ($pr in $work) {
+            $cred = [bool](Get-VeroCredential -Config $pr)
+            $mark = if ($pr.Profile -eq $state.Default) { ' (default)' } else { '' }
+            [void]$lb.Items.Add(('{0}{1} - {2}{3}' -f $pr.Profile, $mark, $pr.Server, $(if ($cred) { '' } else { '  [no password]' })))
+        }
+        if ($lb.Items.Count -gt 0) { $lb.SelectedIndex = [Math]::Max(0, [Math]::Min($sel, $lb.Items.Count - 1)) }
+    }).GetNewClosure()
+    & $fill
+    $bAdd = New-Button $card 'Add...' 324 12 140; $bEdit = New-Button $card 'Edit...' 324 52 140; $bDel = New-Button $card 'Remove' 324 92 140
+    $bDef = New-Button $card 'Make default' 324 132 140; $bPw = New-Button $card 'Set password...' 324 188 140
+    $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [System.Windows.Forms.MessageBox]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
+    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Default -eq $work[$i].Profile) { $state.Default = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
+    $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile; $work.RemoveAt($i); if ($state.Default -eq $gone) { $state.Default = $work[0].Profile }; & $fill }).GetNewClosure())
+    $bDef.Add_Click(({ $i = $lb.SelectedIndex; if ($i -ge 0) { $state.Default = $work[$i].Profile; & $fill } }).GetNewClosure())
     $bPw.Add_Click(({
-        $pf = New-Form 'VPN password' 360 150
-        New-Label $pf "Password for $($tUser.Text) (stored encrypted for your Windows account)" 20 16 320 36 $FontSmall $global:Theme.Sub | Out-Null
-        $tp = New-Input $pf 20 58 320 '' $true
-        $ok = New-Button $pf 'Save' 230 100 110 $true
-        $ok.Add_Click(({ $sec = New-Object System.Security.SecureString; foreach ($ch in $tp.Text.ToCharArray()) { $sec.AppendChar($ch) }; New-Item -ItemType Directory -Path (Split-Path $global:Paths.Cred -Parent) -Force | Out-Null
-            New-Object System.Management.Automation.PSCredential($tUser.Text, $sec) | Export-Clixml $global:Paths.Cred; $pf.Close() }).GetNewClosure())
-        $pf.ShowDialog() | Out-Null
+        $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = $work[$i]
+        $sec = Read-Password "$($e.Username) ($($e.Profile))"
+        if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
+                    New-Object System.Management.Automation.PSCredential($e.Username, $sec) | Export-Clixml $cp.Cred; & $fill }
     }).GetNewClosure())
-    New-Label $f 'Behaviour' 20 252 200 22 $FontBold | Out-Null
-    $card2 = New-Card $f 20 278 480 150
+    New-Label $f 'Behaviour' 20 292 200 22 $FontBold | Out-Null
+    $card2 = New-Card $f 20 318 480 150
     $chkStrict = New-Object System.Windows.Forms.CheckBox; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
     $chkVm = New-Object System.Windows.Forms.CheckBox; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
     $chkWifi = New-Object System.Windows.Forms.CheckBox; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
     $chkUpd = New-Object System.Windows.Forms.CheckBox; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
-    New-Label $f 'Saving writes config.json (administrator prompt). Changes apply the next time the VPN is armed.' 20 440 480 36 $FontSmall $global:Theme.Sub | Out-Null
-    $bCancel = New-Button $f 'Cancel' 270 500 110
-    $bSave   = New-Button $f 'Save' 390 500 110 $true
+    New-Label $f 'Passwords are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 480 480 36 $FontSmall $global:Theme.Sub | Out-Null
+    $bCancel = New-Button $f 'Close' 270 540 110
+    $bSave   = New-Button $f 'Save' 390 540 110 $true
     $bCancel.Add_Click(({ $f.Close() }).GetNewClosure())
     $bSave.Add_Click(({
-        if (-not $cbProfile.SelectedItem -or -not $tServer.Text -or -not $tUser.Text) { [System.Windows.Forms.MessageBox]::Show('Profile, server and username are required.', 'VeroScudo') | Out-Null; return }
-        $cfg = [ordered]@{ vpn = [ordered]@{ profile = [string]$cbProfile.SelectedItem; server = $tServer.Text.Trim(); port = [int]$tPort.Text; username = $tUser.Text.Trim() }
-                           retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
-                           wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() })) }
-        $tmp = Join-Path $env:TEMP 'veroscudo-config.json'; ($cfg | ConvertTo-Json -Depth 5) | Set-Content $tmp -Encoding UTF8
-        $cmd = "Copy-Item -LiteralPath '$tmp' -Destination '$($global:Paths.Config)' -Force"
-        try { Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList "-NoProfile -WindowStyle Hidden -Command `"$cmd`""; $global:Config = Get-VeroConfig; $f.Close() }
+        if ($work.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
+        $json = [ordered]@{
+            profiles = @($work | ForEach-Object { $o = [ordered]@{ profile = $_.Profile; server = $_.Server; port = $_.Port; username = $_.Username }; if (@($_.ServerIps).Count -gt 0) { $o.serverIps = @($_.ServerIps) }; $o })
+            activeProfile = $state.Default
+            retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
+            wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
+        } | ConvertTo-Json -Depth 6
+        try { Save-ConfigElevated $json; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close() }
         catch { [System.Windows.Forms.MessageBox]::Show("Not saved: $($_.Exception.Message)", 'VeroScudo') | Out-Null }
     }).GetNewClosure())
     $global:SettingsForm = $f
@@ -342,16 +415,41 @@ $mHead = Add-MenuItem 'VeroScudo' $null $null; $mHead.Enabled = $false; $mHead.F
 $menu.Items.Add('-') | Out-Null
 $mOn   = Add-MenuItem 'Turn VPN on'  'play' { Invoke-GuardTask 'On' }   
 $mOff  = Add-MenuItem 'Turn VPN off' 'stop' { Invoke-GuardTask 'Off' }  
+$mProf = Add-MenuItem 'VPN profile' 'globe' $null
+$mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Card; $mProf.DropDown.ForeColor = $global:Theme.Text
+$mProf.DropDown.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 6)
+$mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
+function Request-ProfileSwitch([string]$name) {
+    <# The switch itself runs in the elevated Switch task; the tray only names the profile (checked there against config.json). #>
+    New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null
+    Set-Content -Path $global:Paths.SwitchRequest -Value $name -Encoding UTF8
+    Invoke-GuardTask 'Switch'
+    $notify.ShowBalloonTip(4000, 'VeroScudo', "Switching to '$name'$(if (Test-VeroArmed) { ' - traffic stays blocked until it is connected' })", [System.Windows.Forms.ToolTipIcon]::Info)
+}
+function Update-ProfileMenu {
+    $mProf.DropDownItems.Clear()
+    if (-not $global:Config) { $mProf.Enabled = $false; return }
+    $mProf.Enabled = $true
+    $mProf.Text = "VPN profile: $($global:Config.Profile)"
+    foreach ($pr in $global:Config.Profiles) {
+        $it = $mProf.DropDownItems.Add($pr.Profile)
+        $it.Padding = New-Object System.Windows.Forms.Padding(0, 7, 12, 7); $it.Image = $blankImage; $it.ImageScaling = 'None'
+        $it.Tag = if ($pr.Profile -eq $global:Config.Profile) { 'check' } else { '' }
+        $name = $pr.Profile
+        $it.Add_Click(({ if ($name -ne $global:Config.Profile) { Request-ProfileSwitch $name } }).GetNewClosure())
+    }
+}
 $menu.Items.Add('-') | Out-Null
 $null = Add-MenuItem 'Status'       'info' { Show-Status | Out-Null }  
 $null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }
 $null = Add-MenuItem 'Settings'     'gear' { Show-Settings | Out-Null }
 $menu.Items.Add('-') | Out-Null
-$mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force; if ($global:Update) { Start-Process $global:Update.Url } else { $notify.ShowBalloonTip(4000, 'VeroScudo', "You have the latest version ($(Get-VeroVersion)).", [System.Windows.Forms.ToolTipIcon]::Info) } }
+$mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force; if ($global:Update -and (Test-VeroReleaseUrl $global:Update.Url)) { Start-Process $global:Update.Url } else { $notify.ShowBalloonTip(4000, 'VeroScudo', "You have the latest version ($(Get-VeroVersion)).", [System.Windows.Forms.ToolTipIcon]::Info) } }
 $null = Add-MenuItem 'About VeroScudo' 'help' { Show-About | Out-Null }
 $null = Add-MenuItem 'Exit tray (guard keeps running)' 'power' { $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() }
 # size every item from the widest label (ToolStrip ignores padding when measuring) : icon column 42 + text + 24
 $notify.ContextMenuStrip = $menu
+Update-ConfigCache | Out-Null; Update-ProfileMenu
 $notify.Add_MouseClick({ param($src, $e) $null = $src; if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-Status | Out-Null } })
 
 function Invoke-UpdateCheck([switch]$Force) {
@@ -370,10 +468,11 @@ function Invoke-UpdateCheck([switch]$Force) {
             $info.notified = $rel.Tag
         }
     } else { $global:Update = $null; $mUpd.Text = 'Check for updates' }
-    $info | ConvertTo-Json | Set-Content $global:UpdateFile
+    try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; $info | ConvertTo-Json | Set-Content $global:UpdateFile } catch { Write-Verbose 'update.json not writable' }
 }
 
 function Refresh {
+    if (Update-ConfigCache) { Update-ProfileMenu }
     $st = Get-State
     $notify.Icon = Get-StateIcon $st.State
     $tip = "VeroScudo - $($st.Title)"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))

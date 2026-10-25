@@ -5,34 +5,91 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  package:
-    name: Build release archives
-    runs-on: ubuntu-latest
+  windows:
+    name: Windows archive (signed when a certificate is configured)
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Sign PowerShell scripts (Authenticode)
+        # optional: add the repository secrets SIGNING_PFX_BASE64 and SIGNING_PFX_PASSWORD to sign every script;
+        # users can then check them with Get-AuthenticodeSignature before running Install.ps1
+        shell: pwsh
+        env:
+          PFX: ${{ secrets.SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX) { Write-Host 'no signing certificate configured - scripts stay unsigned'; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX))
+          $cert = Get-PfxData -FilePath $pfx -Password (ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force)
+          $c = $cert.EndEntityCertificates[0]
+          Get-ChildItem windows -Recurse -Include *.ps1, *.psm1 | ForEach-Object {
+            $s = Set-AuthenticodeSignature -FilePath $_.FullName -Certificate $c -TimestampServer 'http://timestamp.digicert.com' -HashAlgorithm SHA256
+            if ($s.Status -ne 'Valid') { throw "signing failed: $($_.Name) $($s.StatusMessage)" }
+          }
+          Remove-Item $pfx -Force
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          $d = 'dist/VeroScudo-windows'
+          New-Item -ItemType Directory -Path "$d/icons" -Force | Out-Null
+          Copy-Item windows/*.ps1, windows/*.psm1, windows/*.cs, windows/run.vbs, windows/config.example.json $d
+          Copy-Item windows/tests-local $d -Recurse
+          Copy-Item assets/icons/png, assets/icons/badge, assets/icons/app "$d/icons" -Recurse
+          Copy-Item README.md, LICENSE, docs/ARCHITECTURE.md, docs/TESTING.md, docs/SECURITY.md $d
+          Compress-Archive -Path $d -DestinationPath "dist/VeroScudo-$v-windows.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-zip
+          path: dist/*.zip
+
+  release:
+    name: Linux + macOS archives, provenance, GitHub release
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release
+      id-token: write        # sign the build provenance (Sigstore)
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-zip
+          path: dist
       - name: Version from tag
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Windows archive
-        run: |
-          mkdir -p dist/VeroScudo-windows/icons
-          cp -r windows/*.ps1 windows/*.psm1 windows/run.vbs windows/config.example.json windows/tests-local dist/VeroScudo-windows/
-          cp -r assets/icons/png assets/icons/badge assets/icons/app dist/VeroScudo-windows/icons/
-          cp README.md LICENSE dist/VeroScudo-windows/
-          cp docs/ARCHITECTURE.md docs/TESTING.md dist/VeroScudo-windows/
-          (cd dist && zip -qr "VeroScudo-${{ steps.v.outputs.version }}-windows.zip" VeroScudo-windows)
       - name: Linux archive
         run: |
           mkdir -p dist/VeroScudo-linux/assets/icons
           cp -r linux/. dist/VeroScudo-linux/
           cp -r assets/icons/png dist/VeroScudo-linux/assets/icons/
-          cp README.md LICENSE docs/ARCHITECTURE.md dist/VeroScudo-linux/
+          cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-linux/
           (cd dist && tar -czf "VeroScudo-${{ steps.v.outputs.version }}-linux.tar.gz" VeroScudo-linux)
+      - name: macOS archive (alpha)
+        run: |
+          mkdir -p dist/VeroScudo-macos
+          cp -r macos dist/VeroScudo-macos/macos
+          cp -r linux dist/VeroScudo-macos/linux
+          cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-macos/
+          (cd dist && tar -czf "VeroScudo-${{ steps.v.outputs.version }}-macos-alpha.tar.gz" VeroScudo-macos)
       - name: Checksums
         run: (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
+      - name: Build provenance (verify with `gh attestation verify <file> --repo GomelHawk/VeroScudo`)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.tar.gz
       - name: Release notes from CHANGELOG.md
         run: |
           v='${{ steps.v.outputs.version }}'
@@ -44,7 +101,7 @@ jobs:
           if [ ! -s dist/notes.md ]; then echo "No CHANGELOG.md section for $v" >&2; exit 1; fi
           cat dist/notes.md
       - name: GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: VeroScudo ${{ steps.v.outputs.version }}
           body_path: dist/notes.md

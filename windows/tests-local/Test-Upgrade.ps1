@@ -44,7 +44,18 @@ if (-not $OldDir) {
 L "=== upgrade test: $OldTag ($OldDir) -> $NewVer ($NewSrc)"
 
 $armedBefore = Test-VeroArmed
+# a 1.0 installer only reads the 1.0 single-profile config: save the current file, hand the old installer what a real 1.0
+# user has, and put the saved file back at the end (overwritten in `finally`, never deleted)
+$cfgSaved = Join-Path $p.State 'config-before-upgrade-test.json'
+Copy-Item -LiteralPath $p.Config -Destination $cfgSaved -Force
 try {
+    if ((Get-Content $p.Config -Raw | ConvertFrom-Json).PSObject.Properties['profiles']) {
+        $c = Get-VeroConfig
+        [ordered]@{ vpn = [ordered]@{ profile = $c.Profile; server = $c.Server; port = $c.Port; username = $c.Username }
+                    retrySeconds = $c.RetrySeconds; vm = $c.Vm; wifiRecoveryFix = $c.WifiRecoveryFix; updateCheck = $c.UpdateCheck
+                    lanAllow = @($c.LanAllow) } | ConvertTo-Json -Depth 5 | Set-Content $p.Config -Encoding UTF8
+        L "   config written in the 1.0 format for the old installer (current one saved: $cfgSaved)"
+    }
     L '1. install the previous release'; Install-From $OldDir; Start-Sleep 3
     L "   trays running after old install: $(@(Get-Tray).Count)"
 
@@ -56,24 +67,32 @@ try {
         Check 'tray is the new one' (@($trays | Where-Object { $_.CreationDate -ge $t0 }).Count -eq $trays.Count -and $trays.Count -gt 0)
         $ver = (Select-String -Path (Join-Path $InstallDir 'VeroScudo.Core.psm1') -Pattern "^\`$script:Version\s*=\s*'(.+)'").Matches.Groups[1].Value
         Check 'installed version' ($ver -eq $NewVer) "($ver)"
-        foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1') {
+        foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1') {
             Check "file $f up to date" ((Get-FileHash (Join-Path $InstallDir $f)).Hash -eq (Get-FileHash (Join-Path $NewSrc $f)).Hash)
         }
+        Check 'native helper compiled' (Test-Path (Join-Path $InstallDir 'VeroScudo.Native.dll'))
+        Check 'kill-switch matches the on/off state' (((Get-VeroWfpCount) -gt 0) -eq $armedBefore) "(filters $(Get-VeroWfpCount))"
+        Check 'no 1.0 firewall rules left' (-not (Get-NetFirewallRule -Group VeroScudo -ErrorAction SilentlyContinue))
+        Check 'tray runs without admin rights' ((Get-ScheduledTask -TaskPath '\VeroScudo\' -TaskName Tray).Principal.RunLevel -eq 'Limited')
+        $acl = (Get-Acl $p.Home).Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -in 'S-1-5-32-545', 'S-1-5-11', 'S-1-1-0' -and $_.FileSystemRights -match 'Write|Modify|FullControl|CreateFiles' }
+        Check 'state folder not writable by users' (-not $acl)
         $icons = Join-Path $InstallDir 'icons'
         Check 'no nested icons\icons' (-not (Test-Path (Join-Path $icons 'icons')))
         foreach ($i in 'app\app.ico', 'app\app-128.png', 'png\protected.ico', 'badge\protected.ico', 'png\protected-64.png') {
             Check "icon $i" (Test-Path (Join-Path $icons $i))
         }
         $tasks = @(@(Get-ScheduledTask -TaskPath '\VeroScudo\' -ErrorAction SilentlyContinue).TaskName)
-        Check 'scheduled tasks' (-not (Compare-Object $tasks @('Connected', 'Off', 'On', 'Terminated', 'Tray', 'Watchdog'))) "($($tasks -join ','))"
+        Check 'scheduled tasks' (-not (Compare-Object $tasks @('Connected', 'Off', 'On', 'Switch', 'Terminated', 'Tray', 'Watchdog'))) "($($tasks -join ','))"
         Check 'VPN on/off state unchanged' ((Test-VeroArmed) -eq $armedBefore)
+        Check 'config is in the profiles format' ([bool](Get-Content $p.Config -Raw | ConvertFrom-Json).PSObject.Properties['profiles'])
     }
     $missing = Select-String -Path $p.Log -Pattern 'WARNING: missing' -SimpleMatch -ErrorAction SilentlyContinue | Where-Object { [datetime]::ParseExact($_.Line.Substring(0, 19), 'yyyy-MM-dd HH:mm:ss', $null) -ge $t0 }
     Check 'tray logged no missing assets' (-not $missing) "$(@($missing).Count) warning(s)"
 } catch {
     $fails.Add("exception: $($_.Exception.Message)"); L "   ERROR $($_.Exception.Message)"
 } finally {
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $cfgSaved -Destination $p.Config -Force; L "   config restored from $cfgSaved"
+    if ($tmp -like "$env:TEMP\veroscudo-upgrade-*") { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     L ''
     L '=== VERDICT'
     L "upgrade $OldTag -> $NewVer : $(if ($fails.Count) { "FAIL ($($fails -join '; '))" } else { 'PASS' })"
