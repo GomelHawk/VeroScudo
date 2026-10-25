@@ -20,7 +20,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "iface", lambda p: "tun0" if p in connected else None)
     monkeypatch.setattr(nm, "resolve", lambda s: ["203.0.113.5"])
     monkeypatch.setattr(nm, "resolver_uid", lambda: 101)
-    monkeypatch.setattr(nm, "nameservers", lambda: [])
+    monkeypatch.setattr(nm, "nameservers", list)
 
     def up(p):
         calls["up"].append(p)
@@ -47,14 +47,14 @@ def test_reported_down_but_still_connected_is_ignored(env):
 
 
 def test_down_of_a_profile_that_is_not_active_is_ignored(env):
-    g, calls, connected = env
+    g, calls, _ = env
     g.arm()
     g.on_event_down("Backup", user_requested=True)
     assert g.store.armed and calls["clear"] == 0
 
 
 def test_user_hang_up_of_the_active_profile_disarms(env):
-    g, calls, connected = env
+    g, calls, _ = env
     g.arm()
     g.on_event_down("Work", user_requested=True)
     assert not g.store.armed and calls["clear"] == 1
@@ -74,26 +74,26 @@ def test_switch_while_armed_stays_blocked_and_dials_the_new_profile(env):
 
 
 def test_switch_while_off_only_selects(env):
-    g, calls, connected = env
+    g, calls, _ = env
     g.use("Backup")
     assert g.store.active == "Backup" and calls["up"] == [] and calls["apply"] == []
 
 
 def test_switch_to_an_unknown_profile_is_refused(env):
-    g, calls, connected = env
+    g, _, _ = env
     with pytest.raises(ValueError):
         g.use("Planted")
 
 
 def test_connecting_another_configured_profile_makes_it_active(env):
-    g, calls, connected = env
+    g, _, connected = env
     connected.add("Backup")
     g.on_event_up("Backup")
     assert g.store.active == "Backup" and g.store.armed
 
 
 def test_connecting_an_unconfigured_vpn_is_ignored(env):
-    g, calls, connected = env
+    g, calls, _ = env
     g.on_event_up("Someone-else")
     assert not g.store.armed and calls["apply"] == []
 
@@ -111,7 +111,7 @@ def test_watchdog_reapplies_a_flushed_table(env, monkeypatch):
 
 
 def test_server_cache_merges_and_survives_a_failed_lookup(env, monkeypatch):
-    g, calls, connected = env
+    g, _, _ = env
     assert g.server_ips(g.cfg) == ["203.0.113.5"]
     monkeypatch.setattr(nm, "resolve", lambda s: [])
     assert g.server_ips(g.cfg) == ["203.0.113.5"]           # blocked + DNS failing: the last known address still works
@@ -120,7 +120,7 @@ def test_server_cache_merges_and_survives_a_failed_lookup(env, monkeypatch):
 
 
 def test_lock_is_exclusive(env):
-    g, calls, connected = env
+    g, _, _ = env
     assert g.store.take_lock()
     assert not g.store.take_lock()
     g.store.release_lock()

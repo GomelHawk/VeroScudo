@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 
 if sys.platform == "darwin":
-    from . import pf as firewall  # noqa: F401
-    from . import scutil as nm  # noqa: F401
+    from . import pf as firewall
+    from . import scutil as nm
 else:
-    from . import firewall  # noqa: F401
-    from . import nm  # noqa: F401
+    from . import firewall, nm
+
+__all__ = ["firewall", "nm"]          # re-exported: daemon.py and cli.py import them from here

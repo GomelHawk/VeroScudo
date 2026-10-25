@@ -13,7 +13,7 @@ authors = [{ name = "Dmitry Koshelenko (GomelHawk)" }]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = ["pytest>=8", "ruff==0.17.2"]     # ruff pinned: its default rules change between releases (Dependabot bumps it)
 
 [project.scripts]
 veroscudo = "veroscudo.cli:main"

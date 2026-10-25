@@ -127,7 +127,7 @@ class Config:
         names = [p.name for p in profiles]
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
-            raise ValueError(f"config.json: profile '{sorted(dupes)[0]}' is listed twice")
+            raise ValueError(f"config.json: profile '{min(dupes)}' is listed twice")
         vm = j.get("vm", "auto")
         if vm not in ("auto", True, False):
             raise ValueError("config.json: vm must be 'auto', true or false")
