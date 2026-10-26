@@ -3,6 +3,20 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
+## [Unreleased]
+
+### Windows
+- **Keep awake** in the tray menu: stops the PC from sleeping (also behind a locked screen) while ticked; the
+  screen may still turn off. One power request, visible in `powercfg /requests`, released on *Exit tray* or
+  if the tray dies. The choice is remembered per user. Menu spacing now follows display scaling and the
+  header shows the logo.
+
+### Linux / macOS
+- **Keep awake**: a tray toggle on Linux (remembered in `~/.config/veroscudo/tray.json`) and
+  `veroscudo awake` on Linux and macOS (holds until Ctrl-C, no root). Linux uses `gnome-session-inhibit` or
+  `systemd-inhibit`, macOS `caffeinate -i -s` (never `-d`); the child dies with the process, so a crash cannot
+  leave the machine unable to sleep.
+
 ## [1.1.0] - 2026-10-26
 
 Security hardening (an audit found real leak paths in 1.0), several VPN profiles, macOS alpha.

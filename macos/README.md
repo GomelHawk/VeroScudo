@@ -22,7 +22,8 @@ sudo veroscudo on
 - Not yet run on a Mac: the pf rules and the `scutil` output parsing are unit-tested only.
 - Boot window: pf rules do not persist across a reboot; they are back as soon as launchd starts the daemon, which is
   early but not before the network.
-- No tray / menu-bar app yet (CLI only).
+- No tray / menu-bar app yet (CLI only). Keep awake is `veroscudo awake` (runs `caffeinate -i -s`, Ctrl-C to
+  stop; unit-tested, not yet run on a Mac).
 - Virtual machines and containers (`vm`) are not filtered.
 - Third-party VPN apps (their own tunnels) are not supported - same as on the other platforms.
 

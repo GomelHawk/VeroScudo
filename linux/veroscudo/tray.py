@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, nm, update
+from . import __version__, keepawake, nm, update
 from .config import Config
 from .state import StateStore
 
@@ -66,6 +66,18 @@ def main() -> int:
     fill_profiles(cfg.profile)
     menu.append(Gtk.SeparatorMenuItem())
     st_item = Gtk.MenuItem(label="Status…"); st_item.connect("activate", lambda *_: subprocess.Popen(["x-terminal-emulator", "-e", "sh", "-c", "veroscudo status; read -p 'Enter to close' _"])); menu.append(st_item)
+    awake = keepawake.KeepAwake()
+    awake_item = Gtk.CheckMenuItem(label="Keep awake"); menu.append(awake_item)
+    awake_item.set_active(awake.set(keepawake.load_pref()))
+
+    def on_awake(item) -> None:
+        want = item.get_active()
+        held = awake.set(want)
+        keepawake.save_pref(held)
+        if want and not held:
+            item.handler_block(awake_handler); item.set_active(False); item.handler_unblock(awake_handler)
+            subprocess.Popen(["notify-send", "-a", "VeroScudo", "Keep awake is not available", "No sleep inhibitor found (systemd-inhibit)."])
+    awake_handler = awake_item.connect("toggled", on_awake)
     upd_item = Gtk.MenuItem(label="Check for updates"); menu.append(upd_item)
     latest = {"rel": None}
     upd_file = store.home / "update.json"
@@ -122,11 +134,14 @@ def main() -> int:
             ind.set_title({"protected": "VeroScudo - protected", "blocked": "VeroScudo - BLOCKED, reconnecting", "off": "VeroScudo - off"}[state])
             last["state"] = state
         on_item.set_sensitive(state != "protected"); off_item.set_sensitive(armed or up)
+        if awake_item.get_active() != awake.active:        # the inhibitor died on its own
+            awake_item.handler_block(awake_handler); awake_item.set_active(awake.active); awake_item.handler_unblock(awake_handler)
         return True
 
     refresh(); GLib.timeout_add_seconds(3, refresh)
     GLib.timeout_add_seconds(120, lambda: (check_updates(), False)[1])
     Gtk.main()
+    awake.release()
     return 0
 
 

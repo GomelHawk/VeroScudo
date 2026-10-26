@@ -16,6 +16,7 @@ veroscudo on                 # connect + protect     (sudoers drop-in lets your 
 veroscudo status
 veroscudo off                # deliberately off -> raw internet
 veroscudo profiles           # configured profiles, * = active
+veroscudo awake              # keep the system from sleeping until Ctrl-C (the tray has a Keep awake toggle too)
 sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 ```
 

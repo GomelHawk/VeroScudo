@@ -47,6 +47,9 @@ new to log in to.
   changed or went missing (a new tunnel interface, the WSL adapter recreated at boot, a firewall reset).
 - **A tray icon** that shows the state at a glance - Protected, Blocked, Off, Attention -
   with *Turn on* / *Turn off*, status and log one click away.
+- **Keep awake** (tray). A menu toggle that keeps the PC from sleeping, locked screen included, so a
+  long download or job finishes while you are away. The screen can still turn off. Linux: tray toggle too;
+  Linux and macOS: `veroscudo awake` (until Ctrl-C).
 - **Update notice.** The tray tells you when a newer release exists (one check of the GitHub
   release after sign-in, only while traffic is allowed; `updateCheck: false` turns it off). Installing stays manual.
 - **Two actions, nothing else.** On and Off. No "unblock" button, no timer, no backdoor -

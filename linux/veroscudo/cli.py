@@ -1,4 +1,4 @@
-"""veroscudo on|off|status|profiles|use <profile>|arm|disarm|reconnect|watchdog|daemon|boot"""
+"""veroscudo on|off|status|profiles|use <profile>|awake|arm|disarm|reconnect|watchdog|daemon|boot"""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import logging.handlers
 import os
 import sys
 
-from . import __version__
+from . import __version__, keepawake
 from .backend import firewall, nm
 from .config import Config
 from .daemon import Guard
@@ -42,11 +42,13 @@ def status(cfg: Config, store: StateStore) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
-    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
     ap.add_argument("name", nargs="?", help="profile name (for 'use')")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
     _setup_logging()
+    if a.action == "awake":          # no config, no root: it only holds a sleep inhibitor
+        return keepawake.hold()
     store = StateStore()
     cfg = Config.load(active=store.active)
     if a.action == "status":

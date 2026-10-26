@@ -33,6 +33,34 @@ public static class VeroNative {
     }
 }
 
+// Keep awake: one power request (system + execution, never the display). Not tied to a thread, listed by
+// `powercfg /requests` under the reason string, dropped by the kernel when the tray process dies.
+public static class VeroKeepAwake {
+    [StructLayout(LayoutKind.Sequential)] struct Ctx { public uint Version; public uint Flags; public IntPtr Reason, Pad1, Pad2; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr PowerCreateRequest(ref Ctx c);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool PowerSetRequest(IntPtr h, int type);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool PowerClearRequest(IntPtr h, int type);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    const int System = 1, Execution = 3;
+    static IntPtr handle = IntPtr.Zero, reason = IntPtr.Zero;
+    public static bool Active { get { return handle != IntPtr.Zero; } }
+    public static bool Set(bool on) { if (on) return Acquire(); Release(); return false; }
+    static bool Acquire() {
+        if (Active) return true;
+        if (reason == IntPtr.Zero) reason = Marshal.StringToHGlobalUni("VeroScudo: Keep awake is on");
+        var c = new Ctx { Version = 0, Flags = 1, Reason = reason };   // POWER_REQUEST_CONTEXT_SIMPLE_STRING
+        IntPtr h = PowerCreateRequest(ref c);
+        if (h == IntPtr.Zero || h == new IntPtr(-1)) return false;
+        if (!PowerSetRequest(h, System)) { CloseHandle(h); return false; }
+        PowerSetRequest(h, Execution);                                // best effort: keeps us running under Modern Standby
+        handle = h; return true;
+    }
+    static void Release() {
+        if (!Active) return;
+        PowerClearRequest(handle, System); PowerClearRequest(handle, Execution); CloseHandle(handle); handle = IntPtr.Zero;
+    }
+}
+
 public class VeroTheme {
     public Color Bg, Card, Border, Text, Sub, Hover, Accent;
     public static VeroTheme Dark() { return new VeroTheme { Bg = Color.FromArgb(32,32,32), Card = Color.FromArgb(43,43,43), Border = Color.FromArgb(58,58,58), Text = Color.FromArgb(240,240,240), Sub = Color.FromArgb(160,160,160), Hover = Color.FromArgb(56,56,56), Accent = Color.FromArgb(96,205,255) }; }
@@ -62,7 +90,7 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
             if (Logo != null) { e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; e.Graphics.DrawImage(Logo, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz)); }
             return;
         }
-        DrawIcon(e.Graphics, kind, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz), e.Item.Enabled ? t.Text : t.Sub); }
+        DrawIcon(e.Graphics, kind, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz), !e.Item.Enabled ? t.Sub : (kind == "awake" && e.Item is ToolStripMenuItem && ((ToolStripMenuItem)e.Item).Checked) ? t.Accent : t.Text); }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var r = e.TextRectangle; r.Y = 0; r.Height = e.Item.Height; r.X += S(10); r.Width = e.Item.Width - r.X - S(10);
@@ -94,6 +122,9 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
                 case "help": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawArc(pen, 5.6f, 4.6f, 4.8f, 4.4f, 200, 230); g.DrawLine(pen, 8, 8.6f, 8, 10f); g.FillEllipse(br, 7.1f, 11.2f, 1.8f, 1.8f); break;
                 case "power": g.DrawArc(pen, 2.5f, 3, 11, 11, -60, 300); g.DrawLine(pen, 8, 1.5f, 8, 7.5f); break;
                 case "check": g.DrawLines(pen, new[] { new PointF(3, 8.5f), new PointF(6.5f, 12), new PointF(13, 4.5f) }); break;
+                case "awake": g.DrawLines(pen, new[] { new PointF(3, 6.5f), new PointF(3, 11), new PointF(5.5f, 13.5f), new PointF(9.5f, 13.5f), new PointF(12, 11), new PointF(12, 6.5f), new PointF(3, 6.5f) });
+                              g.DrawArc(pen, 10.5f, 7.2f, 4, 3.6f, -90, 180);
+                              g.DrawLine(pen, 5.5f, 2, 5.5f, 4.5f); g.DrawLine(pen, 9.5f, 2, 9.5f, 4.5f); break;
                 case "globe": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawEllipse(pen, 5.2f, 2, 5.6f, 12); g.DrawLine(pen, 2, 8, 14, 8); break;
             }
         }
@@ -430,6 +461,14 @@ $mProf = Add-MenuItem 'VPN profile' 'globe' $null
 $mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Card; $mProf.DropDown.ForeColor = $global:Theme.Text
 $mProf.DropDown.Padding = Pad 0 6 0 6
 $mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
+$global:TrayFile = Join-Path $global:Paths.UserDir 'tray.json'              # per-user tray choices (the state folder is read-only for the tray)
+function Test-KeepAwakeSaved {
+    try { if (Test-Path $global:TrayFile) { return [bool](Get-Content $global:TrayFile -Raw | ConvertFrom-Json).keepAwake } } catch { Write-Verbose 'tray.json unreadable' }
+    $false
+}
+function Save-KeepAwake([bool]$on) {
+    try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; @{ keepAwake = $on } | ConvertTo-Json | Set-Content $global:TrayFile -Encoding UTF8 } catch { Write-Verbose 'tray.json not writable' }
+}
 function Request-ProfileSwitch([string]$name) {
     <# The switch itself runs in the elevated Switch task; the tray only names the profile (checked there against config.json). #>
     New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null
@@ -454,10 +493,16 @@ $null = Add-MenuSeparator
 $null = Add-MenuItem 'Status'       'info' { Show-Status | Out-Null }  
 $null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }
 $null = Add-MenuItem 'Settings'     'gear' { Show-Settings | Out-Null }
+$mAwake = Add-MenuItem 'Keep awake' 'awake' {
+    $want = $mAwake.Checked; $on = [VeroKeepAwake]::Set($want); $mAwake.Checked = $on; Save-KeepAwake $on
+    if ($want -and -not $on) { $notify.ShowBalloonTip(4000, 'VeroScudo', 'Keep awake is not available on this system.', [System.Windows.Forms.ToolTipIcon]::Warning) }
+    Refresh
+}
+$mAwake.CheckOnClick = $true; $mAwake.Checked = [VeroKeepAwake]::Set((Test-KeepAwakeSaved))
 $null = Add-MenuSeparator
 $mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force; if ($global:Update -and (Test-VeroReleaseUrl $global:Update.Url)) { Start-Process $global:Update.Url } else { $notify.ShowBalloonTip(4000, 'VeroScudo', "You have the latest version ($(Get-VeroVersion)).", [System.Windows.Forms.ToolTipIcon]::Info) } }
 $null = Add-MenuItem 'About VeroScudo' 'help' { Show-About | Out-Null }
-$null = Add-MenuItem 'Exit tray (guard keeps running)' 'power' { $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() }
+$null = Add-MenuItem 'Exit tray (guard keeps running)' 'power' { [VeroKeepAwake]::Set($false) | Out-Null; $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() }
 # size every item from the widest label (ToolStrip ignores padding when measuring) : icon column 42 + text + 24
 $notify.ContextMenuStrip = $menu
 Update-ConfigCache | Out-Null; Update-ProfileMenu
@@ -486,7 +531,7 @@ function Refresh {
     if (Update-ConfigCache) { Update-ProfileMenu }
     $st = Get-State
     $notify.Icon = Get-StateIcon $st.State
-    $tip = "VeroScudo - $($st.Title)"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))
+    $tip = "VeroScudo - $($st.Title)$(if ([VeroKeepAwake]::Active) { ', keeping PC awake' })"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))
     $mHead.Text = "VeroScudo - $($st.Title)"
     $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected
     if ($global:Last -and $global:Last -ne $st.State) {
