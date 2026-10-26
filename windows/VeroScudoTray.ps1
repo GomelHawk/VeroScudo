@@ -42,25 +42,30 @@ public class VeroTheme {
 // Windows-11-like menu: flat, padded, rounded hover, vector icons drawn by name from item.Tag
 public class VeroMenuRenderer : ToolStripProfessionalRenderer {
     readonly VeroTheme t; readonly float scale;
+    public Image Logo;
     public VeroMenuRenderer(VeroTheme theme, float dpiScale) { t = theme; scale = dpiScale; RoundedEdges = false; }
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) { e.Graphics.Clear(t.Card); }
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
         using (var p = new Pen(t.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1); }
     protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { using (var b = new SolidBrush(t.Card)) e.Graphics.FillRectangle(b, e.AffectedBounds); }
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
-        using (var p = new Pen(t.Border)) e.Graphics.DrawLine(p, S(12), e.Item.Height / 2, e.Item.Width - S(12), e.Item.Height / 2); }
+        using (var p = new Pen(t.Border)) e.Graphics.DrawLine(p, S(14), e.Item.Height / 2, e.Item.Width - S(14), e.Item.Height / 2); }
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
         if (!e.Item.Selected || !e.Item.Enabled) return;
-        var r = new Rectangle(S(4), 1, e.Item.Width - S(8), e.Item.Height - 2);
+        var r = new Rectangle(S(6), S(2), e.Item.Width - S(12), e.Item.Height - S(4));
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using (var path = Round(r, S(5))) using (var b = new SolidBrush(t.Hover)) e.Graphics.FillPath(b, path); }
     protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e) {
         var kind = e.Item.Tag as string; if (string.IsNullOrEmpty(kind)) return;
-        var r = e.ImageRectangle; int sz = Math.Min(r.Width, r.Height);
+        var r = e.ImageRectangle; int sz = Math.Min(r.Width, r.Height); r.Y = (e.Item.Height - sz) / 2; r.Height = sz;
+        if (kind == "logo") {
+            if (Logo != null) { e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; e.Graphics.DrawImage(Logo, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz)); }
+            return;
+        }
         DrawIcon(e.Graphics, kind, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz), e.Item.Enabled ? t.Text : t.Sub); }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        var r = e.TextRectangle; r.X += S(10); r.Width = e.Item.Width - r.X - S(10);
+        var r = e.TextRectangle; r.Y = 0; r.Height = e.Item.Height; r.X += S(10); r.Width = e.Item.Width - r.X - S(10);
         TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Enabled ? t.Text : t.Sub, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding); }
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor = e.Item != null && e.Item.Enabled ? t.Text : t.Sub; base.OnRenderArrow(e); }
     int S(double v) { return (int)Math.Round(v * scale); }
@@ -105,7 +110,8 @@ Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Force
 $global:Paths   = Get-VeroPath
 $global:Config  = $null
 try { $global:Config = Get-VeroConfig } catch { Write-Verbose "no config yet: $($_.Exception.Message)" }
-$global:IconDir = Join-Path $PSScriptRoot 'icons'
+$global:IconDir = @((Join-Path $PSScriptRoot 'icons'), (Join-Path (Split-Path $PSScriptRoot -Parent) 'assets\icons')) | Where-Object { Test-Path $_ } | Select-Object -First 1   # installed layout, then repo layout
+if (-not $global:IconDir) { $global:IconDir = Join-Path $PSScriptRoot 'icons' }
 $global:Folder  = '\VeroScudo\'
 $global:Last    = $null
 $global:Icons   = @{}
@@ -130,6 +136,7 @@ $global:Theme = if ($global:Dark) { [VeroTheme]::Dark() } else { [VeroTheme]::Li
 $global:Scale = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero).DpiX / 96
 function P([double]$x, [double]$y) { New-Object System.Drawing.Point([int]($x * $global:Scale), [int]($y * $global:Scale)) }
 function Z([double]$w, [double]$h) { New-Object System.Drawing.Size([int]($w * $global:Scale), [int]($h * $global:Scale)) }
+function Pad([double]$l, [double]$t, [double]$r, [double]$b) { New-Object System.Windows.Forms.Padding([int]($l * $global:Scale), [int]($t * $global:Scale), [int]($r * $global:Scale), [int]($b * $global:Scale)) }
 $FontUI   = New-Object System.Drawing.Font('Segoe UI', 10)
 $FontBold = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
 $FontBig  = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
@@ -403,21 +410,25 @@ $notify.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.Renderer = New-Object VeroMenuRenderer($global:Theme, [single]$global:Scale); $menu.Font = $FontUI; $menu.ShowImageMargin = $true; $menu.ShowCheckMargin = $false; $menu.ImageScalingSize = Z 18 18
 $iconPx = (Z 18 18).Width; $blankImage = New-Object System.Drawing.Bitmap($iconPx, $iconPx)
-$menu.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 6); $menu.BackColor = $global:Theme.Card; $menu.ForeColor = $global:Theme.Text
+$menu.Padding = Pad 0 6 0 6; $menu.BackColor = $global:Theme.Card; $menu.ForeColor = $global:Theme.Text
 $menu.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
 function Add-MenuItem([string]$text, [string]$glyph, [scriptblock]$onClick) {
-    $m = $menu.Items.Add($text); $m.Tag = $glyph; $m.Padding = New-Object System.Windows.Forms.Padding(0, 7, 12, 7); $m.Margin = New-Object System.Windows.Forms.Padding(0)
+    $m = $menu.Items.Add($text); $m.Tag = $glyph; $m.Padding = (Pad 0 7 16 7); $m.Margin = New-Object System.Windows.Forms.Padding(0)
     if ($glyph) { $m.Image = $blankImage; $m.ImageScaling = 'None' }
     if ($onClick) { $m.Add_Click($onClick) }
     $m
 }
-$mHead = Add-MenuItem 'VeroScudo' $null $null; $mHead.Enabled = $false; $mHead.Font = $FontBold
-$menu.Items.Add('-') | Out-Null
+function Add-MenuSeparator {
+    $sep = New-Object System.Windows.Forms.ToolStripSeparator; $sep.Margin = Pad 0 3 0 3; $menu.Items.Add($sep) | Out-Null
+}
+$menu.Renderer.Logo = Get-AppImage 64
+$mHead = Add-MenuItem 'VeroScudo' 'logo' $null; $mHead.Enabled = $false; $mHead.Font = $FontBold
+$null = Add-MenuSeparator
 $mOn   = Add-MenuItem 'Turn VPN on'  'play' { Invoke-GuardTask 'On' }   
 $mOff  = Add-MenuItem 'Turn VPN off' 'stop' { Invoke-GuardTask 'Off' }  
 $mProf = Add-MenuItem 'VPN profile' 'globe' $null
 $mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Card; $mProf.DropDown.ForeColor = $global:Theme.Text
-$mProf.DropDown.Padding = New-Object System.Windows.Forms.Padding(0, 6, 0, 6)
+$mProf.DropDown.Padding = Pad 0 6 0 6
 $mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
 function Request-ProfileSwitch([string]$name) {
     <# The switch itself runs in the elevated Switch task; the tray only names the profile (checked there against config.json). #>
@@ -433,17 +444,17 @@ function Update-ProfileMenu {
     $mProf.Text = "VPN profile: $($global:Config.Profile)"
     foreach ($pr in $global:Config.Profiles) {
         $it = $mProf.DropDownItems.Add($pr.Profile)
-        $it.Padding = New-Object System.Windows.Forms.Padding(0, 7, 12, 7); $it.Image = $blankImage; $it.ImageScaling = 'None'
+        $it.Padding = (Pad 0 7 16 7); $it.Image = $blankImage; $it.ImageScaling = 'None'
         $it.Tag = if ($pr.Profile -eq $global:Config.Profile) { 'check' } else { '' }
         $name = $pr.Profile
         $it.Add_Click(({ if ($name -ne $global:Config.Profile) { Request-ProfileSwitch $name } }).GetNewClosure())
     }
 }
-$menu.Items.Add('-') | Out-Null
+$null = Add-MenuSeparator
 $null = Add-MenuItem 'Status'       'info' { Show-Status | Out-Null }  
 $null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }
 $null = Add-MenuItem 'Settings'     'gear' { Show-Settings | Out-Null }
-$menu.Items.Add('-') | Out-Null
+$null = Add-MenuSeparator
 $mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force; if ($global:Update -and (Test-VeroReleaseUrl $global:Update.Url)) { Start-Process $global:Update.Url } else { $notify.ShowBalloonTip(4000, 'VeroScudo', "You have the latest version ($(Get-VeroVersion)).", [System.Windows.Forms.ToolTipIcon]::Info) } }
 $null = Add-MenuItem 'About VeroScudo' 'help' { Show-About | Out-Null }
 $null = Add-MenuItem 'Exit tray (guard keeps running)' 'power' { $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() }
