@@ -10,7 +10,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:Version      = '1.1.0'
+$script:Version      = '1.2.0'
 $script:LegacyGroup  = 'VeroScudo'                                       # Windows Firewall rule group of 1.0.x (migrated away)
 $script:VmRule       = 'VeroScudo-WSL'
 $script:WslCreator   = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'          # Hyper-V firewall VM creator id of WSL

@@ -3,7 +3,9 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
-## [Unreleased]
+## [1.2.0] - 2026-10-26
+
+Keep awake on every platform; a roomier Windows tray menu.
 
 ### Windows
 - **Keep awake** in the tray menu: stops the PC from sleeping (also behind a locked screen) while ticked; the
