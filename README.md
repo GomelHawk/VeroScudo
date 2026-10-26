@@ -38,6 +38,9 @@ new to log in to.
 - **No DNS leak.** While the VPN is up, names are resolved through the tunnel only.
 - **Several VPN profiles.** Pick the active one from the tray menu (*VPN profile ▸*) or
   `veroscudo use <name>`; the switch keeps you blocked until the new tunnel is up.
+- **VPN off means a normal network.** Turn the VPN off yourself (tray, shortcut, Windows UI or
+  `veroscudo off`) and the kill-switch is lifted completely: a regular, non-VPN connection with
+  your usual firewall, until you turn the VPN on again. Protection is tied to your choice, not forced.
 - **Auto-reconnect, forever.** Every 10 seconds until the tunnel is back - never gives up,
   never "falls back" to raw internet.
 - **It knows why the VPN ended.** The OS reports whether *you* hung up or the link failed.
