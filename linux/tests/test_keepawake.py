@@ -46,7 +46,7 @@ def test_acquire_release_with_a_fake_inhibitor(monkeypatch):
 
 
 def test_acquire_fails_cleanly(monkeypatch):
-    monkeypatch.setattr(keepawake, "_commands", lambda: [])
+    monkeypatch.setattr(keepawake, "_commands", list)
     ka = keepawake.KeepAwake()
     assert ka.acquire() is False and not ka.active
 
