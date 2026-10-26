@@ -3,6 +3,12 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
+## [1.2.1] - 2026-10-26
+
+### Windows
+- Fixed: the ticked *Keep awake* item showed the stock light-blue check box in the tray menu. A ticked item now
+  just shows its icon in the accent colour.
+
 ## [1.2.0] - 2026-10-26
 
 Keep awake on every platform; a roomier Windows tray menu.
