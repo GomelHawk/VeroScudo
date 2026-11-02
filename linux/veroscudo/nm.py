@@ -6,6 +6,7 @@ import pwd
 import re
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 _IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
@@ -16,8 +17,6 @@ def _nmcli(*args: str) -> str:
     return subprocess.run(["nmcli", "-t", *args], check=False, capture_output=True, text=True).stdout.strip()
 
 
-def is_connected(profile: str) -> bool:
-    return _nmcli("-g", "GENERAL.STATE", "connection", "show", profile) == "activated"
 
 
 def is_virtual(name: str) -> bool:
@@ -35,9 +34,161 @@ def iface(profile: str) -> str | None:
     return None
 
 
+WG_STALE_SECONDS = 180          # a live WireGuard link re-handshakes every 2 minutes
+WG_GRACE_SECONDS = 30           # a just-activated tunnel has not handshaken yet
+_kinds: dict[str, str | None] = {}
+_wg_first_seen: dict[str, float] = {}
+
+
+def kind(profile: str) -> str | None:
+    """'wireguard', 'openvpn', 'vpn' (another VPN plugin) or the connection type; None when there is no such connection.
+    Cached per process: a connection's type does not change."""
+    if profile not in _kinds:
+        t = _nmcli("-g", "connection.type", "connection", "show", profile)
+        if t == "vpn":
+            st = _nmcli("-g", "vpn.service-type", "connection", "show", profile)
+            t = "openvpn" if "openvpn" in st else "vpn"
+        _kinds[profile] = t or None
+    return _kinds[profile]
+
+
+def wg_state(handshakes: list[int], now: float, first_seen: float | None,
+             stale: int = WG_STALE_SECONDS, grace: int = WG_GRACE_SECONDS) -> str:
+    """'up' (a handshake within `stale` s), 'starting' (no fresh handshake yet, seen for less than `grace` s) or 'stale'
+    (activated but silent - a dead link keeps its interface up). Pure."""
+    last = max(handshakes, default=0)
+    if last > 0 and now - last <= stale:
+        return "up"
+    if first_seen is None or now - first_seen < grace:
+        return "starting"
+    return "stale"
+
+
+def wg_handshakes(ifname: str) -> list[int] | None:
+    """Latest handshake per peer (unix time, 0 = never), or None when `wg` is unavailable or not allowed (non-root)."""
+    if not _IFNAME.match(ifname):
+        return None
+    try:
+        r = subprocess.run(["wg", "show", ifname, "latest-handshakes"], check=False, capture_output=True, text=True)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            out.append(int(parts[1]))
+    return out
+
+
+def wg_health(profile: str) -> str:
+    """WireGuard: 'up' | 'starting' | 'stale'; 'unknown' when the handshakes cannot be read (then the activation state rules)."""
+    ifname = iface(profile)
+    hs = wg_handshakes(ifname) if ifname else None
+    if hs is None:
+        return "unknown"
+    now = time.time()
+    st = wg_state(hs, now, _wg_first_seen.setdefault(profile, now))
+    if st == "up":
+        _wg_first_seen.pop(profile, None)
+    return st
+
+
+def is_connected(profile: str) -> bool:
+    """Activated - and for WireGuard also handshaking: a dead WireGuard link stays 'activated' in NetworkManager."""
+    if _nmcli("-g", "GENERAL.STATE", "connection", "show", profile) != "activated":
+        _wg_first_seen.pop(profile, None)
+        return False
+    if kind(profile) == "wireguard":
+        return wg_health(profile) in ("up", "starting", "unknown")
+    return True
+
+
+def is_stale(profile: str) -> bool:
+    """WireGuard activated but silent for over 3 minutes (the redial takes it down and brings it up again)."""
+    return kind(profile) == "wireguard" and wg_health(profile) == "stale"
+
+
+_TUNNEL_NAME = re.compile(r"^(tun|tap|wg|ppp|nordlynx|proton|ipsec|vti)\d*$|^(tun|wg)-")
+
+
+def other_tunnels(own: str | None, net: Path = SYS_NET) -> list[str]:
+    """Up tunnel interfaces that are not the active profile's: another VPN next to VeroScudo."""
+    out = []
+    try:
+        names = sorted(p.name for p in net.iterdir())
+    except OSError:
+        return out
+    for n in names:
+        if n == own or not _TUNNEL_NAME.match(n) or (net / n / "device").exists():
+            continue
+        try:
+            state = (net / n / "operstate").read_text().strip()
+        except OSError:
+            continue
+        if state != "down":
+            out.append(n)
+    return out
+
+
+def parse_openvpn_data(data: str) -> dict:
+    """NetworkManager's vpn.data of an OpenVPN connection -> {'hosts': [...], 'port': int|None, 'proto': 'tcp'|'udp'}. Pure."""
+    items = {}
+    for part in re.split(r",\s*(?=[a-z0-9-]+\s*=)", data.strip()):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            items[k.strip()] = v.strip()
+    hosts, port = [], None
+    for r in re.split(r"[,\s]+", items.get("remote", "")):
+        if not r:
+            continue
+        host, _, p = r.partition(":")
+        hosts.append(host)
+        if p.isdigit() and port is None:
+            port = int(p)
+    if items.get("port", "").isdigit():
+        port = int(items["port"])
+    return {"hosts": hosts, "port": port or (1194 if hosts else None), "proto": "tcp" if items.get("proto-tcp") == "yes" else "udp"}
+
+
+def check(cfg) -> list[str]:
+    """Problems with the configured profiles (veroscudo check): a missing connection, or a protocol/port that does not match
+    what NetworkManager will use (the kill-switch would then block the VPN itself)."""
+    out = []
+    for p in cfg.profiles:
+        k = kind(p.name)
+        if k is None:
+            out.append(f"{p.name}: no NetworkManager connection with this name")
+            continue
+        if k == "wireguard":
+            if p.protocol != "udp":
+                out.append(f'{p.name}: WireGuard uses UDP - set "protocol": "udp" and "port": the endpoint\'s port')
+            out.append(f"{p.name}: WireGuard - make sure the peer has PersistentKeepalive (e.g. 25): VeroScudo judges the link by its handshakes")
+        elif k == "openvpn":
+            d = parse_openvpn_data(_nmcli("-g", "vpn.data", "connection", "show", p.name))
+            if d["proto"] != p.protocol:
+                out.append(f"{p.name}: OpenVPN uses {d['proto'].upper()} but the profile says {p.protocol.upper()}")
+            if d["port"] and d["port"] != p.port:
+                out.append(f"{p.name}: OpenVPN uses port {d['port']} but the profile says {p.port}")
+            if d["hosts"] and p.server not in d["hosts"] and not p.server_ips:
+                out.append(f"{p.name}: the server '{p.server}' is not among the connection's remotes ({', '.join(d['hosts'])})")
+    return out
+
+
 def up(profile: str) -> bool:
     r = subprocess.run(["nmcli", "connection", "up", "id", profile], check=False, capture_output=True, text=True)
     return r.returncode == 0
+
+
+def wait_connected(profile: str, seconds: float = 10.0) -> bool:
+    """After `up`: WireGuard is 'activated' before its first handshake - give it a moment."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if is_connected(profile) and not (kind(profile) == "wireguard" and wg_health(profile) == "starting"):
+            return True
+        time.sleep(1)
+    return is_connected(profile)
 
 
 def down(profile: str) -> bool:

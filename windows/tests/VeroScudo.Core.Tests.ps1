@@ -10,9 +10,10 @@ BeforeAll {
     $script:TestHomeDir = Join-Path ([IO.Path]::GetTempPath()) ("veroscudo-test-" + [guid]::NewGuid())
     function Test-IsTestDir([string]$Path) {
         if (-not $Path -or -not $script:TestHomeDir) { return $false }
-        $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-        $root = [IO.Path]::GetFullPath($script:TestHomeDir).TrimEnd('\')
-        ($root -like "$([IO.Path]::GetTempPath().TrimEnd('\'))\veroscudo-test-*") -and ($full -eq $root -or $full.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase))
+        $sep = [IO.Path]::DirectorySeparatorChar                            # '\' on Windows (CI); '/' only in a WSL dev harness
+        $full = [IO.Path]::GetFullPath($Path).TrimEnd($sep)
+        $root = [IO.Path]::GetFullPath($script:TestHomeDir).TrimEnd($sep)
+        ($root -like ([IO.Path]::GetTempPath().TrimEnd($sep) + $sep + 'veroscudo-test-*')) -and ($full -eq $root -or $full.StartsWith($root + $sep, [StringComparison]::OrdinalIgnoreCase))
     }
     function Remove-TestDir { if (Test-IsTestDir $script:TestHomeDir) { Remove-Item -LiteralPath $script:TestHomeDir -Recurse -Force -ErrorAction SilentlyContinue } }
     function Remove-TestFile([string[]]$Paths) { foreach ($f in $Paths) { if (Test-IsTestDir $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } else { throw "test tried to delete outside its temp folder: $f" } } }
@@ -452,5 +453,407 @@ Describe 'Get-VeroPath' {
     It 'keeps tray-writable files in the user folder' {
         (Get-VeroPath).SwitchRequest | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
         (Get-VeroPath).UpdateFile | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
+    }
+}
+
+# ======================================================================== profile types (ras / openvpn / wireguard)
+Describe 'Get-VeroConfig profile types' {
+    It 'defaults to the built-in client' { (Get-VeroConfig -Raw $script:multiJson).Type | Should -Be 'ras' }
+    It 'reads an OpenVPN profile without server or username (they come from the .ovpn)' {
+        $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"Reserve","type":"openvpn"}]}'
+        $c.Type | Should -Be 'openvpn'; $c.Auth | Should -BeTrue; $c.Dco | Should -BeFalse
+    }
+    It 'reads a WireGuard profile with its endpoint and default port 51820' {
+        $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"wg-home","type":"wireguard","server":"wg.example.com"}]}'
+        $c.Type | Should -Be 'wireguard'; $c.Port | Should -Be 51820; $c.Auth | Should -BeFalse
+    }
+    It 'rejects <what>' -ForEach @(
+        @{ what = 'an unknown type';                 json = '{"profiles":[{"profile":"X","type":"pptp","server":"s","username":"u"}]}'; msg = '*type must be*' }
+        @{ what = 'WireGuard without an endpoint';   json = '{"profiles":[{"profile":"wg","type":"wireguard"}]}'; msg = '*server is required*' }
+        @{ what = 'a WireGuard name with a space';   json = '{"profiles":[{"profile":"my wg","type":"wireguard","server":"s"}]}'; msg = '*WireGuard tunnel name*' }
+        @{ what = 'a built-in profile without user'; json = '{"profiles":[{"profile":"X","server":"s"}]}'; msg = '*username is required*' }
+    ) { { Get-VeroConfig -Raw $json } | Should -Throw $msg }
+    It 'round-trips type, auth and dco through the canonical JSON form' {
+        $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"u"},{"profile":"Ovpn","type":"openvpn","auth":false,"dco":true},{"profile":"wg","type":"wireguard","server":"wg.example.com","port":51821}]}'
+        $c2 = Get-VeroConfig -Raw (ConvertTo-VeroConfigJson $c)
+        @($c2.Profiles | ForEach-Object Type) | Should -Be @('ras', 'openvpn', 'wireguard')
+        $o = $c2.Profiles | Where-Object Profile -eq 'Ovpn'; $o.Auth | Should -BeFalse; $o.Dco | Should -BeTrue
+        ($c2.Profiles | Where-Object Profile -eq 'wg').Port | Should -Be 51821
+    }
+}
+
+Describe 'switch notice' {
+    It 'is shown for OpenVPN and WireGuard, never for the built-in client' {
+        Get-VeroSwitchNotice -Type 'ras' -ProfileName 'Work' | Should -BeNullOrEmpty
+        Get-VeroSwitchNotice -Type 'openvpn' -ProfileName 'a' | Should -Match 'OpenVPN GUI'
+        Get-VeroSwitchNotice -Type 'wireguard' -ProfileName 'b' | Should -Match '1-3 minutes'
+    }
+}
+
+Describe 'Test-VeroOpenVpnConf (import check)' {
+    BeforeAll {
+        $script:ovpn = @"
+client
+dev tun
+proto udp
+remote vpn1.example.com 1194
+remote 198.51.100.7 443 tcp
+auth-user-pass creds.txt
+ca ca.crt
+tls-auth ta.key 1
+redirect-gateway def1
+<cert>
+-----BEGIN CERTIFICATE-----
+abc
+-----END CERTIFICATE-----
+</cert>
+"@
+        $script:fakeRead = { param($f) if ($f -match 'ca\.crt$') { [Text.Encoding]::UTF8.GetBytes('CA-PEM') } elseif ($f -match 'ta\.key$') { [Text.Encoding]::UTF8.GetBytes('TA-KEY') } else { throw 'missing' } }
+    }
+    It 'reads every remote with the default port and protocol' {
+        $r = Test-VeroOpenVpnConf -Text $script:ovpn -BaseDir 'C:\x' -ReadFile $script:fakeRead
+        $r.Errors.Count | Should -Be 0
+        @($r.Remotes).Count | Should -Be 2
+        $r.Remotes[0].Host | Should -Be 'vpn1.example.com'; $r.Remotes[0].Port | Should -Be 1194; $r.Remotes[0].Proto | Should -Be 'udp'
+        $r.Remotes[1].Port | Should -Be 443; $r.Remotes[1].Proto | Should -Be 'tcp'
+        $r.Auth | Should -BeTrue
+    }
+    It 'inlines key files and drops the plain password file' {
+        $r = Test-VeroOpenVpnConf -Text $script:ovpn -BaseDir 'C:\x' -ReadFile $script:fakeRead
+        $r.Text | Should -Match '<ca>\s+CA-PEM\s+</ca>'
+        $r.Text | Should -Match '<tls-auth>\s+TA-KEY\s+</tls-auth>\s+key-direction 1'
+        $r.Text | Should -Not -Match 'creds\.txt'
+        $r.Text | Should -Match '(?m)^auth-user-pass\s*$'
+        @($r.Warnings | Where-Object { $_ -match 'plain file' }).Count | Should -Be 1
+    }
+    It 'keeps inline blocks untouched' { (Test-VeroOpenVpnConf -Text $script:ovpn -ReadFile $script:fakeRead).Text | Should -Match '<cert>\s+-----BEGIN CERTIFICATE-----' }
+    It 'refuses <what>' -ForEach @(
+        @{ what = 'an up script';           line = 'up C:\evil.cmd' }
+        @{ what = 'script-security 2';      line = 'script-security 2' }
+        @{ what = 'a plugin DLL';           line = 'plugin evil.dll' }
+        @{ what = 'its own management';     line = 'management 0.0.0.0 7505' }
+        @{ what = 'a nested config';        line = 'config other.ovpn' }
+        @{ what = 'a proxy';                line = 'http-proxy proxy.example.com 8080' }
+    ) { (Test-VeroOpenVpnConf -Text ("remote vpn.example.com`n" + $line)).Errors.Count | Should -BeGreaterThan 0 }
+    It 'needs at least one remote' { (Test-VeroOpenVpnConf -Text "client`ndev tun").Errors -join ' ' | Should -Match 'remote' }
+    It 'reports a key file that cannot be read' { (Test-VeroOpenVpnConf -Text "remote a.example.com`nca missing.crt" -ReadFile { throw 'x' }).Errors -join ' ' | Should -Match 'missing\.crt' }
+    It 'flags a one-time code (static challenge)' {
+        $r = Test-VeroOpenVpnConf -Text "remote a.example.com`nauth-user-pass`nstatic-challenge `"Code`" 1"
+        $r.StaticChallenge | Should -BeTrue
+    }
+    It 'warns about a split tunnel when nothing redirects the gateway' {
+        (Test-VeroOpenVpnConf -Text "remote a.example.com`ndev tun").Warnings -join ' ' | Should -Match 'redirect-gateway'
+    }
+    It 'reads remotes inside <connection> blocks' {
+        $r = Test-VeroOpenVpnConf -Text "client`n<connection>`nremote a.example.com 1194 udp`n</connection>`n<connection>`nremote b.example.com 443 tcp`n</connection>"
+        @($r.Remotes | ForEach-Object Host) | Should -Be @('a.example.com', 'b.example.com')
+    }
+}
+
+Describe 'OpenVPN command line and management protocol' {
+    It 'adds management on localhost, hold, no scripts, password over management and no DCO' {
+        $a = Get-VeroOpenVpnArgs -ConfigPath 'C:\P\a.ovpn' -Port 40001 -PwFile 'C:\S\a.pw' -LogPath 'C:\S\a.log' -Version ([version]'2.6.12')
+        $a | Should -Match '--management 127\.0\.0\.1 40001 "C:\\S\\a\.pw"'
+        $a | Should -Match '--management-hold'; $a | Should -Match '--management-query-passwords'
+        $a | Should -Match '--script-security 1'; $a | Should -Match '--auth-user-pass'; $a | Should -Match '--disable-dco'
+        $a.IndexOf('--config') | Should -BeLessThan $a.IndexOf('--script-security')     # ours come after the user's file, so they win
+    }
+    It 'keeps DCO when the profile allows it, and on OpenVPN older than 2.6 (no such option)' {
+        Get-VeroOpenVpnArgs -ConfigPath a -Port 1 -PwFile b -LogPath c -Version ([version]'2.6.0') -Dco $true | Should -Not -Match 'disable-dco'
+        Get-VeroOpenVpnArgs -ConfigPath a -Port 1 -PwFile b -LogPath c -Version ([version]'2.5.9') | Should -Not -Match 'disable-dco'
+    }
+    It 'asks for no password when the profile has none' { Get-VeroOpenVpnArgs -ConfigPath a -Port 1 -PwFile b -LogPath c -Auth $false | Should -Not -Match 'auth-user-pass' }
+    It 'parses <line>' -ForEach @(
+        @{ line = '>STATE:1607975456,CONNECTED,SUCCESS,10.8.0.6,203.0.113.5,1194,,'; kind = 'state'; field = 'LocalIp'; value = '10.8.0.6' }
+        @{ line = '>STATE:1607975456,RECONNECTING,ping-restart,,,,,'; kind = 'state'; field = 'Reason'; value = 'ping-restart' }
+        @{ line = ">PASSWORD:Need 'Auth' username/password"; kind = 'need'; field = 'Which'; value = 'Auth' }
+        @{ line = ">PASSWORD:Need 'Auth' username/password SC:1,Enter token"; kind = 'need'; field = 'Challenge'; value = 'Enter token' }
+        @{ line = ">PASSWORD:Need 'Private Key' password"; kind = 'need'; field = 'Which'; value = 'Private Key' }
+        @{ line = ">PASSWORD:Verification Failed: 'Auth'"; kind = 'failed'; field = 'Dynamic'; value = $false }
+        @{ line = ">PASSWORD:Verification Failed: 'Auth' ['CRV1:R,E:abc:dXNlcg==:Enter PIN']"; kind = 'failed'; field = 'Dynamic'; value = $true }
+        @{ line = '>HOLD:Waiting for hold release:0'; kind = 'hold'; field = 'Kind'; value = 'hold' }
+        @{ line = '>INFO:OpenVPN Management Interface Version 5'; kind = 'other'; field = 'Kind'; value = 'other' }
+    ) {
+        $e = ConvertFrom-VeroMgmtLine $line
+        $e.Kind | Should -Be $kind; $e.$field | Should -Be $value
+    }
+    It 'quotes and escapes credentials, and refuses line breaks' {
+        Format-VeroMgmtValue 'pa"ss\word' | Should -Be '"pa\"ss\\word"'
+        { Format-VeroMgmtValue "a`nsignal SIGTERM" } | Should -Throw
+    }
+    It 'builds the static-challenge answer' { Get-VeroStaticChallengeResponse -Password 'pw' -Response '123456' | Should -Be 'SCRV1:cHc=:MTIzNDU2' }
+}
+
+Describe 'WireGuard health and transitions' {
+    It 'is <want> when <what>' -ForEach @(
+        @{ what = 'the service is not running';         svc = 'stopped'; hs = @(1000); now = 1010; age = 99; want = 'down' }
+        @{ what = 'the last handshake is 2 min old';     svc = 'running'; hs = @(1000); now = 1120; age = 999; want = 'up' }
+        @{ what = 'the last handshake is 4 min old';     svc = 'running'; hs = @(1000); now = 1240; age = 999; want = 'stale' }
+        @{ what = 'it just started without a handshake'; svc = 'running'; hs = @(0);    now = 1000; age = 5;   want = 'starting' }
+        @{ what = 'it never handshook for a minute';     svc = 'running'; hs = @(0);    now = 1000; age = 60;  want = 'stale' }
+        @{ what = 'one of two peers is fresh';           svc = 'running'; hs = @(10, 990); now = 1000; age = 999; want = 'up' }
+    ) { Get-VeroWgHealth -ServiceState $svc -Handshakes $hs -Now $now -ServiceAgeSeconds $age | Should -Be $want }
+    It 'reads <prev> -> <cur> (armed=<armed>, active=<active>, lock=<lock>) as <want>' -ForEach @(
+        @{ prev = 'missing'; cur = 'running'; armed = $false; active = $false; lock = $false; want = 'arm' }      # activated in the WireGuard app
+        @{ prev = 'missing'; cur = 'running'; armed = $true;  active = $true;  lock = $false; want = 'none' }     # our own (re)dial
+        @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $false; want = 'disarm' }   # deactivated in the app
+        @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $true;  want = 'none' }     # our own Reconnect
+        @{ prev = 'running'; cur = 'missing'; armed = $false; active = $true;  lock = $false; want = 'none' }     # after our Off
+        @{ prev = 'running'; cur = 'stopped'; armed = $true;  active = $true;  lock = $false; want = 'none' }     # crash: a failure, redial
+        @{ prev = $null;     cur = 'running'; armed = $false; active = $false; lock = $false; want = 'none' }     # first look after start
+    ) { Get-VeroWgTransition -Previous $prev -Current $cur -Armed $armed -Active $active -LockAlive $lock | Should -Be $want }
+}
+
+Describe 'Test-VeroWireGuardConf (add check)' {
+    It 'reads the endpoint and finds nothing to complain about in a full-tunnel config' {
+        $r = Test-VeroWireGuardConf -Text "[Interface]`nPrivateKey = x`nAddress = 10.0.0.2/32`nDNS = 10.0.0.1`n[Peer]`nPublicKey = y`nAllowedIPs = 0.0.0.0/0, ::/0`nEndpoint = wg.example.com:51820`nPersistentKeepalive = 25"
+        $r.Errors.Count | Should -Be 0; $r.Warnings.Count | Should -Be 0
+        $r.Server | Should -Be 'wg.example.com'; $r.Port | Should -Be 51820
+    }
+    It 'warns about a missing keepalive, a split tunnel and missing DNS' {
+        $r = Test-VeroWireGuardConf -Text "[Interface]`nPrivateKey = x`n[Peer]`nAllowedIPs = 10.0.0.0/8`nEndpoint = [2001:db8::1]:51820"
+        $r.Server | Should -Be '2001:db8::1'
+        ($r.Warnings -join ' ') | Should -Match 'PersistentKeepalive'; ($r.Warnings -join ' ') | Should -Match 'split tunnel'; ($r.Warnings -join ' ') | Should -Match 'DNS'
+    }
+    It 'needs an endpoint' { (Test-VeroWireGuardConf -Text "[Interface]`nPrivateKey = x`n[Peer]`nAllowedIPs = 0.0.0.0/0").Errors.Count | Should -Be 1 }
+}
+
+Describe 'Get-VeroFilterSpec for reserve types' {
+    BeforeAll { $script:cfgW = Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com"}]}' }
+    It 'WireGuard: only UDP to the endpoint, no program condition (the kernel driver sends it), no CRL permit' {
+        $eps = @([pscustomobject]@{ Ip = '203.0.113.9'; Proto = 17; Port = 51820 })
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgW -Endpoints $eps -DnsServers @('192.168.1.1'))
+        $srv = @($t | Where-Object { $_ -like 'VPN server*' })
+        $srv.Count | Should -Be 1
+        $srv[0] | Should -Match "$($script:F.Proto)=17"; $srv[0] | Should -Match "$($script:F.RPort)=51820"; $srv[0] | Should -Match "$($script:F.Addr)=203\.0\.113\.9"
+        $srv[0] | Should -Not -Match $script:F.App
+        @($t | Where-Object { $_ -like 'CRL*' }).Count | Should -Be 0
+        @($t | Where-Object { $_ -like 'DNS*' }).Count | Should -Be 1
+    }
+    It 'OpenVPN: one permit per protocol/port, tied to openvpn.exe, both address families' {
+        $eps = @([pscustomobject]@{ Ip = '203.0.113.9'; Proto = 17; Port = 1194 }, [pscustomobject]@{ Ip = '2001:db8::9'; Proto = 17; Port = 1194 },
+                 [pscustomobject]@{ Ip = '198.51.100.7'; Proto = 6; Port = 443 })
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgW -Endpoints $eps -EndpointApp 'C:\Program Files\OpenVPN\bin\openvpn.exe')
+        $srv = @($t | Where-Object { $_ -like 'VPN server*' })
+        $srv.Count | Should -Be 3
+        foreach ($x in $srv) { $x | Should -Match "$($script:F.App)=.*openvpn\.exe" }
+        @($srv | Where-Object { $_ -match "$($script:F.RPort)=443" -and $_ -match '198\.51\.100\.7' -and $_ -match "$($script:F.Proto)=6" }).Count | Should -Be 1
+    }
+    It 'still scopes every permit and ends with the catch-all blocks' {
+        $eps = @([pscustomobject]@{ Ip = '203.0.113.9'; Proto = 17; Port = 51820 })
+        $specs = Get-VeroFilterSpec -Config $script:cfgW -Endpoints $eps -TunnelLuid 77
+        foreach ($x in (Get-SpecText $specs)) { $parts = $x -split '\|'; if ($parts[2] -eq 'permit') { $parts[4] | Should -Not -BeNullOrEmpty } }
+        @($specs | Where-Object { -not $_.Permit }).Count | Should -Be 4
+    }
+    It 'never permits a server without an address' { @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfgW -Endpoints @()) | Where-Object { $_ -like 'VPN server*' }).Count | Should -Be 0 }
+}
+
+Describe 'Sync-VeroKillSwitch for a WireGuard profile (mocked)' {
+    BeforeAll {
+        $script:cfgWs = Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com"}],"vm":false}'
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroDnsServer { @('192.168.1.1') }
+        Mock -ModuleName VeroScudo.Core Get-VeroWfpCount { 0 }
+        Mock -ModuleName VeroScudo.Core Resolve-VeroEndpoint { [pscustomobject]@{ Ip = '203.0.113.9'; Proto = 17; Port = 51820 } }
+        $script:applied = $null
+        Mock -ModuleName VeroScudo.Core Set-VeroWfpFilter { $script:applied = $Specs }
+    }
+    BeforeEach { Remove-TestFile (Get-VeroPath).WfpState, (Get-VeroPath).Emergency }
+    It 'uses the WireGuard endpoint, not the RAS ports' {
+        Sync-VeroKillSwitch -Config $script:cfgWs -Action test
+        $srv = @(Get-SpecText $script:applied | Where-Object { $_ -like 'VPN server*' })
+        $srv.Count | Should -Be 1; $srv[0] | Should -Match "$($script:F.RPort)=51820"
+    }
+    It '-ForceDown leaves the tunnel out even while it is up (Reconnect blocks first)' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]77 }
+        Sync-VeroKillSwitch -Config $script:cfgWs -Action test -ForceDown
+        @(Get-SpecText $script:applied | Where-Object { $_ -like 'VPN tunnel|*' }).Count | Should -Be 0
+        Sync-VeroKillSwitch -Config $script:cfgWs -Action test
+        @(Get-SpecText $script:applied | Where-Object { $_ -like 'VPN tunnel|*' }).Count | Should -Be 4
+    }
+}
+
+Describe 'Reconnect (the user action)' {
+    BeforeAll {
+        Set-Content (Get-VeroPath).Config $script:multiJson
+        $script:cfgR = Get-VeroConfig
+        $script:steps = New-Object System.Collections.ArrayList
+        $script:tunnel = @{ Up = $true }
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { [void]$script:steps.Add($(if ($ForceDown) { 'block' } else { 'sync' })) }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroHangUp { [void]$script:steps.Add('hangup'); $script:tunnel.Up = $false }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroDial { [void]$script:steps.Add('dial'); $script:tunnel.Up = $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $script:tunnel.Up }
+    }
+    AfterAll { Remove-TestFile (Get-VeroPath).Config, (Get-VeroPath).Renew, (Get-VeroPath).Lock; Set-VeroArmed $false 'test' }
+    BeforeEach { $script:steps.Clear(); $script:tunnel.Up = $true; Remove-TestFile (Get-VeroPath).Renew, (Get-VeroPath).Lock }
+    It 'blocks first, then hangs up, redials, and lets traffic through only once the tunnel is back' {
+        Set-VeroArmed $true 'test'
+        Invoke-VeroAction -Action reconnect -Config $script:cfgR
+        @($script:steps) | Should -Be @('block', 'hangup', 'sync', 'dial', 'sync')
+        Test-VeroArmed | Should -BeTrue
+        (Get-VeroRenewMarker).HungUp | Should -Not -BeNullOrEmpty
+    }
+    It 'does nothing while the VPN is off (there is nothing to reconnect)' {
+        Set-VeroArmed $false 'test'
+        Invoke-VeroAction -Action reconnect -Config $script:cfgR
+        $script:steps.Count | Should -Be 0
+    }
+}
+
+Describe 'Test-VeroRenewHangUp (our own hang-up is not "you hung up")' {
+    BeforeAll {
+        $now = Get-Date
+        $script:mk = [pscustomobject]@{ Profile = 'Work'; Start = $now.AddSeconds(-20).ToString('o'); HungUp = $now.AddSeconds(-10).ToString('o') }
+        $script:now = $now
+    }
+    It 'matches the hang-up of that profile inside the window' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Work' -EventTime $script:now.AddSeconds(-12) -Now $script:now | Should -BeTrue }
+    It 'ignores another profile' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Backup' -EventTime $script:now.AddSeconds(-12) -Now $script:now | Should -BeFalse }
+    It 'ignores a disconnect well after the reconnect (a real Off)' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Work' -EventTime $script:now.AddSeconds(25) -Now $script:now.AddSeconds(30) | Should -BeFalse }
+    It 'ignores a stale marker' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Work' -EventTime $script:now -Now $script:now.AddMinutes(10) | Should -BeFalse }
+    It 'ignores no marker' { Test-VeroRenewHangUp -Marker $null -ProfileName 'Work' -EventTime $script:now | Should -BeFalse }
+}
+
+Describe 'on-event during a Reconnect (mocked RAS)' {
+    BeforeAll {
+        $script:cfgE2 = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+    }
+    AfterEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).Renew }
+    It 'treats the 631 of our own hang-up as a failure: stays armed and redials' {
+        Set-VeroArmed $true 'test'
+        Set-VeroRenewMarker -ProfileName 'Work'; Set-VeroRenewMarker -ProfileName 'Work' -HungUp
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'R'; Code = 631; Conflict = $false; Time = (Get-Date) } }
+        Invoke-VeroAction -Action on-event -Config $script:cfgE2
+        Test-VeroArmed | Should -BeTrue
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroReconnect -Times 1 -Exactly
+    }
+}
+
+Describe 'rejected password pauses the redial' {
+    BeforeAll {
+        Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
+        if (-not (Test-IsTestDir (Get-VeroPath).UserDir)) { throw 'SAFETY: user folder outside the test folder' }
+        New-Item -ItemType Directory -Path (Get-VeroPath).UserDir -Force | Out-Null
+    }
+    AfterAll { Set-VeroHome $script:TestHomeDir; Set-VeroArmed $false 'test' }
+    It 'is blocked after a rejection and free again once a newer password is stored' {
+        $p = Get-VeroPath -VpnProfile 'Work'
+        Remove-TestFile $p.AuthFail, $p.Cred
+        Test-VeroAuthBlocked 'Work' | Should -BeFalse
+        Set-VeroAuthFailed -ProfileName 'Work' -Reason 'RAS error 691' -Action test
+        Test-VeroAuthBlocked 'Work' | Should -BeTrue
+        Start-Sleep -Milliseconds 50
+        Set-Content $p.Cred 'new'
+        (Get-Item $p.Cred).LastWriteTimeUtc = (Get-Item $p.AuthFail).LastWriteTimeUtc.AddSeconds(5)
+        Test-VeroAuthBlocked 'Work' | Should -BeFalse
+        Remove-TestFile $p.AuthFail, $p.Cred
+    }
+    It 'keeps the machine blocked without dialing while paused' {
+        $cfg = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
+        Set-VeroAuthFailed -ProfileName 'Work' -Reason 'test' -Action test
+        Set-VeroArmed $true 'test'
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroDial { }
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { $cfg }.GetNewClosure()
+        Mock -ModuleName VeroScudo.Core Start-Sleep { Set-VeroArmed $false 'test' }        # end the loop after one pass
+        Invoke-VeroReconnect -Config $cfg -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroDial -Times 0 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Sync-VeroKillSwitch -Times 1 -Exactly
+        Remove-TestFile (Get-VeroPath -VpnProfile 'Work').AuthFail, (Get-VeroPath).Lock
+    }
+}
+
+# ======================================================================== regressions from the review of the reserve types
+Describe 'Test-VeroOpenVpnConf is an allow-list that reads lines like OpenVPN' {
+    It 'refuses <what>' -ForEach @(
+        @{ what = 'a quoted option name';          line = '"plugin" C:\Users\me\x.dll' }
+        @{ what = 'a single-quoted option name';   line = "'plugin' x.dll" }
+        @{ what = 'an escaped option name';        line = 'plu\gin x.dll' }
+        @{ what = 'a capitalised option name';     line = 'Plugin x.dll' }
+        @{ what = 'pkcs11-providers (loads a DLL)'; line = 'pkcs11-providers C:\x.dll' }
+        @{ what = 'providers / engine';            line = 'providers legacy C:\x' }
+        @{ what = 'replay-persist (writes a file)'; line = 'replay-persist C:\Windows\x' }
+        @{ what = 'an unknown option';             line = 'ignore-unknown-option plugin' }
+        @{ what = 'setenv opt';                    line = 'setenv opt plugin x.dll' }
+        @{ what = 'a port out of range';           line = 'port 70000' }
+        @{ what = 'an unknown inline block';       line = "<plugin>`nx`n</plugin>" }
+    ) { (Test-VeroOpenVpnConf -Text ("remote vpn.example.com`n" + $line)).Errors.Count | Should -BeGreaterThan 0 }
+    It 'refuses a key file that would close its block and smuggle options in' {
+        $evil = { param($f) $null = $f; [Text.Encoding]::UTF8.GetBytes("-----BEGIN-----`n</ca>`nplugin C:\evil.dll`n<ca>`n-----END-----") }
+        (Test-VeroOpenVpnConf -Text "remote vpn.example.com`nca ca.crt" -ReadFile $evil).Errors -join ' ' | Should -Match 'tag line'
+    }
+    It 'ends an inline block where OpenVPN does (a line starting with the closing tag) and refuses what follows' {
+        (Test-VeroOpenVpnConf -Text "remote vpn.example.com`n<ca>`nabc`n</ca>x`nplugin evil.dll").Errors.Count | Should -BeGreaterThan 1
+    }
+    It 'gives each connection block its own protocol and port' {
+        $r = Test-VeroOpenVpnConf -Text "client`nproto udp`n<connection>`nremote a.example.com`nproto udp`nport 1194`n</connection>`n<connection>`nremote b.example.com`nproto tcp-client`nport 443`n</connection>"
+        $r.Errors.Count | Should -Be 0
+        ($r.Remotes | Where-Object Host -eq 'a.example.com').Proto | Should -Be 'udp'; ($r.Remotes | Where-Object Host -eq 'a.example.com').Port | Should -Be 1194
+        ($r.Remotes | Where-Object Host -eq 'b.example.com').Proto | Should -Be 'tcp'; ($r.Remotes | Where-Object Host -eq 'b.example.com').Port | Should -Be 443
+    }
+    It 'accepts a typical provider config' {
+        $r = Test-VeroOpenVpnConf -Text "client`ndev tun`nproto udp`nremote se-sto.example.com 1194`nresolv-retry infinite`nnobind`npersist-key`npersist-tun`nremote-cert-tls server`ncipher AES-256-GCM`nauth SHA256`nverb 3`nauth-user-pass`n<ca>`nX`n</ca>"
+        $r.Errors | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'rejected password pause regressions' {
+    BeforeAll { Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user'); New-Item -ItemType Directory -Path (Get-VeroPath).UserDir -Force | Out-Null }
+    AfterAll { Set-VeroHome $script:TestHomeDir }
+    It 'pauses again when the newly stored password is rejected too' {
+        $p = Get-VeroPath -VpnProfile 'Work'
+        Remove-TestFile $p.AuthFail, $p.Cred
+        Set-VeroAuthFailed -ProfileName 'Work' -Reason 'first' -Action test
+        Set-Content $p.Cred 'second'; (Get-Item $p.Cred).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddSeconds(5)
+        Test-VeroAuthBlocked 'Work' | Should -BeFalse                       # resumes with the new password ...
+        Set-VeroAuthFailed -ProfileName 'Work' -Reason 'second' -Action test
+        (Get-Item $p.AuthFail).LastWriteTimeUtc = (Get-Item $p.Cred).LastWriteTimeUtc.AddSeconds(1)
+        Test-VeroAuthBlocked 'Work' | Should -BeTrue                        # ... and pauses again when that one is rejected
+        Remove-TestFile $p.AuthFail, $p.Cred
+    }
+    It 'lifts a rejected key passphrase only with a newer passphrase, not a newer password' {
+        $p = Get-VeroPath -VpnProfile 'Work'
+        Set-VeroAuthFailed -ProfileName 'Work' -Reason 'key' -Action test -Which Key
+        Set-Content $p.Cred 'pw'; (Get-Item $p.Cred).LastWriteTimeUtc = (Get-Item $p.AuthFail).LastWriteTimeUtc.AddSeconds(5)
+        Test-VeroAuthBlocked 'Work' | Should -BeTrue
+        Set-Content $p.KeyPass 'kp'; (Get-Item $p.KeyPass).LastWriteTimeUtc = (Get-Item $p.AuthFail).LastWriteTimeUtc.AddSeconds(5)
+        Test-VeroAuthBlocked 'Work' | Should -BeFalse
+        Remove-TestFile $p.AuthFail, $p.Cred, $p.KeyPass
+    }
+}
+
+Describe 'on-event ignores RAS events for other profile types' {
+    BeforeAll { Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }; Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }; Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false } }
+    AfterEach { Set-VeroArmed $false 'test' }
+    It 'a (forged) 631 naming a WireGuard profile does not disarm' {
+        Set-VeroArmed $true 'test'
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'wg'; CoId = 'F'; Code = 631; Conflict = $false; Time = (Get-Date) } }
+        Invoke-VeroAction -Action on-event -Config (Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com"}]}')
+        Test-VeroArmed | Should -BeTrue
+        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
+    }
+}
+
+Describe 'Update-VeroWgWatch: switching tunnels in the WireGuard app' {
+    BeforeAll {
+        Set-Content (Get-VeroPath).Config '{"profiles":[{"profile":"B","type":"wireguard","server":"b.example.com"},{"profile":"A","type":"wireguard","server":"a.example.com"}],"activeProfile":"A"}'
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Test-VeroLockAlive { $false }
+    }
+    AfterAll { Remove-TestFile (Get-VeroPath).Config, (Get-VeroPath).ActiveProfile; Set-VeroArmed $false 'test' }
+    It 'B activated and A removed in one pass ends armed on B, never disarmed' {
+        Set-VeroArmed $true 'test'
+        $script:wgStates = @{ A = 'running'; B = 'missing' }
+        Mock -ModuleName VeroScudo.Core Get-VeroWgState { $script:wgStates[$ProfileName] }
+        $null = Update-VeroWgWatch -Config (Get-VeroConfig) -Action test             # first look
+        $script:wgStates = @{ A = 'missing'; B = 'running' }
+        $null = Update-VeroWgWatch -Config (Get-VeroConfig) -Action test
+        Test-VeroArmed | Should -BeTrue
+        (Get-VeroConfig).Profile | Should -Be 'B'
+        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
     }
 }

@@ -29,6 +29,10 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 | Non-admin code redirecting the elevated guard | no environment overrides; state folder writable by administrators only; config validated |
 | The VPN password leaking via process lists / EDR logs | `RasDial` API, never on a command line; DPAPI-encrypted per user |
 | A tampered update link | only this project's GitHub release pages are opened; nothing is installed automatically |
+| An imported OpenVPN config running code as administrator | only an allow-list of client options is accepted (no scripts, plugins, PKCS#11/OpenSSL modules, management, includes, logs, proxies; no quoted or escaped option names); key files inlined only when they hold no tag lines; checked again by the elevated import, the stored text once more as a whole; administrators-only; `--script-security 1` on the command line |
+| A local program taking over VeroScudo's OpenVPN | management on 127.0.0.1, a random port, a one-time password in an administrators-only file (deleted after login), and VeroScudo connects first while OpenVPN waits in hold |
+| Retrying a rejected password until the VPN account is locked | the redial pauses (still blocked) until a newer password is stored |
+| A dead WireGuard link that keeps its adapter up | judged by handshake age and restarted; meanwhile traffic goes into the dead tunnel and is lost, never out of the physical NIC |
 
 ### Out of scope - what it does **not** protect against
 
@@ -39,8 +43,11 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 - **Traffic inside the tunnel** - that is the VPN's job.
 - **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/libvirt bridged mode) - their
   frames bypass the host's IP stack. NAT-mode VMs, WSL and Docker are covered (with a ~1–2 s window after a drop).
-- **Third-party VPN apps** with their own tunnel drivers (OpenVPN GUI, WireGuard app, Hiddify, vendor
-  clients) - VeroScudo cannot tell their "you hung up" from a failure.
+- **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, Hiddify, NordVPN ...) -
+  VeroScudo cannot tell their "you hung up" from a failure. It detects their tunnels and filter layers and shows
+  *Attention*. OpenVPN (run by VeroScudo itself) and the WireGuard app's tunnels are supported profile types (beta).
+- **WireGuard: the first 1-3 minutes of a silent drop** - traffic goes into the dead tunnel and is lost (not leaked)
+  until the handshake age shows the drop; then the redial starts.
 - **DNS while blocked** is the one documented side channel: the OS resolver may query the
   network's DNS servers (needed to find the VPN server).
 - **macOS (alpha)**: the boot window before launchd starts the daemon; no VM filtering.

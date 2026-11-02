@@ -37,6 +37,8 @@ No timers, no automatic unblock, no rescue action. "Strict" is not a setting.
 | ARMED/DOWN → ARMED/UP | redial succeeded (connected event) | re-bind the tunnel interface in the filters, re-allow the VM/WSL path |
 | ARMED → DISARMED | VPN terminated event with the *user-requested* reason, or the guard's own `off` | remove `armed` flag, remove every filter |
 | profile switch | tray / `veroscudo use` | see *Profiles* - stays blocked throughout |
+| Reconnect (user) | tray *Reconnect VPN*, `-Action reconnect`, `veroscudo reconnect` | while armed: apply the filters **without** the tunnel, hang it up, redial; ARMED/DOWN until the new tunnel is up. Our own hang-up is marked (`renew.json` / `renew.marker`) so its "user-requested" reason is read as a failure, not as your Off |
+| password rejected | RAS 691, OpenVPN `Verification Failed: 'Auth'` | stay blocked, stop redialing (`authfail-*.flag`) until a newer password is stored or you press On / Reconnect - retrying could lock the account |
 | watchdog (every 15 s) | timer | armed ⇒ recompute the filter set and re-apply it if it differs or went missing, redial if down; disarmed but filters present ⇒ remove |
 
 "Failure" vs "user-requested" is the only judgement the guard makes and it comes from the
@@ -47,6 +49,47 @@ platform's VPN subsystem, never from heuristics:
 | Windows | System log, RasMan 20267 (profile = field 2) | Application log, RasClient 20226 | reason code 631 |
 | Linux (NetworkManager) | `ActiveConnection.StateChanged` → activated | → deactivated | reason `user-requested` (2) |
 | macOS (alpha) | `scutil --nc status` polling | idem | **none available** - every drop counts as a failure; `veroscudo off` to stop |
+| Windows, OpenVPN profile | the runner reads `>STATE:...,CONNECTED` on the management interface | `>STATE:...,EXITING` / the process ends | only VeroScudo's own `signal SIGTERM` (Off, switch, Reconnect) - any other end is a failure |
+| Windows, WireGuard profile | watchdog: the tunnel service started (WireGuard app) | service stopped / crashed, or no handshake for 3 min | the service was **removed** (deactivated in the WireGuard app) while VeroScudo was not reconnecting it |
+
+## Profile types (Windows)
+
+Every profile has a `type`; the guard, the filters, the watchdog and the tray are shared, and each type supplies five
+things: how to tell the tunnel is up, its adapter, its server endpoints, how to dial and how to hang up.
+
+| | `ras` (default, stable) | `openvpn` (beta) | `wireguard` (beta) |
+|---|---|---|---|
+| client | Windows built-in (RAS) | `openvpn.exe` (OpenVPN community), run by VeroScudo | WireGuard for Windows (tunnel service `WireGuardTunnel$<name>`) |
+| up = | the RAS adapter is up | the runner saw `CONNECTED` and that tunnel address sits on an up tunnel adapter (TAP/Wintun/DCO) | the service runs **and** the last handshake is < 3 min old (the adapter itself is allowed while the service runs) |
+| adapter (LUID) | the `Ppp` adapter named like the profile | the tunnel adapter holding the CONNECTED address | the `WireGuard` adapter named like the tunnel |
+| server permit | per tunnel type (SSTP/IKEv2/L2TP/PPTP ports), TCP from `svchost.exe` | every `remote` of the `.ovpn` on its protocol/port, only from `openvpn.exe` (DCO off by default; `"dco": true` drops the program condition) | UDP to the endpoint (no program: the kernel driver sends it); the address the tunnel really uses is learned while it runs |
+| dial | `RasDial` with the stored credential | start the runner task, wait for CONNECTED | start / install the tunnel service; a silent tunnel is removed and installed again (fresh name lookup) |
+| hang up | `rasdial /disconnect` | stop request -> the runner sends `signal SIGTERM` | `wireguard.exe /uninstalltunnelservice` (what the app's *Deactivate* does) |
+| password | DPAPI per user, `RasDial` | the same store, sent over the management connection | none (keys in the WireGuard app) |
+
+**OpenVPN runner.** The elevated task `\VeroScudo\OpenVPN` (one per session, mutex) runs `openvpn.exe` for the active
+profile while armed: your file first, then VeroScudo's options so they win - `--management 127.0.0.1 <random port>
+<one-time password file>` (administrators only, deleted after login), `--management-hold`, `--management-query-passwords`,
+`--auth-retry interact`, `--auth-nocache`, `--script-security 1`, its own `--log`, `--auth-user-pass` (no file) and
+`--disable-dco` (2.6+). It answers password / key-passphrase / static-challenge prompts, follows `>STATE:` (re-syncing the
+filters on CONNECTED / RECONNECTING / EXITING) and restarts OpenVPN every `retrySeconds` when it ends on its own. It stops on
+Off, on a switch to another profile, on a rejected password and on VeroScudo's stop request. Imported configs may use only an
+**allow-list** of known client options (no `up`/`down`/`plugin`/`pkcs11-providers`/`providers`/`engine`/`management`/`config`/
+`log`/proxies, no `script-security` above 1, no option names with quotes or escapes); inline blocks end where OpenVPN ends them;
+referenced key files are inlined at import and refused if they contain tag lines; the stored result is checked again as a whole.
+
+**WireGuard watch.** Only the long-running watchdog keeps the previous state of each WireGuard tunnel service, so it alone
+sees the edges: *not running -> running* while not the armed active profile = activated in the WireGuard app -> arm and
+make it active (like connecting a Windows VPN by hand); *running -> removed* while armed, active and no reconnect running =
+deactivated in the app -> your Off. *running -> stopped* (still installed: a crash, `services.msc`) is a failure. All starts
+are handled before any removal in a pass, so switching tunnels in the app ends armed on the new one. The adapter is allowed
+while the service runs (app traffic is what starts a handshake when no keepalive is set; a dead tunnel only loses it - its
+routes point into it). A tunnel without a handshake for 3 minutes counts as down and the redial restarts it.
+
+**Conflicts.** About once a minute the watchdog lists what else tunnels or filters next to VeroScudo (`state\conflicts.json`):
+`openvpn.exe` it did not start, an `.ovpn` with the same server in OpenVPN GUI's or the OpenVPN service's folders, other
+active WireGuard tunnels, any other up tunnel adapter (vendor VPN apps), and WFP providers of known VPN apps. Read-only;
+the tray shows *Attention* while armed and protected.
 
 ### Event checks (anti-spoofing)
 
@@ -152,8 +195,9 @@ connecting a VPN that is not configured is ignored.
 | program | `C:\Program Files\VeroScudo\` (+ `VeroScudo.Native.dll`, compiled at install) | python package (pip) | venv in `/usr/local/lib/veroscudo` |
 | config | `%ProgramData%\VeroScudo\config.json` | `/etc/veroscudo/config.json` | `/etc/veroscudo/config.json` |
 | state + log | `%ProgramData%\VeroScudo\state\` - Administrators/SYSTEM full, Users read only | `/var/lib/veroscudo/` (armed flag, active profile, server cache - survive reboot), `/run/veroscudo/` (lock), `/var/log/veroscudo.log` | `/var/lib/veroscudo/`, `/var/run/veroscudo/`, `/var/log/veroscudo.log` |
-| per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `switch.request`, `update.json` | – | – |
-| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,Watchdog,On,Off,Switch}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
+| per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `keypass-<profile>.xml` (OpenVPN key), `otp-<profile>.txt` (one-time code, read once), `switch.request`, `update.json`, `tray.json` (keep awake, last profile for the switch notice) | `~/.config/veroscudo/tray.json` | – |
+| OpenVPN (Windows) | `%ProgramData%\VeroScudo\openvpn\<profile>.ovpn` (administrators/SYSTEM only); `state\ovpn-<profile>.json/.log` | – | – |
+| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,Watchdog,On,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
 | kill-switch | WFP provider/sublayer "VeroScudo" + Hyper-V rule `VeroScudo-WSL` | nftables table `inet veroscudo` | pf anchor `com.apple/250.VeroScudo` |
 
 The Windows state location is fixed: it is never taken from an environment variable (a value a
@@ -165,7 +209,9 @@ non-admin process can plant in `HKCU\Environment` must not redirect an elevated 
 {
   "profiles": [
     { "profile": "Work",   "server": "vpn.example.com",  "port": 443,  "username": "jdoe" },
-    { "profile": "Backup", "server": "vpn2.example.com", "port": 4500, "username": "jdoe", "protocol": "udp", "serverIps": ["198.51.100.9"] }
+    { "profile": "Backup", "server": "vpn2.example.com", "port": 4500, "username": "jdoe", "protocol": "udp", "serverIps": ["198.51.100.9"] },
+    { "profile": "Reserve", "type": "openvpn", "username": "jdoe", "auth": true },
+    { "profile": "wg-home", "type": "wireguard", "server": "wg.example.com", "port": 51820 }
   ],
   "activeProfile":   "Work",
   "retrySeconds":    10,
@@ -181,7 +227,11 @@ profile names without control/wildcard characters, host names or IPs, ports 1-65
 `retrySeconds` 3-3600, `serverIps` real addresses, `lanAllow` real ranges no wider than IPv4 /8
 or IPv6 /16 (never `0.0.0.0/0`, `Any`).
 
-- `profile`: the OS's name for the VPN (Windows Settings > VPN, NetworkManager connection id, macOS VPN service).
+- `profile`: the OS's name for the VPN (Windows Settings > VPN, NetworkManager connection id, macOS VPN service; the
+  WireGuard app's tunnel name - 1-32 of `A-Z a-z 0-9 _ = + . -`).
+- `type` (Windows): `ras` (default), `openvpn` or `wireguard` - see *Profile types*. `openvpn` needs no `server`
+  (the imported `.ovpn`'s `remote` lines are used), `auth` says whether it asks for a password, `dco: true` keeps the
+  kernel data channel. `wireguard` needs `server` + `port` (its endpoint) and no username.
 - `protocol` (Linux/macOS): `tcp` or `udp` - the VPN control channel. On Windows it follows the profile's tunnel type.
 - `serverIps`: pin the server addresses (nothing is resolved for that profile).
 - `vm`: `"auto"` (detect WSL/Docker), `true`, `false`.

@@ -41,10 +41,29 @@ def load_pref(path: Path | None = None) -> bool:
 
 
 def save_pref(on: bool, path: Path | None = None) -> None:
+    set_pref("keepAwake", on, path)
+
+
+def get_pref(key: str, default=None, path: Path | None = None):
+    try:
+        return json.loads((path or pref_file()).read_text()).get(key, default)
+    except (OSError, ValueError, AttributeError):
+        return default
+
+
+def set_pref(key: str, value, path: Path | None = None) -> None:
+    """Updates one key of the per-user tray.json, keeping the others."""
     path = path or pref_file()
     try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = value
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"keepAwake": on}))
+        path.write_text(json.dumps(data))
     except OSError:
         log.debug("could not save %s", path, exc_info=True)
 

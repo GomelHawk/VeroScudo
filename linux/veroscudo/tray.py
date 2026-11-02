@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import __version__, keepawake, nm, update
 from .config import Config
-from .state import StateStore
+from .state import StateStore, kind_label, switch_notice
 
 ICONS = Path("/usr/share/veroscudo/icons")
 
@@ -46,6 +46,8 @@ def main() -> int:
     menu.append(Gtk.SeparatorMenuItem())
     on_item = Gtk.MenuItem(label="Turn VPN on"); on_item.connect("activate", lambda *_: subprocess.Popen(["sudo", "-n", "veroscudo", "on"])); menu.append(on_item)
     off_item = Gtk.MenuItem(label="Turn VPN off"); off_item.connect("activate", lambda *_: subprocess.Popen(["sudo", "-n", "veroscudo", "off"])); menu.append(off_item)
+    redo_item = Gtk.MenuItem(label="Reconnect VPN"); redo_item.connect("activate", lambda *_: subprocess.Popen(["sudo", "-n", "veroscudo", "reconnect"])); menu.append(redo_item)
+    kinds = {n: nm.kind(n) for n in cfg.names}
     prof_item = Gtk.MenuItem(label="VPN profile"); prof_menu = Gtk.Menu(); prof_item.set_submenu(prof_menu); menu.append(prof_item)
     shown = {"active": None}
 
@@ -54,13 +56,13 @@ def main() -> int:
             prof_menu.remove(child)
         group = None
         for name in cfg.names:
-            it = Gtk.RadioMenuItem.new_with_label_from_widget(group, name)
+            it = Gtk.RadioMenuItem.new_with_label_from_widget(group, f"{name} ({kind_label(kinds.get(name))})")
             group = group or it
             it.set_active(name == active)
             # the switch itself runs as root (sudoers: veroscudo use *); the name is checked there against config.json
             it.connect("toggled", lambda w, n=name: w.get_active() and n != shown["active"] and subprocess.Popen(["sudo", "-n", "veroscudo", "use", n]))
             prof_menu.append(it)
-        prof_item.set_label(f"VPN profile: {active}")
+        prof_item.set_label(f"VPN profile: {active} ({kind_label(kinds.get(active))})")
         prof_menu.show_all()
         shown["active"] = active
     fill_profiles(cfg.profile)
@@ -124,6 +126,11 @@ def main() -> int:
             cfg = cfg.with_active(active)
         if cfg.profile != shown["active"]:
             fill_profiles(cfg.profile)
+        if keepawake.get_pref("lastProfile") != cfg.profile:          # every switch to a WireGuard profile, once
+            keepawake.set_pref("lastProfile", cfg.profile)
+            notice = switch_notice(kinds.get(cfg.profile), cfg.profile)
+            if notice:
+                subprocess.Popen(["notify-send", "-a", "VeroScudo", "-u", "normal", "VeroScudo - WireGuard profile", notice])
         armed, up = store.armed, nm.is_connected(cfg.profile)
         state = "off" if not armed else ("protected" if up else "blocked")
         if state != last["state"]:
@@ -133,7 +140,7 @@ def main() -> int:
             ind.set_icon_full(str(icon), state)
             ind.set_title({"protected": "VeroScudo - protected", "blocked": "VeroScudo - BLOCKED, reconnecting", "off": "VeroScudo - off"}[state])
             last["state"] = state
-        on_item.set_sensitive(state != "protected"); off_item.set_sensitive(armed or up)
+        on_item.set_sensitive(state != "protected"); off_item.set_sensitive(armed or up); redo_item.set_sensitive(armed)
         if awake_item.get_active() != awake.active:        # the inhibitor died on its own
             awake_item.handler_block(awake_handler); awake_item.set_active(awake.active); awake_item.handler_unblock(awake_handler)
         return True

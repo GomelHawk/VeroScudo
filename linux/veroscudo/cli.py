@@ -1,4 +1,6 @@
-"""veroscudo on|off|status|profiles|use <profile>|awake|arm|disarm|reconnect|watchdog|daemon|boot"""
+"""veroscudo on|off|reconnect|status|profiles|use <profile>|check|awake|arm|disarm|watchdog|daemon|boot
+
+reconnect = your Reconnect: block, take the VPN down, redial; traffic again once the tunnel is back."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +13,7 @@ from . import __version__, keepawake
 from .backend import firewall, nm
 from .config import Config
 from .daemon import Guard
-from .state import StateStore
+from .state import StateStore, kind_label, switch_notice
 
 LOG = "/var/log/veroscudo.log"
 
@@ -29,7 +31,8 @@ def _setup_logging() -> None:
 def status(cfg: Config, store: StateStore) -> int:
     armed, up = store.armed, nm.is_connected(cfg.profile)
     state = "off" if not armed else ("protected" if up else "blocked")
-    print(f"profile    : {cfg.profile}")
+    kind = nm.kind(cfg.profile)
+    print(f"profile    : {cfg.profile} ({kind_label(kind)})")
     print(f"profiles   : {', '.join(cfg.names)}")
     print(f"armed      : {armed}")
     print(f"connected  : {up}")
@@ -37,12 +40,18 @@ def status(cfg: Config, store: StateStore) -> int:
     print(f"killswitch : {'active' if firewall.is_active() else 'inactive'}")
     print(f"tunnel     : {nm.iface(cfg.profile) or '-'}")
     print(f"reconnect  : {store.lock_alive()}")
+    others = nm.other_tunnels(nm.iface(cfg.profile))
+    if others:
+        print(f"attention  : another tunnel next to VeroScudo: {', '.join(others)}")
+    notice = switch_notice(kind, cfg.profile)
+    if notice:
+        print(f"notice     : {notice}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
-    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "check", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
     ap.add_argument("name", nargs="?", help="profile name (for 'use')")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
@@ -55,7 +64,13 @@ def main(argv: list[str] | None = None) -> int:
         return status(cfg, store)
     if a.action == "profiles":
         for n in cfg.names:
-            print(("* " if n == cfg.profile else "  ") + n)
+            print(("* " if n == cfg.profile else "  ") + f"{n} ({kind_label(nm.kind(n))})")
+        return 0
+    if a.action == "check":
+        problems = nm.check(cfg)
+        for line in problems:
+            print(line)
+        print("check: no problems found" if not problems else f"check: {len(problems)} note(s)")
         return 0
     if a.action == "use" and not a.name:
         print("veroscudo use <profile>   (see: veroscudo profiles)", file=sys.stderr)
@@ -70,8 +85,11 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"veroscudo: {e}", file=sys.stderr)
             return 2
+        notice = switch_notice(nm.kind(a.name), a.name)
+        if notice:
+            print(f"NOTICE: {notice}")
         return 0
-    {"on": g.on, "off": g.off, "arm": g.arm, "disarm": g.disarm, "reconnect": g.reconnect,
+    {"on": g.on, "off": g.off, "arm": g.arm, "disarm": g.disarm, "reconnect": g.renew,
      "watchdog": g.watchdog, "daemon": g.run, "boot": g.boot}[a.action]()
     return 0
 

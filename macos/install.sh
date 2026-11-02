@@ -39,7 +39,7 @@ launchctl bootout system/com.gomelhawk.veroscudo 2>/dev/null || true
 launchctl bootstrap system /Library/LaunchDaemons/com.gomelhawk.veroscudo.plist
 
 cat > /etc/sudoers.d/veroscudo.tmp <<EOF
-$USER_NAME ALL=(root) NOPASSWD: /usr/local/bin/veroscudo on, /usr/local/bin/veroscudo off, /usr/local/bin/veroscudo use *
+$USER_NAME ALL=(root) NOPASSWD: /usr/local/bin/veroscudo on, /usr/local/bin/veroscudo off, /usr/local/bin/veroscudo reconnect, /usr/local/bin/veroscudo use *
 EOF
 visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null && mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
 chmod 440 /etc/sudoers.d/veroscudo

@@ -119,6 +119,7 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
                         var pt = new PointF(8 + (float)(r * Math.Cos(a)), 8 + (float)(r * Math.Sin(a))); if (i == 0) path.StartFigure(); path.AddLine(pt, pt); }
                     path.CloseFigure(); g.FillPath(br, path);
                     using (var hole = new SolidBrush(t.Card)) g.FillEllipse(hole, 5.6f, 5.6f, 4.8f, 4.8f); break; }
+                case "redo": g.DrawArc(pen, 2.5f, 3, 11, 11, 30, 300); g.FillPolygon(br, new[] { new PointF(14.6f, 6.4f), new PointF(13.6f, 1.4f), new PointF(9.8f, 4.6f) }); break;
                 case "sync": g.DrawArc(pen, 2.5f, 2.5f, 11, 11, 200, 230); g.FillPolygon(br, new[] { new PointF(13.8f, 2.2f), new PointF(14.2f, 7.2f), new PointF(9.6f, 5.4f) }); break;
                 case "help": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawArc(pen, 5.6f, 4.6f, 4.8f, 4.4f, 200, 230); g.DrawLine(pen, 8, 8.6f, 8, 10f); g.FillEllipse(br, 7.1f, 11.2f, 1.8f, 1.8f); break;
                 case "power": g.DrawArc(pen, 2.5f, 3, 11, 11, -60, 300); g.DrawLine(pen, 8, 1.5f, 8, 7.5f); break;
@@ -212,21 +213,32 @@ function Get-StateImage([string]$state, [int]$size) {
 }
 function Get-State {
     if (-not $global:Config) { return [pscustomobject]@{ State = 'attention'; Title = 'Not configured'; Text = 'Run Install.ps1 to create config.json'; Armed = $false; Connected = $false } }
-    $armed = Test-VeroArmed; $up = Test-VeroVpnConnected $global:Config.Profile
-    $cp = Get-VeroPath -VpnProfile $global:Config.Profile
-    $cred = (Test-Path $cp.Cred) -or (Test-Path $cp.LegacyCred)
-    $state = if (-not $cred) { 'attention' } elseif (-not $armed) { 'off' } elseif ($up) { 'protected' } else { 'blocked' }
+    $name = $global:Config.Profile; $type = $global:Config.Type
+    $armed = Test-VeroArmed; $up = Test-VeroVpnConnected $name -Type $type
+    $cp = Get-VeroPath -VpnProfile $name
+    $cred = (-not (Test-VeroNeedsPassword $global:Config)) -or (Test-Path $cp.Cred) -or (Test-Path $cp.LegacyCred)
+    $ovpn = if ($type -eq 'openvpn') { Get-VeroOpenVpnStatus $name } else { $null }
+    $conflicts = @(if ($armed) { Get-VeroConflictList })
+    $why = $null
+    if (-not $cred) { $why = "VPN password for '$name' not stored - open Settings" }
+    elseif (Test-VeroAuthBlocked $name) { $why = "The password for '$name' was rejected. Store the right one in Settings, then Reconnect - traffic stays blocked meanwhile." }
+    elseif ($ovpn -and [string]$ovpn.State -eq 'NEED_OTP') { $why = "'$name' asks for a one-time code: $($ovpn.Challenge)" }
+    elseif ($armed -and $up -and $conflicts.Count -gt 0) { $why = "Next to VeroScudo: $($conflicts[0])" }
+    $state = if ($why) { 'attention' } elseif (-not $armed) { 'off' } elseif ($up) { 'protected' } else { 'blocked' }
     $title, $text = switch ($state) {
-        'protected' { 'Protected', "$($global:Config.Profile) connected - kill-switch on" }
-        'blocked'   { 'Blocked - reconnecting', "$($global:Config.Profile) lost - nothing leaves this PC until it is back" }
+        'protected' { 'Protected', "$name ($(Get-VeroTypeLabel $type)) connected - kill-switch on" }
+        'blocked'   { 'Blocked - reconnecting', "$name lost - nothing leaves this PC until it is back" }
         'off'       { 'Off', 'VPN turned off by you - normal network, not protected' }
-        default     { 'Attention', "VPN password for '$($global:Config.Profile)' not stored - open Settings" }
+        default     { 'Attention', $why }
     }
     [pscustomobject]@{ State = $state; Title = $title; Text = $text; Armed = $armed; Connected = $up }
 }
 function Invoke-GuardTask([string]$name) { Start-Process schtasks.exe -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
 function Get-LastEvents([int]$n = 6) { if (Test-Path $global:Paths.Log) { Get-Content $global:Paths.Log -Tail $n | ForEach-Object { $_ -replace '^\d{4}-\d\d-\d\d ', '' } } else { @() } }
-function Get-LastDrop { try { $e = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='RasClient'; Id=20226 } -MaxEvents 1 -ErrorAction Stop; if ($e.Properties[2].Value -eq $global:Config.Profile) { $c = $e.Properties[3].Value; return ('{0:HH:mm} - {1}' -f $e.TimeCreated, $(if ($c -eq 631) { 'you disconnected' } elseif ($c -eq 829) { 'link failure (829)' } else { "code $c" })) } } catch { Write-Verbose 'no RAS event' }; '-' }
+function Get-LastDrop {
+    if ($global:Config -and $global:Config.Type -eq 'openvpn') { $s = Get-VeroOpenVpnStatus $global:Config.Profile; if ($s) { return ('{0}{1}' -f $s.State, $(if ($s.Reason) { ' - ' + $s.Reason })) }; return '-' }
+    if ($global:Config -and $global:Config.Type -eq 'wireguard') { return "handshake $(Get-VeroWgHealthNow $global:Config.Profile)" }
+    try { $e = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='RasClient'; Id=20226 } -MaxEvents 1 -ErrorAction Stop; if ($e.Properties[2].Value -eq $global:Config.Profile) { $c = $e.Properties[3].Value; return ('{0:HH:mm} - {1}' -f $e.TimeCreated, $(if ($c -eq 631) { 'you disconnected' } elseif ($c -eq 829) { 'link failure (829)' } else { "code $c" })) } } catch { Write-Verbose 'no RAS event' }; '-' }
 
 # ---------------------------------------------------------------- UI building blocks
 function New-Form([string]$title, [int]$w, [int]$h) {
@@ -270,12 +282,12 @@ function Show-Status {
     $pic = New-Object System.Windows.Forms.PictureBox; $pic.Location = (P 16 14); $pic.Size = (Z 64 64); $pic.SizeMode = 'Zoom'; $pic.BackColor = 'Transparent'; $hero.Controls.Add($pic)
     $title = New-Label $hero '' 96 18 300 30 $FontBig
     $sub   = New-Label $hero '' 96 50 310 36 $FontSmall $global:Theme.Sub
-    $cards = @{}
+    $cards = @{}; $heads = @{}
     $i = 0
     foreach ($k in 'VPN profile', 'Firewall', 'Last drop', 'Redial') {
         $cx = 20 + ($i % 2) * 215; $cy = 126 + [math]::Floor($i / 2) * 78
         $c = New-Card $f $cx $cy 205 66
-        New-Label $c ($k.ToUpper()) 12 8 180 16 $FontSmall $global:Theme.Sub | Out-Null
+        $heads[$k] = New-Label $c ($k.ToUpper()) 12 8 180 16 $FontSmall $global:Theme.Sub
         $cards[$k] = New-Label $c '' 12 28 185 24 $FontBold
         $i++
     }
@@ -284,9 +296,11 @@ function Show-Status {
     $evText = New-Object System.Windows.Forms.TextBox; $evText.Multiline = $true; $evText.ReadOnly = $true; $evText.BorderStyle = 'None'
     $evText.Location = (P 12 30); $evText.Size = (Z 396 120); $evText.Font = $FontMono; $evText.BackColor = $global:Theme.Card; $evText.ForeColor = $global:Theme.Text; $evText.ScrollBars = 'None'; $evText.WordWrap = $false; $evText.TabStop = $false; $evText.Cursor = 'Default'
     $ev.Controls.Add($evText)
-    $bOnOff = New-Button $f 'Turn VPN off' 20 470 135
-    $bLog   = New-Button $f 'Open log' 165 470 130
-    $bCopy  = New-Button $f 'Copy report' 305 470 135 $true
+    $bOnOff = New-Button $f 'Turn VPN off' 20 470 99
+    $bRedo  = New-Button $f 'Reconnect' 127 470 99
+    $bLog   = New-Button $f 'Open log' 234 470 99
+    $bCopy  = New-Button $f 'Copy report' 341 470 99 $true
+    $bRedo.Add_Click(({ Request-Reconnect }).GetNewClosure())
     $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }).GetNewClosure())
     $bCopy.Add_Click(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $bCopy.Text = 'Copied'; }).GetNewClosure())
     $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Invoke-GuardTask 'On' } }).GetNewClosure())
@@ -295,6 +309,8 @@ function Show-Status {
         $pic.Image = Get-StateImage $st.State 64; $title.Text = $st.Title; $sub.Text = $st.Text
         $title.ForeColor = switch ($st.State) { 'protected' { [System.Drawing.Color]::FromArgb(48,200,79) } 'blocked' { [System.Drawing.Color]::FromArgb(248,80,70) } 'attention' { [System.Drawing.Color]::FromArgb(252,187,45) } default { $global:Theme.Text } }
         $cards['VPN profile'].Text = if ($global:Config) { $global:Config.Profile } else { '-' }
+        $heads['VPN profile'].Text = if ($global:Config) { ('VPN profile - ' + (Get-VeroTypeLabel $global:Config.Type)).ToUpper() } else { 'VPN PROFILE' }
+        $bRedo.Enabled = $st.Armed
         $cards['Firewall'].Text = if ($st.Armed) { 'kill-switch ON' } else { 'normal' }
         $cards['Firewall'].ForeColor = if ($st.Armed -and -not $st.Connected) { [System.Drawing.Color]::FromArgb(248,80,70) } else { $global:Theme.Text }
         $cards['Last drop'].Text = Get-LastDrop
@@ -323,43 +339,147 @@ function Read-Password([string]$who) {
     $result.Value
 }
 
+function Read-Otp([string]$question, [string]$profileName) {
+    <# OpenVPN static challenge: the code goes to the runner through a file in your own folder, read once. #>
+    $of = New-Form 'One-time code' 360 170
+    New-Label $of "$profileName asks: $question" 20 16 320 40 $FontSmall $global:Theme.Sub | Out-Null
+    $tc = New-Input $of 20 62 320 ''
+    $ok = New-Button $of 'Send' 230 110 110 $true
+    $result = @{ Value = $null }
+    $ok.Add_Click(({ $result.Value = $tc.Text.Trim(); $of.Close() }).GetNewClosure())
+    $of.TopMost = $true
+    $of.ShowDialog() | Out-Null
+    $result.Value
+}
+
+$global:OtpAsked = ''
+function Request-Otp {
+    if (-not $global:Config -or $global:Config.Type -ne 'openvpn') { return }
+    $s = Get-VeroOpenVpnStatus $global:Config.Profile
+    if (-not $s -or [string]$s.State -ne 'NEED_OTP') { $global:OtpAsked = ''; return }
+    if ($global:OtpAsked -eq [string]$s.Time) { return }
+    $global:OtpAsked = [string]$s.Time
+    $code = Read-Otp ([string]$s.Challenge) $global:Config.Profile
+    if ($code) {
+        $cp = Get-VeroPath -VpnProfile $global:Config.Profile
+        New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
+        Set-Content -Path $cp.Otp -Value $code -Encoding UTF8
+    }
+}
+
+function Show-Check([string]$what, [string[]]$warnings) {
+    <# The add/edit check: warnings shown before saving. Returns $true to save anyway. #>
+    if (@($warnings).Count -eq 0) { return $true }
+    $msg = "$what`r`n`r`n" + ((@($warnings) | ForEach-Object { '- ' + $_ }) -join "`r`n`r`n") + "`r`n`r`nSave anyway?"
+    ([System.Windows.Forms.MessageBox]::Show($msg, 'VeroScudo - check', 'YesNo', 'Warning') -eq 'Yes')
+}
+
 function Edit-VpnProfile($entry) {
-    <# Modal editor for one profile entry; returns the edited entry or $null (cancel). #>
-    $ef = New-Form 'VPN profile' 420 300
-    New-Label $ef 'Windows VPN profile' 20 16 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $cb = New-Object System.Windows.Forms.ComboBox; $cb.Location = (P 20 36); $cb.Size = (Z 380 30); $cb.DropDownStyle = 'DropDownList'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $global:Theme.Bg; $cb.ForeColor = $global:Theme.Text; $cb.Font = $FontUI
-    $names = @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
-    if ($entry -and $names -notcontains $entry.Profile) { $names += $entry.Profile }
-    $names | ForEach-Object { [void]$cb.Items.Add($_) }
-    if ($entry) { $cb.SelectedItem = $entry.Profile } elseif ($names.Count -gt 0) { $cb.SelectedIndex = 0 }
+    <# Modal editor for one profile entry, per type; returns the edited entry or $null (cancel). An OpenVPN entry with a newly
+       chosen .ovpn carries ImportFrom: the elevated save imports it (checked again there). #>
+    $ef = New-Form 'VPN profile' 420 400
+    $types = @('ras', 'openvpn', 'wireguard')
+    New-Label $ef 'Type' 20 16 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $cbType = New-Object System.Windows.Forms.ComboBox; $cbType.Location = (P 20 36); $cbType.Size = (Z 380 30); $cbType.DropDownStyle = 'DropDownList'; $cbType.FlatStyle = 'Flat'; $cbType.BackColor = $global:Theme.Bg; $cbType.ForeColor = $global:Theme.Text; $cbType.Font = $FontUI
+    foreach ($t in $types) { [void]$cbType.Items.Add((Get-VeroTypeLabel $t)) }
+    $ef.Controls.Add($cbType)
+    $lName = New-Label $ef 'Windows VPN profile' 20 80 380 18 $FontSmall $global:Theme.Sub
+    $cb = New-Object System.Windows.Forms.ComboBox; $cb.Location = (P 20 100); $cb.Size = (Z 380 30); $cb.DropDownStyle = 'DropDown'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $global:Theme.Bg; $cb.ForeColor = $global:Theme.Text; $cb.Font = $FontUI
     $ef.Controls.Add($cb)
-    New-Label $ef 'Server host name' 20 80 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tServer = New-Input $ef 20 100 290 $(if ($entry) { $entry.Server } else { '' })
-    New-Label $ef 'Port' 320 80 60 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tPort = New-Input $ef 320 100 80 $(if ($entry) { [string]$entry.Port } else { '443' })
-    New-Label $ef 'Username' 20 144 200 18 $FontSmall $global:Theme.Sub | Out-Null
-    $tUser = New-Input $ef 20 164 380 $(if ($entry) { $entry.Username } else { '' })
+    $lServer = New-Label $ef 'Server host name' 20 144 200 18 $FontSmall $global:Theme.Sub
+    $tServer = New-Input $ef 20 164 290 $(if ($entry) { $entry.Server } else { '' })
+    $lPort = New-Label $ef 'Port' 320 144 60 18 $FontSmall $global:Theme.Sub
+    $tPort = New-Input $ef 320 164 80 $(if ($entry) { [string]$entry.Port } else { '443' })
+    $lFile = New-Label $ef 'OpenVPN config (.ovpn) - imported for administrators only' 20 144 380 18 $FontSmall $global:Theme.Sub
+    $tFile = New-Input $ef 20 164 290 ''
+    $bFile = New-Button $ef 'Browse...' 320 162 80
+    New-Label $ef 'Username' 20 208 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $tUser = New-Input $ef 20 228 380 $(if ($entry) { $entry.Username } else { '' })
+    $chkDco = New-Object System.Windows.Forms.CheckBox; $chkDco.Text = 'Keep DCO (faster; the server permit is then not tied to openvpn.exe)'; $chkDco.Location = (P 20 268); $chkDco.Size = (Z 380 24); $chkDco.ForeColor = $global:Theme.Text; $chkDco.Checked = [bool]($entry -and $entry.PSObject.Properties['Dco'] -and $entry.Dco); $ef.Controls.Add($chkDco)
+    $bConf = New-Button $ef 'Read .conf...' 20 266 140
+    $hint = New-Label $ef '' 20 300 380 36 $FontSmall $global:Theme.Sub
+    $state = @{ Warnings = @(); Auth = $(if ($entry -and $entry.PSObject.Properties['Auth']) { [bool]$entry.Auth } else { $true }); Import = $null }
+    $apply = ({
+        $t = $types[[Math]::Max(0, $cbType.SelectedIndex)]
+        $keep = if ($entry) { $cb.Text } else { '' }                        # Items.Clear() can blank the text of an edited entry
+        $cb.Items.Clear()
+        $names = switch ($t) {
+            'ras'       { @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) }
+            'wireguard' { @(Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Substring(16) }) }
+            default     { @() }
+        }
+        foreach ($n in $names) { [void]$cb.Items.Add($n) }
+        if ($keep) { $cb.Text = $keep } elseif (-not $entry -and $cb.Items.Count -gt 0) { $cb.SelectedIndex = 0 }
+        $lName.Text = switch ($t) { 'ras' { 'Windows VPN profile (Settings > VPN)' } 'wireguard' { 'WireGuard tunnel name (exactly as in the WireGuard app)' } default { 'Profile name' } }
+        $isOvpn = ($t -eq 'openvpn')
+        foreach ($c in $lServer, $tServer, $lPort, $tPort) { $c.Visible = -not $isOvpn }
+        foreach ($c in $lFile, $tFile, $bFile, $chkDco) { $c.Visible = $isOvpn }
+        $bConf.Visible = ($t -eq 'wireguard')
+        $hint.Text = Get-VeroSwitchNotice -Type $t -ProfileName $(if ($cb.Text) { $cb.Text } else { 'this profile' })
+        if (-not $entry -and $t -eq 'wireguard' -and $tPort.Text -eq '443') { $tPort.Text = '51820' }
+        if (-not $entry -and $t -eq 'ras' -and $tPort.Text -eq '51820') { $tPort.Text = '443' }
+    }).GetNewClosure()
+    $cbType.Add_SelectedIndexChanged($apply)
+    $cbType.SelectedIndex = [Math]::Max(0, [array]::IndexOf($types, $(if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type) { [string]$entry.Type } else { 'ras' })))
+    if ($entry) { $cb.Text = $entry.Profile; $cbType.Enabled = $false }
+    $bFile.Add_Click(({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'OpenVPN config (*.ovpn;*.conf)|*.ovpn;*.conf|All files|*.*'
+        if ($dlg.ShowDialog() -eq 'OK') { $tFile.Text = $dlg.FileName; if (-not $cb.Text) { $cb.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) } }
+    }).GetNewClosure())
+    $bConf.Add_Click(({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'WireGuard config (*.conf)|*.conf|All files|*.*'
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $r = Test-VeroWireGuardConf -Text ([IO.File]::ReadAllText($dlg.FileName))
+        if ($r.Errors.Count -gt 0) { [System.Windows.Forms.MessageBox]::Show(($r.Errors -join "`r`n"), 'VeroScudo - WireGuard config') | Out-Null; return }
+        $tServer.Text = $r.Server; $tPort.Text = [string]$r.Port
+        if (-not $cb.Text) { $cb.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) }
+        $state.Warnings = @($r.Warnings)
+        if ($r.Warnings.Count -gt 0) { [System.Windows.Forms.MessageBox]::Show(((@($r.Warnings) | ForEach-Object { '- ' + $_ }) -join "`r`n`r`n"), 'VeroScudo - check', 'OK', 'Warning') | Out-Null }
+    }).GetNewClosure())
     $res = @{ Value = $null }
-    $bOk = New-Button $ef 'OK' 290 240 110 $true; $bCancel = New-Button $ef 'Cancel' 170 240 110
+    $bOk = New-Button $ef 'OK' 290 350 110 $true; $bCancel = New-Button $ef 'Cancel' 170 350 110
     $bCancel.Add_Click(({ $ef.Close() }).GetNewClosure())
     $bOk.Add_Click(({
-        $port = 0
-        if (-not $cb.SelectedItem -or -not $tServer.Text.Trim() -or -not $tUser.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [System.Windows.Forms.MessageBox]::Show('Profile, server, port and username are required.', 'VeroScudo') | Out-Null; return }
-        $pins = if ($entry) { @($entry.ServerIps) } else { @() }
-        $res.Value = [pscustomobject]@{ Profile = [string]$cb.SelectedItem; Server = $tServer.Text.Trim(); Port = $port; Username = $tUser.Text.Trim(); ServerIps = $pins }
+        $t = $types[[Math]::Max(0, $cbType.SelectedIndex)]
+        $name = $cb.Text.Trim(); $user = $tUser.Text.Trim(); $pins = if ($entry) { @($entry.ServerIps) } else { @() }
+        if (-not $name) { [System.Windows.Forms.MessageBox]::Show('A profile name is required.', 'VeroScudo') | Out-Null; return }
+        if ($t -eq 'openvpn') {
+            $import = $null; $auth = $state.Auth
+            if ($entry -and $name -ne $entry.Profile -and -not $tFile.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show('A renamed OpenVPN profile needs its .ovpn again (the import is stored under the name): choose the file.', 'VeroScudo') | Out-Null; return }
+            if ($tFile.Text.Trim() -or -not $entry) {
+                $src = $tFile.Text.Trim()
+                if (-not $src -or -not (Test-Path -LiteralPath $src)) { [System.Windows.Forms.MessageBox]::Show('Choose the .ovpn file to import.', 'VeroScudo') | Out-Null; return }
+                $r = Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($src)) -BaseDir (Split-Path -Parent $src)
+                if ($r.Errors.Count -gt 0) { [System.Windows.Forms.MessageBox]::Show("This config cannot be used:`r`n`r`n" + ($r.Errors -join "`r`n"), 'VeroScudo - OpenVPN config') | Out-Null; return }
+                if (-not (Show-Check "OpenVPN config $([IO.Path]::GetFileName($src)):" $r.Warnings)) { return }
+                $import = $src; $auth = $r.Auth
+            }
+            if ($auth -and -not $user) { [System.Windows.Forms.MessageBox]::Show('This OpenVPN config asks for a username and password: enter the username.', 'VeroScudo') | Out-Null; return }
+            $res.Value = [pscustomobject]@{ Profile = $name; Type = 'openvpn'; Server = ''; Port = 1194; Username = $user; ServerIps = @(); Auth = $auth; Dco = $chkDco.Checked; ImportFrom = $import }
+        } else {
+            $port = 0
+            if (-not $tServer.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [System.Windows.Forms.MessageBox]::Show('Server and port are required.', 'VeroScudo') | Out-Null; return }
+            if ($t -eq 'ras' -and -not $user) { [System.Windows.Forms.MessageBox]::Show('A username is required.', 'VeroScudo') | Out-Null; return }
+            if ($t -eq 'wireguard' -and $name -notmatch '^[A-Za-z0-9_=+.-]{1,32}$') { [System.Windows.Forms.MessageBox]::Show('A WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -', 'VeroScudo') | Out-Null; return }
+            if ($t -eq 'wireguard' -and -not (Show-Check "WireGuard tunnel '$name':" $state.Warnings)) { return }
+            $res.Value = [pscustomobject]@{ Profile = $name; Type = $t; Server = $tServer.Text.Trim(); Port = $port; Username = $(if ($t -eq 'ras') { $user } else { '' }); ServerIps = $pins; Auth = ($t -eq 'ras'); Dco = $false; ImportFrom = $null }
+        }
         $ef.Close()
     }).GetNewClosure())
+    & $apply
     $ef.ShowDialog() | Out-Null
     $res.Value
 }
 
-function Save-ConfigElevated([string]$json) {
+function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     <# The tray runs without admin rights: config.json is written by an elevated PowerShell (UAC prompt) that validates it
-       again. The JSON travels Base64-encoded inside -EncodedCommand - no temp file another process could swap. #>
+       again. The JSON travels Base64-encoded inside -EncodedCommand - no temp file another process could swap. OpenVPN
+       configs to import ({ Profile; Source }) are read, checked and stored by that same elevated process, before the config. #>
     $null = Get-VeroConfig -Raw $json                                       # validate here first for a readable error
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    $imp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($imports | ForEach-Object { @{ Profile = $_.Profile; Source = $_.Source } }) -Depth 3 -Compress)))
     $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
-    $script = "try { Import-Module '$mod' -Force; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
+    $script = "try { Import-Module '$mod' -Force; `$list = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$imp')) | ConvertFrom-Json; foreach (`$i in @(`$list | ForEach-Object { `$_ })) { if (`$i) { `$null = Import-VeroOpenVpnProfile -ProfileName `$i.Profile -Source `$i.Source } }; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
     if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
@@ -372,7 +492,7 @@ function Show-Settings {
     New-Label $f 'VPN profiles' 20 16 200 22 $FontBold | Out-Null
     $card = New-Card $f 20 42 480 236
     $work = New-Object System.Collections.ArrayList
-    if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add($pr) } }
+    if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } })) } }
     $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }) }
     $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 300 210); $lb.BorderStyle = 'FixedSingle'
     $lb.BackColor = $global:Theme.Bg; $lb.ForeColor = $global:Theme.Text; $lb.Font = $FontUI; $lb.IntegralHeight = $false
@@ -380,24 +500,35 @@ function Show-Settings {
     $fill = ({
         $sel = $lb.SelectedIndex; $lb.Items.Clear()
         foreach ($pr in $work) {
-            $cred = [bool](Get-VeroCredential -Config $pr)
+            $needs = Test-VeroNeedsPassword $pr
+            $cred = (-not $needs) -or [bool](Get-VeroCredential -Config $pr)
             $mark = if ($pr.Profile -eq $state.Default) { ' (default)' } else { '' }
-            [void]$lb.Items.Add(('{0}{1} - {2}{3}' -f $pr.Profile, $mark, $pr.Server, $(if ($cred) { '' } else { '  [no password]' })))
+            $where = if ($pr.Type -eq 'openvpn') { $(if ($pr.ImportFrom) { 'to import' } else { '.ovpn' }) } else { $pr.Server }
+            [void]$lb.Items.Add(('{0}{1} - {2} - {3}{4}' -f $pr.Profile, $mark, (Get-VeroTypeLabel $pr.Type), $where, $(if ($cred) { '' } else { '  [no password]' })))
         }
         if ($lb.Items.Count -gt 0) { $lb.SelectedIndex = [Math]::Max(0, [Math]::Min($sel, $lb.Items.Count - 1)) }
     }).GetNewClosure()
     & $fill
     $bAdd = New-Button $card 'Add...' 324 12 140; $bEdit = New-Button $card 'Edit...' 324 52 140; $bDel = New-Button $card 'Remove' 324 92 140
-    $bDef = New-Button $card 'Make default' 324 132 140; $bPw = New-Button $card 'Set password...' 324 188 140
+    $bDef = New-Button $card 'Make default' 324 132 140; $bPw = New-Button $card 'Set password...' 324 176 140
+    $bKey = New-Button $card 'Key passphrase...' 324 216 140
     $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [System.Windows.Forms.MessageBox]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
     $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Default -eq $work[$i].Profile) { $state.Default = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
     $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile; $work.RemoveAt($i); if ($state.Default -eq $gone) { $state.Default = $work[0].Profile }; & $fill }).GetNewClosure())
     $bDef.Add_Click(({ $i = $lb.SelectedIndex; if ($i -ge 0) { $state.Default = $work[$i].Profile; & $fill } }).GetNewClosure())
     $bPw.Add_Click(({
         $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = $work[$i]
+        if (-not (Test-VeroNeedsPassword $e)) { [System.Windows.Forms.MessageBox]::Show("'$($e.Profile)' needs no password here$(if ($e.Type -eq 'wireguard') { ' - the WireGuard app keeps its keys' }).", 'VeroScudo') | Out-Null; return }
         $sec = Read-Password "$($e.Username) ($($e.Profile))"
         if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
                     New-Object System.Management.Automation.PSCredential($e.Username, $sec) | Export-Clixml $cp.Cred; & $fill }
+    }).GetNewClosure())
+    $bKey.Add_Click(({
+        $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = $work[$i]
+        if ($e.Type -ne 'openvpn') { [System.Windows.Forms.MessageBox]::Show('Only an OpenVPN profile with an encrypted private key needs a key passphrase.', 'VeroScudo') | Out-Null; return }
+        $sec = Read-Password "the private key of $($e.Profile)"
+        if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
+                    New-Object System.Management.Automation.PSCredential('key', $sec) | Export-Clixml $cp.KeyPass }
     }).GetNewClosure())
     New-Label $f 'Behaviour' 20 292 200 22 $FontBold | Out-Null
     $card2 = New-Card $f 20 318 480 150
@@ -412,12 +543,13 @@ function Show-Settings {
     $bSave.Add_Click(({
         if ($work.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
         $json = [ordered]@{
-            profiles = @($work | ForEach-Object { $o = [ordered]@{ profile = $_.Profile; server = $_.Server; port = $_.Port; username = $_.Username }; if (@($_.ServerIps).Count -gt 0) { $o.serverIps = @($_.ServerIps) }; $o })
+            profiles = @($work | ForEach-Object { ConvertTo-VeroProfileObject $_ })
             activeProfile = $state.Default
             retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
         } | ConvertTo-Json -Depth 6
-        try { Save-ConfigElevated $json; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close() }
+        $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Source = $_.ImportFrom } })
+        try { Save-ConfigElevated $json $imports; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close() }
         catch { [System.Windows.Forms.MessageBox]::Show("Not saved: $($_.Exception.Message)", 'VeroScudo') | Out-Null }
     }).GetNewClosure())
     $global:SettingsForm = $f
@@ -458,17 +590,39 @@ $mHead = Add-MenuItem 'VeroScudo' 'logo' $null; $mHead.Enabled = $false; $mHead.
 $null = Add-MenuSeparator
 $mOn   = Add-MenuItem 'Turn VPN on'  'play' { Invoke-GuardTask 'On' }   
 $mOff  = Add-MenuItem 'Turn VPN off' 'stop' { Invoke-GuardTask 'Off' }  
+$mRedo = Add-MenuItem 'Reconnect VPN' 'redo' { Request-Reconnect }
 $mProf = Add-MenuItem 'VPN profile' 'globe' $null
 $mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Card; $mProf.DropDown.ForeColor = $global:Theme.Text
 $mProf.DropDown.Padding = Pad 0 6 0 6
 $mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
 $global:TrayFile = Join-Path $global:Paths.UserDir 'tray.json'              # per-user tray choices (the state folder is read-only for the tray)
-function Test-KeepAwakeSaved {
-    try { if (Test-Path $global:TrayFile) { return [bool](Get-Content $global:TrayFile -Raw | ConvertFrom-Json).keepAwake } } catch { Write-Verbose 'tray.json unreadable' }
-    $false
+function Get-TrayPref {
+    $o = @{ keepAwake = $false; lastProfile = '' }
+    try { if (Test-Path $global:TrayFile) { $j = Get-Content $global:TrayFile -Raw | ConvertFrom-Json; foreach ($k in @($o.Keys)) { if ($j.PSObject.Properties[$k]) { $o[$k] = $j.$k } } } } catch { Write-Verbose 'tray.json unreadable' }
+    $o
 }
-function Save-KeepAwake([bool]$on) {
-    try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; @{ keepAwake = $on } | ConvertTo-Json | Set-Content $global:TrayFile -Encoding UTF8 } catch { Write-Verbose 'tray.json not writable' }
+function Set-TrayPref([string]$key, $value) {
+    $o = Get-TrayPref; $o[$key] = $value
+    try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; $o | ConvertTo-Json | Set-Content $global:TrayFile -Encoding UTF8 } catch { Write-Verbose 'tray.json not writable' }
+}
+function Test-KeepAwakeSaved { [bool](Get-TrayPref).keepAwake }
+function Save-KeepAwake([bool]$on) { Set-TrayPref 'keepAwake' $on }
+function Request-Reconnect {
+    <# Reconnect: the elevated task blocks traffic, hangs up and redials; traffic flows again once the tunnel is back. #>
+    if (-not (Test-VeroArmed)) { $notify.ShowBalloonTip(4000, 'VeroScudo', 'The VPN is off - use Turn VPN on.', [System.Windows.Forms.ToolTipIcon]::Info); return }
+    Invoke-GuardTask 'Reconnect'
+    $notify.ShowBalloonTip(5000, 'VeroScudo - reconnecting', "Traffic is blocked while '$($global:Config.Profile)' reconnects; it flows again once the tunnel is back.", [System.Windows.Forms.ToolTipIcon]::Info)
+}
+function Show-SwitchNotice {
+    <# On every switch to an OpenVPN or WireGuard profile (also a switch back): once, not again while it stays active. #>
+    if (-not $global:Config) { return $false }
+    $cur = $global:Config.Profile
+    if ((Get-TrayPref).lastProfile -eq $cur) { return $false }
+    Set-TrayPref 'lastProfile' $cur
+    $n = Get-VeroSwitchNotice -Type $global:Config.Type -ProfileName $cur
+    if (-not $n) { return $false }
+    $notify.ShowBalloonTip(15000, "VeroScudo - $(Get-VeroTypeLabel $global:Config.Type) profile", $n, [System.Windows.Forms.ToolTipIcon]::Warning)
+    $true
 }
 function Request-ProfileSwitch([string]$name) {
     <# The switch itself runs in the elevated Switch task; the tray only names the profile (checked there against config.json). #>
@@ -481,9 +635,9 @@ function Update-ProfileMenu {
     $mProf.DropDownItems.Clear()
     if (-not $global:Config) { $mProf.Enabled = $false; return }
     $mProf.Enabled = $true
-    $mProf.Text = "VPN profile: $($global:Config.Profile)"
+    $mProf.Text = "VPN profile: $($global:Config.Profile) ($(Get-VeroTypeLabel $global:Config.Type))"
     foreach ($pr in $global:Config.Profiles) {
-        $it = $mProf.DropDownItems.Add($pr.Profile)
+        $it = $mProf.DropDownItems.Add(('{0}  ({1})' -f $pr.Profile, (Get-VeroTypeLabel $pr.Type)))
         $it.Padding = (Pad 0 7 16 7); $it.Image = $blankImage; $it.ImageScaling = 'None'
         $it.Tag = if ($pr.Profile -eq $global:Config.Profile) { 'check' } else { '' }
         $name = $pr.Profile
@@ -534,8 +688,10 @@ function Refresh {
     $notify.Icon = Get-StateIcon $st.State
     $tip = "VeroScudo - $($st.Title)$(if ([VeroKeepAwake]::Active) { ', keeping PC awake' })"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))
     $mHead.Text = "VeroScudo - $($st.Title)"
-    $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected
-    if ($global:Last -and $global:Last -ne $st.State) {
+    $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected; $mRedo.Enabled = $st.Armed
+    $noticed = Show-SwitchNotice
+    Request-Otp
+    if (-not $noticed -and $global:Last -and $global:Last -ne $st.State) {
         $b = switch ($st.State) {
             'blocked'   { @('VPN connection lost - traffic blocked', 'Reconnecting... nothing leaves this PC until the tunnel is back.', 'Warning') }
             'protected' { @('VPN protected', 'Tunnel up, kill-switch on.', 'Info') }

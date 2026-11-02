@@ -91,3 +91,24 @@ def watch(profiles, on_up, on_down, interval: float = 2.0) -> None:
             elif last.get(p, False) and not now:
                 on_down(p, False)
             last[p] = now
+
+
+def kind(profile: str) -> str | None:
+    """macOS VPN services here are the built-in kinds (IKEv2, L2TP, Cisco IPSec)."""
+    return "vpn"
+
+
+def is_stale(profile: str) -> bool:
+    return False
+
+
+def wait_connected(profile: str, seconds: float = 10.0) -> bool:
+    return is_connected(profile)          # `up` already waits for the outcome
+
+
+def other_tunnels(own: str | None) -> list[str]:
+    return []
+
+
+def check(cfg) -> list[str]:
+    return [f"{p.name}: no VPN service with this name (System Settings > VPN)" for p in cfg.profiles if not _status(p.name)]

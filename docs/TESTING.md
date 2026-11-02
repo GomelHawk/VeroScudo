@@ -4,7 +4,7 @@
 
 | Layer | Where | Runs in CI | What it pins |
 |---|---|---|---|
-| Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | config defaults/validation, the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports), struct layout of the native helper, sync/fail-closed, profile switching, lock, update URLs |
+| Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | config defaults/validation (per profile type), the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports, OpenVPN/WireGuard endpoints), struct layout of the native helper, sync/fail-closed, profile switching, Reconnect order and our own 631, the password pause, OpenVPN config checks / command line / management parser, WireGuard health and transitions, lock, update URLs |
 | Unit (Linux/macOS) | `linux/tests/` (pytest) | yes | same, plus the rendered nftables and pf rulesets, tunnel-interface checks, the guard's event handling and switching with fakes |
 | Lint | PSScriptAnalyzer, ruff, shellcheck | yes | |
 | Real machine | `windows/tests-local/` | **no** | the actual firewall, VPN and scheduled tasks |
@@ -31,6 +31,12 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
      TCP 53 and IPv6 probes, a DNS query to the LAN resolver while protected (must fail), a forged
      RAS 631 while up (must be ignored), the firewall default forced to Allow mid-outage, all filters
      deleted mid-outage (watchdog must restore them within 30 s), a profile switch when 2+ are configured.
+
+4. **`Test-Types.ps1`** (~3 min) - for the **active profile of any type**: *Reconnect* blocks, renews and
+   recovers without a leak; OpenVPN: `openvpn.exe` killed = a failure (stays armed, back by itself);
+   WireGuard: service stopped = a failure, tunnel deactivated like the WireGuard app does it = your Off.
+   Run it once per profile type you use (switch with the tray first). Until it has passed on a real
+   machine, OpenVPN and WireGuard stay **beta**.
 
 Expected: every leak probe `False` while blocked, `dns=True` (documented), filters present
 throughout, all phases `PASS`.

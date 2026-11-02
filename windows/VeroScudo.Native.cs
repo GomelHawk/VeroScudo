@@ -165,6 +165,12 @@ namespace VeroScudo
         {
             using (var e = new Engine()) return e.LayerFields(layer);
         }
+
+        /// <summary>Display names of every other WFP provider (read-only; the conflict check looks for other VPN apps' kill-switches).</summary>
+        public static string[] Providers()
+        {
+            using (var e = new Engine()) return e.ProviderNames();
+        }
     }
 
     internal sealed class Engine : IDisposable
@@ -336,6 +342,35 @@ namespace VeroScudo
             allocs.Clear();
             for (int i = 0; i < wfpAllocs.Count; i++) { IntPtr p = wfpAllocs[i]; Native.FwpmFreeMemory0(ref p); }
             wfpAllocs.Clear();
+        }
+
+        public string[] ProviderNames()
+        {
+            var names = new List<string>();
+            IntPtr en;
+            Check(Native.FwpmProviderCreateEnumHandle0(h, IntPtr.Zero, out en), "FwpmProviderCreateEnumHandle0");
+            try
+            {
+                while (true)
+                {
+                    IntPtr entries; uint n;
+                    Check(Native.FwpmProviderEnum0(h, en, 64, out entries, out n), "FwpmProviderEnum0");
+                    try
+                    {
+                        for (int i = 0; i < n; i++)
+                        {
+                            IntPtr pp = Marshal.ReadIntPtr(entries, i * IntPtr.Size);
+                            var prov = (FWPM_PROVIDER0)Marshal.PtrToStructure(pp, typeof(FWPM_PROVIDER0));
+                            if (prov.providerKey == Wfp.ProviderKey) continue;
+                            names.Add(prov.displayData.name != IntPtr.Zero ? Marshal.PtrToStringUni(prov.displayData.name) : prov.providerKey.ToString());
+                        }
+                    }
+                    finally { if (entries != IntPtr.Zero) Native.FwpmFreeMemory0(ref entries); }
+                    if (n < 64) break;
+                }
+            }
+            finally { Native.FwpmProviderDestroyEnumHandle0(h, en); }
+            return names.ToArray();
         }
 
         internal static void Check(uint r, string what)
@@ -531,6 +566,9 @@ namespace VeroScudo
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmFilterGetByKey0(IntPtr engineHandle, ref Guid key, out IntPtr filter);
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmLayerGetByKey0(IntPtr engineHandle, ref Guid key, out IntPtr layer);
         [DllImport("fwpuclnt.dll")] internal static extern void FwpmFreeMemory0(ref IntPtr p);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderCreateEnumHandle0(IntPtr engineHandle, IntPtr enumTemplate, out IntPtr enumHandle);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderEnum0(IntPtr engineHandle, IntPtr enumHandle, uint numEntriesRequested, out IntPtr entries, out uint numEntriesReturned);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderDestroyEnumHandle0(IntPtr engineHandle, IntPtr enumHandle);
         [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)] internal static extern uint FwpmGetAppIdFromFileName0(string fileName, out IntPtr appId);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceIndexToLuid(uint ifIndex, out ulong luid);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceGuidToLuid(ref Guid guid, out ulong luid);

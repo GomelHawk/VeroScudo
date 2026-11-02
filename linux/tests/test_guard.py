@@ -21,6 +21,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "resolve", lambda s: ["203.0.113.5"])
     monkeypatch.setattr(nm, "resolver_uid", lambda: 101)
     monkeypatch.setattr(nm, "nameservers", list)
+    monkeypatch.setattr(nm, "kind", lambda p: "vpn")
 
     def up(p):
         calls["up"].append(p)
@@ -125,3 +126,64 @@ def test_lock_is_exclusive(env):
     assert not g.store.take_lock()
     g.store.release_lock()
     assert g.store.take_lock()
+
+
+# ---- Reconnect (the user action)
+def test_reconnect_blocks_before_taking_down_and_dials_again(env):
+    g, calls, connected = env
+    connected.add("Work")
+    g.arm()
+    order = []
+    import veroscudo.firewall as fw
+    real_apply = fw.apply
+
+    def apply(rs):
+        order.append("block" if 'oifname "tun0"' not in rs.split("chain forward")[0] else "allow-tunnel")
+        real_apply(rs)
+    fw.apply = apply
+    real_down = nm.down
+
+    def down(p):
+        order.append("down")
+        return real_down(p)
+    nm.down = down
+    try:
+        g.renew()
+    finally:
+        fw.apply, nm.down = real_apply, real_down
+    assert order[:2] == ["block", "down"]          # the tunnel stops being allowed before it is taken down
+    assert order[-1] == "allow-tunnel"             # traffic flows again only once it is back
+    assert g.store.armed and "Work" in connected and calls["up"] == ["Work"]
+
+
+def test_reconnect_does_nothing_while_off(env):
+    g, calls, _ = env
+    g.renew()
+    assert calls["apply"] == [] and calls["down"] == [] and calls["up"] == []
+
+
+def test_own_take_down_during_reconnect_is_not_your_off(env):
+    g, calls, _ = env
+    g.arm()
+    redials = []
+    g.reconnect_async = lambda: redials.append(1)         # no background thread outliving the fakes
+    g.renew_marker.write_text(str(__import__("time").time()))
+    g.on_event_down("Work", user_requested=True)          # NetworkManager reports our nmcli down as user-requested
+    assert g.store.armed and calls["clear"] == 0 and redials == [1]
+    assert not g.renew_marker.exists()                    # consumed: the next real disconnect counts again
+
+
+def test_a_real_disconnect_after_a_reconnect_still_disarms(env):
+    g, calls, _ = env
+    g.arm()
+    g.renew_marker.write_text(str(__import__("time").time() - 600))   # stale marker
+    g.on_event_down("Work", user_requested=True)
+    assert not g.store.armed and calls["clear"] == 1
+
+
+def test_off_wins_over_a_pending_reconnect(env):
+    g, calls, _ = env
+    g.arm()
+    g.renew_marker.write_text(str(__import__("time").time()))
+    g.off()
+    assert not g.store.armed and not g.renew_marker.exists()

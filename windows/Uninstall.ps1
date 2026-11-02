@@ -14,6 +14,8 @@ $state = Join-Path $env:ProgramData 'VeroScudo\state'
 Remove-Item "$state\armed.flag" -Force -ErrorAction SilentlyContinue          # a reinstall must not start armed
 if (Test-Path $core) {
     Import-Module $core -Force
+    # an OpenVPN started by VeroScudo would otherwise keep running without its runner
+    try { foreach ($pr in @((Get-VeroConfig).Profiles | Where-Object Type -eq 'openvpn')) { Stop-VeroOpenVpn -ProfileName $pr.Profile } } catch { Write-Warning "OpenVPN not stopped: $($_.Exception.Message)" }
     Disable-VeroKillSwitch -Action uninstall
     try { [VeroScudo.Wfp]::Remove() } catch { Write-Warning "WFP provider not removed: $($_.Exception.Message)" }
 } else {

@@ -19,6 +19,7 @@ class Guard:
         self.base = cfg
         self.store = store or StateStore()
         self.off_marker = self.store.home / "off.marker"     # set by `veroscudo off` so a polling backend knows it was deliberate
+        self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
         self._lock = threading.Lock()
@@ -107,7 +108,35 @@ class Guard:
         if not nm.is_connected(self.cfg.profile):
             self.reconnect()
 
+    def renew(self) -> None:
+        """The user's Reconnect: block first (the ruleset without the tunnel while it is still up), take the connection down,
+        redial; traffic flows again only once the tunnel is back. NetworkManager reports our own take-down as
+        'user-requested' - the renew marker makes the daemon read it as a failure (stay armed), not as your Off."""
+        if not self.store.armed:
+            log.info("Reconnect: the VPN is off - use `veroscudo on`")
+            return
+        if self.store.lock_alive():
+            log.info("reconnect requested, but a reconnect is already running - it continues")
+            return
+        cfg = self.cfg
+        log.info("RECONNECT requested by you: traffic blocked, taking down '%s', redialing", cfg.profile)
+        self.renew_marker.write_text(str(time.time()))
+        self.enable_killswitch(tunnel_up=False, force=True)
+        if nm.is_connected(cfg.profile) or nm.is_stale(cfg.profile):
+            nm.down(cfg.profile)
+        self.reconnect()
+
+    def _take_renew_marker(self, max_age: float = 120.0) -> bool:
+        """True (once) when our own Reconnect took the connection down within the last `max_age` seconds."""
+        try:
+            started = float(self.renew_marker.read_text().strip() or 0)
+        except (OSError, ValueError):
+            return False
+        self.renew_marker.unlink(missing_ok=True)
+        return time.time() - started <= max_age
+
     def off(self) -> None:
+        self.renew_marker.unlink(missing_ok=True)
         self.off_marker.touch()
         self.disarm()
         if nm.is_connected(self.cfg.profile):
@@ -151,10 +180,15 @@ class Guard:
         if nm.is_connected(profile):
             log.info("VPN '%s' reported down but is connected - ignored", profile)
             return
-        deliberate = user_requested or self.off_marker.exists()
+        off = self.off_marker.exists()
+        renewing = self._take_renew_marker()
+        deliberate = off or (user_requested and not renewing)
+        if renewing and not off:
+            log.info("VPN '%s' went down by VeroScudo's own Reconnect - not your Off", profile)
         self.off_marker.unlink(missing_ok=True)
         d = decide(deliberate, self.store.armed)
-        log.info("VPN '%s' terminated (user_requested=%s) -> %s", profile, deliberate, d.value)
+        log.info("VPN '%s' terminated (user_requested=%s) -> %s (decision source: %s)", profile, deliberate, d.value,
+                 "veroscudo off" if off else "NetworkManager reason")
         if d is Decision.DISARM:
             self.disarm()
         elif d is Decision.RECONNECT:
@@ -176,7 +210,11 @@ class Guard:
             while self.store.armed and not nm.is_connected(self.cfg.profile):
                 attempt += 1
                 self.enable_killswitch(tunnel_up=False)
-                nm.up(self.cfg.profile)
+                if nm.is_stale(self.cfg.profile):            # WireGuard: activated but silent - take it down for a fresh start
+                    log.info("WireGuard '%s': no handshake for over 3 minutes - restarting it", self.cfg.profile)
+                    nm.down(self.cfg.profile)
+                if nm.up(self.cfg.profile):
+                    nm.wait_connected(self.cfg.profile)
                 if nm.is_connected(self.cfg.profile):
                     log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
                     break

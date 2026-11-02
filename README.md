@@ -21,7 +21,8 @@ rule, and there is no setting that weakens it.
 
 It works with the VPN client your OS already has - Windows built-in profiles (SSTP, IKEv2,
 L2TP, PPTP), NetworkManager on Linux, the built-in VPN services on macOS - so there is nothing
-new to log in to.
+new to log in to. On Windows a reserve VPN can also be **OpenVPN** (VeroScudo runs your `.ovpn`
+itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#profile-types).
 
 | Platform | Status |
 | :-- | :-- |
@@ -38,6 +39,14 @@ new to log in to.
 - **No DNS leak.** While the VPN is up, names are resolved through the tunnel only.
 - **Several VPN profiles.** Pick the active one from the tray menu (*VPN profile ▸*) or
   `veroscudo use <name>`; the switch keeps you blocked until the new tunnel is up.
+- **Reconnect.** A slow or stuck tunnel? *Reconnect VPN* (tray) or `veroscudo reconnect` blocks
+  traffic, hangs the tunnel up and dials it again; traffic flows once the new tunnel is up.
+- **Reserve VPN types (Windows, beta).** Besides Windows' own client: OpenVPN (your `.ovpn`, run
+  and controlled by VeroScudo) and WireGuard (a tunnel of the WireGuard app). Each switch to one
+  of them shows what it guarantees, and the tray tells you when another VPN or kill-switch runs
+  next to VeroScudo.
+- **A rejected password stops the redial.** Retrying a wrong password every 10 s can lock your VPN
+  account; VeroScudo pauses (still blocked) and asks you to store the right one.
 - **VPN off means a normal network.** Turn the VPN off yourself (tray, shortcut, Windows UI or
   `veroscudo off`) and the kill-switch is lifted completely: a regular, non-VPN connection with
   your usual firewall, until you turn the VPN on again. Protection is tied to your choice, not forced.
@@ -94,6 +103,15 @@ new to log in to.
 4. Connect the VPN - from Windows, or with the **VeroScudo On** shortcut. The shield in the
    tray turns green. Done.
 
+A reserve profile (see [Profile types](#profile-types)):
+
+```powershell
+.\Install.ps1 -ProfileName "Reserve" -Type openvpn -OpenVpnConfig C:\Users\me\reserve.ovpn -UserName jdoe
+.\Install.ps1 -ProfileName "wg-home" -Type wireguard -WireGuardConfig C:\Users\me\wg-home.conf
+```
+
+or tray > **Settings** > *Add...* and pick the type.
+
 To update, run `Install.ps1` again; it keeps your config (a 1.0 single-profile config is converted, and the
 1.0 firewall rules are replaced by WFP filters - new filters first, so an armed PC is never open). To remove everything:
 `Uninstall.ps1` (add `-Purge` to also delete config and credential).
@@ -127,9 +145,11 @@ sudo veroscudo on
 | Disconnect the VPN yourself (Windows UI, tray, shortcut) | disarms: firewall back to normal, icon grey |
 | Sit in a cafe with a captive portal | turn the VPN **off**, log in to the portal, turn it **on** |
 | Pick another profile in tray > *VPN profile* (or `veroscudo use <name>`) | stays blocked, hangs up the old tunnel, dials the new one |
+| *Reconnect VPN* (tray, status window, `-Action reconnect`, `veroscudo reconnect`) | blocks, hangs up, redials; traffic again once the tunnel is back |
+| The VPN rejects your password | stays blocked, stops redialing, icon *Attention*; store the right password, then *Reconnect* |
 
-Tray menu: **Turn VPN on** / **Turn VPN off** / **VPN profile ▸** / Status / Open log / Settings /
-About / Exit (the guard keeps running without the tray). Left-click shows the status window.
+Tray menu: **Turn VPN on** / **Turn VPN off** / **Reconnect VPN** / **VPN profile ▸** / Status / Open log /
+Settings / About / Exit (the guard keeps running without the tray). Left-click shows the status window.
 The tray runs without administrator rights.
 
 Command line (Windows): `powershell -File "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action status`
@@ -151,6 +171,29 @@ the network's DNS servers and, on Windows, the certificate-revocation check the 
 performs. DNS while redialing is the one documented side-channel - it is needed to resolve the
 VPN server. Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
 ping, no IPv6, and no app gets through on the strength of its own firewall rule.
+
+## Profile types
+
+| Type | Client | "You turned it off" comes from | Drop noticed | Status |
+| :-- | :-- | :-- | :-- | :-- |
+| Windows VPN (`ras`, default) | Windows' built-in client | the RAS reason code (631) | seconds | **stable** - preferred |
+| OpenVPN (`openvpn`) | `openvpn.exe` of the OpenVPN community installer, started and owned by VeroScudo through its management interface | VeroScudo's own stop - nothing else can claim it | seconds | beta |
+| WireGuard (`wireguard`) | a tunnel of the WireGuard for Windows app | the tunnel was deactivated in the WireGuard app (its service removed) | 1-3 minutes (handshake age) | beta |
+
+- **OpenVPN**: your `.ovpn` is checked and imported (key files inlined) into an administrators-only folder. Only known
+  client options are accepted - nothing that runs scripts, loads plugins or modules, or brings its own management -
+  because VeroScudo runs OpenVPN as administrator.
+  Connect and disconnect it with VeroScudo only - **not from OpenVPN GUI**, which would compete for the same connection.
+  By default the data channel offload (DCO) is turned off so only `openvpn.exe` may reach the server (`"dco": true` keeps it).
+  A config with a one-time code (`static-challenge`) asks for the code in the tray on every connect.
+- **WireGuard**: import the tunnel in the WireGuard app first, then add it to VeroScudo under exactly the same name. A
+  dead WireGuard link keeps its adapter up, so VeroScudo judges it by its handshakes: set `PersistentKeepalive = 25`.
+  Until a drop is noticed, traffic runs into the dead tunnel and is lost - it never leaks.
+- Every switch to an OpenVPN or WireGuard profile shows a notice (once per switch, not again while it stays active).
+
+Linux: NetworkManager already runs OpenVPN and WireGuard connections and reports "user disconnected" for them, so they
+work as ordinary profiles; WireGuard is judged by its handshakes there too. `veroscudo check` compares each profile's
+protocol and port with the NetworkManager connection.
 
 ## Testing
 
@@ -176,10 +219,10 @@ and the record of the last full run.
   reverts it. Without it, every third reconnect dies young. Details in the architecture doc.
 - **Only two states exist on purpose.** If you need raw internet, turn the VPN off. There is
   deliberately no "unblock while the VPN is down" action.
-- **Not for third-party VPN apps** (OpenVPN GUI, WireGuard app, Hiddify, vendor clients that
-  bypass the OS): VeroScudo cannot tell their "you hung up" from a failure, and their many
-  servers and helper processes cannot be put on a short allow-list. Import the profile into
-  Windows/NetworkManager/macOS instead.
+- **Vendor VPN apps** (PrivateVPN's app, Hiddify, NordVPN and similar) are not supported: VeroScudo
+  cannot tell their "you hung up" from a failure. Most providers also offer IKEv2/L2TP for the Windows
+  client, an `.ovpn` or a WireGuard config - use one of those as a profile. VeroScudo shows *Attention*
+  when such an app's tunnel or kill-switch runs next to it.
 - **It protects you from network failures, not from malware.** Turning the VPN off is your right,
   so a program running as you can do it too. See the threat model in [`docs/SECURITY.md`](docs/SECURITY.md).
 - **Locked out?** From an elevated PowerShell: `& "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action off`

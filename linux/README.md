@@ -15,7 +15,9 @@ sudo ./install.sh            # asks for the NetworkManager connection name, inst
 veroscudo on                 # connect + protect     (sudoers drop-in lets your user run on/off)
 veroscudo status
 veroscudo off                # deliberately off -> raw internet
-veroscudo profiles           # configured profiles, * = active
+veroscudo reconnect          # block, take the VPN down, redial; traffic again once the tunnel is back
+veroscudo profiles           # configured profiles with their type, * = active
+veroscudo check              # does each profile's protocol/port match its NetworkManager connection?
 veroscudo awake              # keep the system from sleeping until Ctrl-C (the tray has a Keep awake toggle too)
 sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 ```
@@ -27,6 +29,13 @@ What it guarantees: an nftables table with `policy drop` output and forward chai
 there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel is down and only
 from `systemd-resolved` (or only to the resolvers in `resolv.conf`); the tunnel is allowed only by
 its own virtual interface, never the Wi-Fi/Ethernet card; the ruleset is re-checked every 15 s.
+
+**OpenVPN and WireGuard** connections work as ordinary profiles: NetworkManager reports their "user
+disconnected" like any VPN. Set `"protocol"` and `"port"` to what the connection uses (`veroscudo check`
+tells you when they differ - the kill-switch would block the VPN itself). WireGuard stays *activated*
+in NetworkManager when the link is dead, so VeroScudo reads its handshakes (`wg`, from `wireguard-tools`):
+no handshake for 3 minutes counts as a drop and the connection is restarted. Give the peer a
+`PersistentKeepalive` (e.g. 25). Every switch to a WireGuard profile shows a notice.
 
 **Status: beta.** The state machine and the nftables ruleset are unit-tested; the daemon has
 not yet been through the real-machine tests on Ubuntu (see `tests-local/`). Treat it as a

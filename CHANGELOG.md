@@ -3,6 +3,35 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
+## [Unreleased]
+
+Reserve VPN types, Reconnect, and a pause on rejected passwords.
+
+### Windows
+- **Profile types** (beta): besides Windows' built-in client (`ras`, still the stable default), a profile can be
+  **OpenVPN** - VeroScudo imports your `.ovpn` (checked, key files inlined, administrators-only), runs `openvpn.exe`
+  itself and controls it over the management interface, so "you turned it off" is only ever VeroScudo's own stop - or
+  **WireGuard** - a tunnel of the WireGuard app, judged by its handshakes; deactivating it in the app counts as your Off.
+  The kill-switch allows each type's own server endpoints only (OpenVPN: only from `openvpn.exe`). Install with
+  `Install.ps1 -Type openvpn -OpenVpnConfig <file>` / `-Type wireguard -WireGuardConfig <file>`, or tray > Settings.
+- **Reconnect** (tray menu, status window, `-Action reconnect`): blocks traffic, hangs up, redials; traffic flows again
+  once the new tunnel is up. VeroScudo's own hang-up is not read as your Off.
+- **Notice on every switch** to an OpenVPN or WireGuard profile (once per switch), and the type shown in the tray.
+- **Checks when a profile is added**: OpenVPN configs that would run programs are refused; missing `redirect-gateway`,
+  DNS, a plain password file or a one-time code are reported; WireGuard without `PersistentKeepalive`, a split tunnel or
+  missing DNS too.
+- **Conflict detection**: another `openvpn.exe`, the same `.ovpn` in OpenVPN GUI or the OpenVPN service, other WireGuard
+  tunnels, other tunnel adapters and other VPN apps' kill-switch filter layers -> tray *Attention*.
+- **Rejected password**: the redial pauses (still blocked) until a newer password is stored or you press On/Reconnect.
+- OpenVPN: private-key passphrase and one-time codes (static challenge) from the tray; `Set-VpnCredential.ps1 -KeyPassphrase`.
+- New local test `tests-local/Test-Types.ps1`.
+
+### Linux / macOS
+- `veroscudo reconnect` is now the user's Reconnect (block, take down, redial); the tray has *Reconnect VPN*.
+- WireGuard connections are judged by their handshakes (a silent link is restarted); `veroscudo check` compares each
+  profile's protocol/port with NetworkManager; the profile type is shown in status, `profiles` and the tray; a notice
+  on every switch to a WireGuard profile; `veroscudo status` reports other tunnels next to VeroScudo.
+
 ## [1.2.1] - 2026-10-26
 
 ### Windows

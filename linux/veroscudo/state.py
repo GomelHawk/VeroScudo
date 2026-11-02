@@ -22,6 +22,23 @@ def decide(user_requested: bool, armed: bool) -> Decision:
     return Decision.RECONNECT if armed else Decision.NONE
 
 
+KIND_LABELS = {"wireguard": "WireGuard", "openvpn": "OpenVPN"}
+
+
+def kind_label(kind: str | None) -> str:
+    """Human name of a NetworkManager connection kind (nm.kind)."""
+    return KIND_LABELS.get(kind or "", "VPN")
+
+
+def switch_notice(kind: str | None, name: str) -> str | None:
+    """Shown on every switch to a profile whose drops are noticed late. NetworkManager reports OpenVPN's and WireGuard's
+    "user disconnected" like any VPN, so only WireGuard's slower drop detection needs a word. Pure."""
+    if kind == "wireguard":
+        return (f"'{name}' is a WireGuard connection. A dead WireGuard link is noticed after 1-3 minutes, not seconds; "
+                "you stay blocked until it reconnects.")
+    return None
+
+
 def safe_name(name: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:40]
     return f"{clean}-{hashlib.sha256(name.encode()).hexdigest()[:8]}"

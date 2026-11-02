@@ -1,8 +1,9 @@
 #Requires -Version 5.1
-<# VeroScudo entry point. Usage: VeroScudo.ps1 -Action arm|disarm|on|off|on-event|reconnect|watchdog|check|switch|status [-VpnProfile <name>] #>
+<# VeroScudo entry point. Usage: VeroScudo.ps1 -Action arm|disarm|on|off|on-event|reconnect|watchdog|check|switch|status|openvpn [-VpnProfile <name>]
+   reconnect = your Reconnect: block, hang up, redial, traffic again once the tunnel is back. openvpn = the OpenVPN runner task. #>
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('arm', 'disarm', 'on', 'off', 'on-event', 'reconnect', 'watchdog', 'check', 'switch', 'status')]
+    [ValidateSet('arm', 'disarm', 'on', 'off', 'on-event', 'reconnect', 'watchdog', 'check', 'switch', 'status', 'openvpn')]
     [string]$Action,
     [string]$VpnProfile
 )

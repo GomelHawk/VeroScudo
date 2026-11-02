@@ -3,6 +3,8 @@
   VeroScudo installer (Windows). Run from an elevated 64-bit PowerShell:
     .\Install.ps1 -ProfileName "MyVPN" -Server vpn.example.com -UserName jdoe        # first install
     .\Install.ps1 -ProfileName "Backup" -Server vpn2.example.com -UserName jdoe      # add another VPN profile
+    .\Install.ps1 -ProfileName "Reserve" -Type openvpn -OpenVpnConfig C:\path\reserve.ovpn -UserName jdoe   # OpenVPN profile
+    .\Install.ps1 -ProfileName "wg-home" -Type wireguard -WireGuardConfig C:\path\wg-home.conf           # WireGuard tunnel
     .\Install.ps1                                                                 # re-install / upgrade, keeps config
   Self-tests the WFP interface first (nothing is changed when that fails), copies the program to $InstallDir, compiles the
   native helper, writes %ProgramData%\VeroScudo\config.json (unless present) and locks that folder down to administrators,
@@ -11,7 +13,11 @@
   (tray Settings, or Set-VpnCredential.ps1).
 #>
 param(
-    [string]$ProfileName, [string]$Server, [string]$UserName, [int]$Port = 443,
+    [string]$ProfileName, [string]$Server, [string]$UserName, [int]$Port = 0,
+    [ValidateSet('ras', 'openvpn', 'wireguard')][string]$Type = 'ras',
+    [string]$OpenVpnConfig,          # openvpn: the .ovpn to import (checked, key files inlined, stored admin-only)
+    [string]$WireGuardConfig,        # wireguard: optional .conf to read the endpoint from and check (the tunnel itself lives in the WireGuard app)
+    [switch]$Dco,                    # openvpn: keep the kernel data channel (the server permit is then not tied to openvpn.exe)
     [string]$InstallDir = "$env:ProgramFiles\VeroScudo",
     [switch]$NoTray, [switch]$NoShortcuts
 )
@@ -30,20 +36,47 @@ New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-N
 # --- state folder: administrators and SYSTEM only; users may read (the tray shows state and log)
 # Without this, ProgramData's default ACL lets any user create files in it (and own them).
 & icacls.exe $p.Home /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-& icacls.exe "$($p.Home)\*" /reset /T /C /Q | Out-Null
+# reset everything below to the folder's rules - except the OpenVPN folder, which keeps its own stricter ones (private keys)
+foreach ($child in @(Get-ChildItem -LiteralPath $p.Home -Force | Where-Object { $_.FullName -ne $p.OpenVpnDir })) { & icacls.exe $child.FullName /reset /T /C /Q | Out-Null }
 & icacls.exe $p.Home /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
-Write-Host "locked down: $($p.Home) (Administrators/SYSTEM full, Users read)"
+$null = Protect-VeroOpenVpnDir
+Write-Host "locked down: $($p.Home) (Administrators/SYSTEM full, Users read; openvpn\ Administrators/SYSTEM only)"
 
+function New-ProfileEntry([string]$Name, [string]$Kind, [string]$Srv, [int]$Prt, [string]$User, [string]$Ovpn, [string]$WgConf, [bool]$KeepDco) {
+    <# One new profile from the command line, per type. OpenVPN: imports the .ovpn first (throws on a refused config). #>
+    if ($Kind -eq 'openvpn') {
+        if (-not $Ovpn) { throw 'An OpenVPN profile needs -OpenVpnConfig <file.ovpn>.' }
+        $r = Import-VeroOpenVpnProfile -ProfileName $Name -Source $Ovpn
+        foreach ($w in $r.Warnings) { Write-Warning $w }
+        if ($r.Auth -and -not $User) { $User = Read-Host 'VPN username for this OpenVPN profile' }
+        return [pscustomobject]@{ Profile = $Name; Type = 'openvpn'; Server = ''; Port = 1194; Username = $User; ServerIps = @(); Auth = $r.Auth; Dco = $KeepDco }
+    }
+    if ($Kind -eq 'wireguard') {
+        if ($WgConf) {
+            $r = Test-VeroWireGuardConf -Text ([IO.File]::ReadAllText($WgConf))
+            if ($r.Errors.Count -gt 0) { throw ("WireGuard config refused: {0}" -f ($r.Errors -join '; ')) }
+            foreach ($w in $r.Warnings) { Write-Warning $w }
+            if (-not $Srv) { $Srv = $r.Server }; if (-not $Prt) { $Prt = $r.Port }
+        }
+        if (-not $Srv) { throw 'A WireGuard profile needs -Server (its endpoint) or -WireGuardConfig <file.conf>.' }
+        if (-not $Prt) { $Prt = 51820 }
+        return [pscustomobject]@{ Profile = $Name; Type = 'wireguard'; Server = $Srv; Port = $Prt; Username = ''; ServerIps = @(); Auth = $false; Dco = $false }
+    }
+    if (-not $Srv -or -not $User) { throw 'A Windows VPN profile needs -Server and -UserName too.' }
+    [pscustomobject]@{ Profile = $Name; Type = 'ras'; Server = $Srv; Port = $(if ($Prt) { $Prt } else { 443 }); Username = $User; ServerIps = @(); Auth = $true; Dco = $false }
+}
 # --- config
 if (-not (Test-Path $p.Config)) {
-    if (-not $ProfileName -or -not $Server -or -not $UserName) {
+    if ($Type -eq 'ras' -and (-not $ProfileName -or -not $Server -or -not $UserName)) {
         $profiles = @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
         Write-Host "Windows VPN profiles found: $($profiles -join ', ')"
         if (-not $ProfileName) { $ProfileName = Read-Host 'VPN profile name (exactly as in Windows Settings)' }
         if (-not $Server)   { $Server   = Read-Host 'VPN server host name' }
         if (-not $UserName) { $UserName = Read-Host 'VPN username' }
     }
-    $json = @{ profiles = @(@{ profile = $ProfileName; server = $Server; port = $Port; username = $UserName }); activeProfile = $ProfileName
+    if (-not $ProfileName) { $ProfileName = Read-Host 'Profile name' }
+    $entry = New-ProfileEntry -Name $ProfileName -Kind $Type -Srv $Server -Prt $Port -User $UserName -Ovpn $OpenVpnConfig -WgConf $WireGuardConfig -KeepDco $Dco.IsPresent
+    $json = [ordered]@{ profiles = @(ConvertTo-VeroProfileObject $entry); activeProfile = $ProfileName
                retrySeconds = 10; vm = 'auto'; wifiRecoveryFix = $true; updateCheck = $true; lanAllow = @() } | ConvertTo-Json -Depth 5
     Save-VeroConfig -Json $json | Out-Null
     Write-Host "config written: $($p.Config)"
@@ -52,10 +85,13 @@ if (-not (Test-Path $p.Config)) {
     $cfg = Get-VeroConfig -Raw $raw
     $obj = $raw | ConvertFrom-Json
     if ($ProfileName -and @($cfg.Profiles | ForEach-Object Profile) -notcontains $ProfileName) {
-        if (-not $Server -or -not $UserName) { throw 'Adding a profile needs -Server and -UserName too.' }
-        $cfg.Profiles = @($cfg.Profiles) + [pscustomobject]@{ Profile = $ProfileName; Server = $Server; Port = $Port; Username = $UserName; ServerIps = @() }
+        $cfg.Profiles = @($cfg.Profiles) + (New-ProfileEntry -Name $ProfileName -Kind $Type -Srv $Server -Prt $Port -User $UserName -Ovpn $OpenVpnConfig -WgConf $WireGuardConfig -KeepDco $Dco.IsPresent)
         Save-VeroConfig -Json (ConvertTo-VeroConfigJson $cfg) | Out-Null
-        Write-Host "profile added: $ProfileName"
+        Write-Host "profile added: $ProfileName ($(Get-VeroTypeLabel $Type))"
+    } elseif ($ProfileName -and $Type -eq 'openvpn' -and $OpenVpnConfig) {
+        $r = Import-VeroOpenVpnProfile -ProfileName $ProfileName -Source $OpenVpnConfig              # re-import an updated .ovpn
+        foreach ($w in $r.Warnings) { Write-Warning $w }
+        Write-Host "OpenVPN config re-imported: $ProfileName"
     } elseif ($obj.PSObject.Properties['vpn']) {
         Save-VeroConfig -Json (ConvertTo-VeroConfigJson $cfg) | Out-Null        # 1.0 single-profile file -> profiles list
         Write-Host 'config converted to the profiles format'
@@ -63,9 +99,24 @@ if (-not (Test-Path $p.Config)) {
 }
 $config = Get-VeroConfig
 foreach ($pr in $config.Profiles) {
-    if (-not (Get-VpnConnection -Name $pr.Profile -ErrorAction SilentlyContinue)) {
-        Write-Warning "No Windows VPN profile named '$($pr.Profile)' exists for this user. Create it in Settings > VPN first."
+    switch ($pr.Type) {
+        'openvpn' {
+            if (-not (Get-VeroOpenVpnExe)) { Write-Warning "OpenVPN profile '$($pr.Profile)': openvpn.exe not found - install OpenVPN (community edition)." }
+            if (-not (Test-Path (Get-VeroPath -VpnProfile $pr.Profile).OvpnConfig)) { Write-Warning "OpenVPN profile '$($pr.Profile)' is not imported - run Install.ps1 -ProfileName '$($pr.Profile)' -Type openvpn -OpenVpnConfig <file>." }
+        }
+        'wireguard' {
+            if (-not (Test-Path (Join-Path $env:ProgramFiles "WireGuard\Data\Configurations\$($pr.Profile).conf.dpapi"))) {
+                Write-Warning "WireGuard profile '$($pr.Profile)': no such tunnel in the WireGuard app - import it there under exactly this name."
+            }
+        }
+        default {
+            if (-not (Get-VpnConnection -Name $pr.Profile -ErrorAction SilentlyContinue)) {
+                Write-Warning "No Windows VPN profile named '$($pr.Profile)' exists for this user. Create it in Settings > VPN first."
+            }
+        }
     }
+    $n = Get-VeroSwitchNotice -Type $pr.Type -ProfileName $pr.Profile
+    if ($n) { Write-Host "NOTE: $n" }
 }
 
 # --- stop what runs the old code (the tray holds its images open, the watchdog loop holds the module)
@@ -132,6 +183,8 @@ $tasks = @(
     @{ Name = 'On';         Action = (Act 'on');       Trigger = @();                    P = $guard; Desc = 'manual: arm + connect' }
     @{ Name = 'Off';        Action = (Act 'off');      Trigger = @();                    P = $guard; Desc = 'manual: disarm + disconnect' }
     @{ Name = 'Switch';     Action = (Act 'switch');   Trigger = @();                    P = $guard; Desc = 'switch the VPN profile requested by the tray' }
+    @{ Name = 'Reconnect';  Action = (Act 'reconnect'); Trigger = @();                   P = $guard; Desc = 'manual: block, hang up, redial; traffic again once the tunnel is back' }
+    @{ Name = 'OpenVPN';    Action = (Act 'openvpn');  Trigger = @();                    P = $guard; Desc = 'runs openvpn.exe for an OpenVPN profile while VeroScudo is on (started by the guard)' }
 )
 if (-not $NoTray) {
     $trayAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "//B //Nologo `"$InstallDir\run.vbs`" tray"
