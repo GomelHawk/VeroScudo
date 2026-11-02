@@ -57,7 +57,7 @@ def do_import(names: list[str]) -> int:
         if not found:
             print("no VPN connection found - create one in the system's VPN settings first")
         for d in found:
-            what = f"{d['vpn_type'] or d['protocol']}  {d['server'] or '-'}:{d['port']}" if d["server"] else "-"
+            what = f"{d['vpn_type'] or d['protocol']}  {d['server'] or '-'}:{d['port']}" if d["server"] and not d.get("unsupported") else "-"
             print(f"  {d['name']:<28} {what}{'  - ' + d['note'] if d['note'] else ''}")
         print("import: sudo veroscudo import <connection> [<connection> ...]")
         return 0

@@ -19,7 +19,8 @@ veroscudo reconnect          # block, take the VPN down, redial; traffic again o
 veroscudo profiles           # configured profiles with their type, * = active
 veroscudo check              # does each profile's protocol/port match its NetworkManager connection?
 veroscudo import             # list NetworkManager's VPN connections and what would be imported
-sudo veroscudo import "Office L2TP"   # add it with its type's server ports (L2TP, IKEv2, PPTP, SSTP, OpenVPN, WireGuard, OpenConnect)
+sudo veroscudo import "Office L2TP"   # add it with its type's server ports (L2TP, PPTP, SSTP, OpenVPN, WireGuard, OpenConnect;
+                                      # strongSwan/libreswan IPsec is refused: no tunnel interface to allow)
 veroscudo awake              # keep the system from sleeping until Ctrl-C (the tray has a Keep awake toggle too)
 sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 ```

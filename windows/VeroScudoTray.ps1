@@ -686,22 +686,32 @@ function Get-ForeignCached {
 }
 
 function Show-ForeignPrompt($foreign) {
-    <# Before Turn on: another VPN is connected. Returns 'disconnect', 'anyway' or 'cancel'. Nothing happens without a click. #>
+    <# Before Turn on: another VPN is connected. Returns 'disconnect', 'anyway' or 'cancel'. Nothing happens without a click.
+       A VPN app's own tunnel cannot be ended by VeroScudo: then "Turn on anyway" is offered too (and alone if nothing can be ended). #>
     $prof = $global:Config.Profile
-    $canAll = -not @($foreign | Where-Object { -not $_.CanDisconnect })
+    $can = @($foreign | Where-Object { $_.CanDisconnect })
+    $cannot = @($foreign | Where-Object { -not $_.CanDisconnect })
     $names = ($foreign | ForEach-Object { '"' + $_.Name + '"' }) -join ', '
     $one = @($foreign).Count -eq 1
     $kindText = if ($one -and -not $foreign[0].Configured -and $foreign[0].Kind -ne 'app') { ' It is not a VeroScudo profile.' } elseif ($one -and $foreign[0].Configured) { ' It is another VeroScudo profile.' } else { '' }
     $msg = $names + $(if ($one) { ' is' } else { ' are' }) + ' connected.' + $kindText + "`r`n" +
            'VeroScudo will connect "' + $prof + '" and block everything else, including ' + $(if ($one) { 'its' } else { 'their' }) + ' traffic.'
-    if (-not $canAll) { $msg += "`r`n`r`nVeroScudo cannot disconnect a VPN app's own tunnel - close that app first, or turn on anyway (its traffic stays blocked)." }
-    $pf = New-Form 'VeroScudo' 480 230
-    New-Label $pf $msg 20 18 440 120 $FontUI | Out-Null
+    if ($cannot.Count -gt 0) { $msg += "`r`n`r`nVeroScudo cannot disconnect a VPN app's own tunnel (" + (($cannot | ForEach-Object Name) -join ', ') + ') - close that app first, or turn on anyway (its traffic stays blocked).' }
+    $pf = New-Form 'VeroScudo' 520 250
+    New-Label $pf $msg 20 18 480 140 $FontUI | Out-Null
     $res = @{ Value = 'cancel' }
-    $label = if (-not $canAll) { 'Turn on anyway' } elseif ($one) { 'Disconnect ' + $foreign[0].Name + ' and turn on' } else { 'Disconnect them and turn on' }
-    if ($label.Length -gt 34) { $label = if ($canAll) { 'Disconnect and turn on' } else { 'Turn on anyway' } }
-    $bGo = New-Button $pf $label 20 170 300 $true; $bNo = New-Button $pf 'Cancel' 340 170 120
-    $bGo.Add_Click(({ $res.Value = $(if ($canAll) { 'disconnect' } else { 'anyway' }); $pf.Close() }).GetNewClosure())
+    $x = 20
+    if ($can.Count -gt 0) {
+        $label = if ($cannot.Count -gt 0) { 'Disconnect what it can and turn on' } elseif ($one -and $foreign[0].Name.Length -le 18) { 'Disconnect ' + $foreign[0].Name + ' and turn on' } else { 'Disconnect and turn on' }
+        $w = if ($cannot.Count -gt 0) { 230 } else { 330 }
+        $bGo = New-Button $pf $label $x 190 $w $true; $x += $w + 10
+        $bGo.Add_Click(({ $res.Value = 'disconnect'; $pf.Close() }).GetNewClosure())
+    }
+    if ($cannot.Count -gt 0) {
+        $bAny = New-Button $pf 'Turn on anyway' $x 190 130 ($can.Count -eq 0); $x += 140
+        $bAny.Add_Click(({ $res.Value = 'anyway'; $pf.Close() }).GetNewClosure())
+    }
+    $bNo = New-Button $pf 'Cancel' 400 190 100
     $bNo.Add_Click(({ $pf.Close() }).GetNewClosure())
     $pf.TopMost = $true; $pf.AcceptButton = $bNo
     $pf.ShowDialog() | Out-Null

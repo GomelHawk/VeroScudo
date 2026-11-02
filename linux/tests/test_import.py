@@ -23,7 +23,6 @@ def test_split_address(value, expected):
      {"vpn_type": "l2tp", "server": "l2tp.example.com", "protocol": "udp", "username": "jdoe"}),
     ("pptp", "gateway = pptp.example.com, user = jdoe", {"vpn_type": "pptp", "server": "pptp.example.com", "protocol": "tcp"}),
     ("sstp", "gateway = sstp.example.com:4443, user = jdoe", {"vpn_type": "sstp", "server": "sstp.example.com", "port": 4443}),
-    ("ikev2", "address = ike.example.com, method = eap, user = jdoe", {"vpn_type": "ikev2", "server": "ike.example.com", "protocol": "udp"}),
     ("openconnect", "gateway = https://oc.example.com/, protocol = anyconnect", {"vpn_type": "openconnect", "server": "oc.example.com", "port": 443}),
 ])
 def test_describe_each_networkmanager_vpn_type(kind, data, want):
@@ -100,3 +99,18 @@ def test_each_vpn_type_gets_its_own_server_rules(vtype, nft, pfl):
     prs = pf.render_ruleset(cfg, ["203.0.113.5"], None, vm_allowed=False)
     for frag in pfl:
         assert frag in prs, frag
+
+
+def test_nmcli_escapes_are_undone():
+    assert nm.unescape(r"gateway = vpn.example.com\:4443, user = jdoe") == "gateway = vpn.example.com:4443, user = jdoe"
+    d = nm.describe_vpn("S", "sstp", nm.unescape(r"gateway = vpn.example.com\:4443"))
+    assert (d["server"], d["port"]) == ("vpn.example.com", 4443)
+    d = nm.describe_vpn("O", "openconnect", nm.unescape(r"gateway = https\://oc.example.com\:8443/"))
+    assert (d["server"], d["port"]) == ("oc.example.com", 8443)
+
+
+def test_policy_based_ipsec_is_refused_at_import():
+    d = nm.describe_vpn("I", "ikev2", "address = ike.example.com, method = eap, user = jdoe")
+    assert d["unsupported"] and "no tunnel interface" in d["note"]
+    with pytest.raises(ValueError, match="cannot be imported"):
+        importer.add_profiles(BASE, [d], ["I"])

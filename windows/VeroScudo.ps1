@@ -18,6 +18,6 @@ try {
     # the scheduled tasks run hidden: without this line a failure would be invisible
     Write-VeroLog ("ERROR: {0} | at {1}" -f $_.Exception.Message, ($_.InvocationInfo.PositionMessage -replace '\s+', ' ')) $Action
     # the native helper was refused by Windows: record it for the tray (the On/Off/... tasks are separate processes)
-    if (& (Get-Module VeroScudo.Core) { $script:NativeLoadFailed }) { try { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action } catch { Write-Verbose 'not recorded' } }
+    if (& (Get-Module VeroScudo.Core) { $script:NativeLoadFailed }) { try { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action -FromTask } catch { Write-Verbose 'not recorded' } }
     exit 1
 }

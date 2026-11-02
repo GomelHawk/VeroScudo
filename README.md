@@ -201,7 +201,8 @@ ping, no IPv6, and no app gets through on the strength of its own firewall rule.
 - Every switch to an OpenVPN or WireGuard profile shows a notice (once per switch, not again while it stays active).
 
 Linux / macOS: `veroscudo import` lists the VPN connections NetworkManager (or macOS) has - OpenVPN, WireGuard, L2TP,
-IKEv2/IPsec, PPTP, SSTP, OpenConnect - and `sudo veroscudo import <name>` adds them with their type's server ports.
+PPTP, SSTP, OpenConnect, and on macOS IKEv2/IPsec - and `sudo veroscudo import <name>` adds one with its type's server
+ports. NetworkManager's strongSwan/libreswan IPsec is refused for now: it has no tunnel interface to allow.
 
 Linux: NetworkManager already runs OpenVPN and WireGuard connections and reports "user disconnected" for them, so they
 work as ordinary profiles; WireGuard is judged by its handshakes there too. `veroscudo check` compares each profile's

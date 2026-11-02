@@ -19,7 +19,25 @@ $script:Version      = '1.2.1'
 $script:LegacyGroup  = 'VeroScudo'                                       # Windows Firewall rule group of 1.0.x (migrated away)
 $script:VmRule       = 'VeroScudo-WSL'
 $script:WslCreator   = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'          # Hyper-V firewall VM creator id of WSL
-$script:Svchost      = "$env:SystemRoot\System32\svchost.exe"
+# System folders come from the OS, never from environment variables: the guard runs elevated, and a non-admin process can
+# plant %ProgramFiles%, %ProgramData% or %SystemRoot% in HKCU\Environment (the SilentCleanup-style UAC bypass).
+function Get-VeroSystemDir {
+    [CmdletBinding()] param([ValidateSet('System', 'ProgramFiles', 'ProgramData')][string]$Kind)
+    $sys = [Environment]::SystemDirectory                                   # GetSystemDirectory(): not the environment
+    if (-not $sys) { $sys = 'C:\Windows\System32' }                        # (non-Windows dev harness only)
+    if ($Kind -eq 'System') { return $sys }
+    $drive = try { [IO.Path]::GetPathRoot($sys).TrimEnd('\') } catch { 'C:' }
+    $key, $name = if ($Kind -eq 'ProgramFiles') { 'SOFTWARE\Microsoft\Windows\CurrentVersion', 'ProgramFilesDir' } else { 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList', 'ProgramData' }
+    try {
+        $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
+        if ($rk) {
+            $v = [string]$rk.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $rk.Close()
+            if ($v) { return ($v -replace '(?i)%SystemDrive%', $drive) }
+        }
+    } catch { Write-Verbose "registry: $($_.Exception.Message)" }
+    if ($Kind -eq 'ProgramFiles') { $drive + '\Program Files' } else { $drive + '\ProgramData' }
+}
+$script:Svchost      = (Get-VeroSystemDir System) + '\svchost.exe'
 $script:HomeOverride = $null                                            # tests only (Set-VeroHome); never read from the environment
 $script:UserOverride = $null                                            # tests only (Set-VeroHome -UserDir)
 $script:ReleasePrefix = 'https://github.com/GomelHawk/VeroScudo/releases/'
@@ -52,13 +70,14 @@ function Get-VeroNativeBlocked {
     $null
 }
 function Set-VeroNativeBlocked {
-    [CmdletBinding()] param([string]$Message, [string]$Action = 'core')
+    [CmdletBinding()] param([string]$Message, [string]$Action = 'core', [switch]$FromTask)
+    # -FromTask (On, Off, events...): recorded for the tray, but neither counted nor delaying the watchdog's next try
     $old = Get-VeroNativeBlocked
-    $count = if ($old) { [int]$old.Count + 1 } else { 1 }
-    $wait = Get-VeroNativeRetrySeconds $count
+    $count = if ($FromTask) { $(if ($old) { [int]$old.Count } else { 0 }) } elseif ($old) { [int]$old.Count + 1 } else { 1 }
+    $wait = if ($FromTask) { 0 } else { Get-VeroNativeRetrySeconds $count }
     $now = Get-Date
     @{ First = $(if ($old) { [string]$old.First } else { $now.ToString('o') }); Last = $now.ToString('o'); Count = $count
-       Next = $now.AddSeconds($wait).ToString('o'); Message = $Message } | ConvertTo-Json | Set-Content (Get-VeroPath).NativeBlocked
+       Next = $(if ($FromTask -and $old) { [string]$old.Next } else { $now.AddSeconds($wait).ToString('o') }); Message = $Message } | ConvertTo-Json | Set-Content (Get-VeroPath).NativeBlocked
     Write-VeroLog ("ERROR: Windows blocked VeroScudo's native helper (Smart App Control or App Control: {0}). The kill-switch filters stay in place; self-repair and automatic redial are paused - next try at {1:HH:mm} (failure {2} in a row)." -f $Message, $now.AddSeconds($wait), $count) $Action
 }
 function Clear-VeroNativeBlocked {
@@ -92,7 +111,7 @@ function Get-VeroSafeName([string]$Name) {
 
 function Get-VeroPath {
     [CmdletBinding()] param([string]$VpnProfile)
-    $home_ = if ($script:HomeOverride) { $script:HomeOverride } else { Join-Path $env:ProgramData 'VeroScudo' }
+    $home_ = if ($script:HomeOverride) { $script:HomeOverride } else { ((Get-VeroSystemDir ProgramData) + '\VeroScudo') }
     $state = Join-Path $home_ 'state'
     $user  = if ($script:UserOverride) { $script:UserOverride } else { Join-Path $env:LOCALAPPDATA 'VeroScudo' }
     $p = [pscustomobject]@{
@@ -1191,6 +1210,7 @@ function Test-VeroNeedsPassword($Config) {
 function Test-VeroTunnelAdapter($Nic) {
     <# A virtual tunnel adapter (TAP, Wintun, OpenVPN DCO, WireGuard, RAS) - never a physical NIC. #>
     if (-not $Nic) { return $false }
+    if ([string]$Nic.Description -match 'Teredo|ISATAP|6to4|IP-HTTPS|IPHTTPS|Microsoft Kernel Debug') { return $false }   # Windows' own tunnels
     if ([string]$Nic.NetworkInterfaceType -in 'Ppp', 'Tunnel') { return $true }
     [string]$Nic.Description -match 'TAP-Windows|Wintun|WireGuard|OpenVPN|Data Channel Offload|ovpn-dco|TAP-|sing-box|Hiddify|NordLynx|PrivateVPN'
 }
@@ -1375,7 +1395,7 @@ function Get-VeroOpenVpnExe {
     if ($script:OvpnExe) { return $script:OvpnExe }
     $cand = @()
     try { $k = Get-ItemProperty 'HKLM:\SOFTWARE\OpenVPN' -ErrorAction Stop; if ($k.PSObject.Properties['exe_path']) { $cand += [string]$k.exe_path } } catch { Write-Verbose 'no OpenVPN registry key' }
-    $cand += (Join-Path $env:ProgramFiles 'OpenVPN\bin\openvpn.exe')
+    $cand += (Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\bin\openvpn.exe')
     foreach ($c in $cand) { if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { $script:OvpnExe = $c; return $c } }
     ''
 }
@@ -1700,7 +1720,7 @@ function Invoke-VeroOpenVpnRunner {
 }
 
 # ---------------------------------------------------------------- WireGuard (the WireGuard for Windows app's tunnel services)
-function Get-VeroWgDir { Join-Path $env:ProgramFiles 'WireGuard' }
+function Get-VeroWgDir { Join-Path (Get-VeroSystemDir ProgramFiles) 'WireGuard' }
 function Get-VeroWgServiceName([string]$Name) { 'WireGuardTunnel$' + $Name }
 function Get-VeroWgState {
     <# 'running', 'stopped' (installed, not running: crashed or stopped in services.msc) or 'missing' (not installed:
@@ -1921,9 +1941,9 @@ function Get-VeroConflict {
         $dirs = @()
         try { $u = Get-ItemProperty 'HKCU:\Software\OpenVPN-GUI' -ErrorAction Stop; if ($u.PSObject.Properties['config_dir']) { $dirs += [Environment]::ExpandEnvironmentVariables([string]$u.config_dir) } } catch { Write-Verbose 'no OpenVPN-GUI key' }
         $dirs += (Join-Path $env:USERPROFILE 'OpenVPN\config')
-        $auto = Join-Path $env:ProgramFiles 'OpenVPN\config-auto'
+        $auto = Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\config-auto'
         try { $k = Get-ItemProperty 'HKLM:\SOFTWARE\OpenVPN' -ErrorAction Stop; if ($k.PSObject.Properties['config_dir']) { $dirs += [string]$k.config_dir }; if ($k.PSObject.Properties['autostart_config_dir']) { $auto = [string]$k.autostart_config_dir } } catch { Write-Verbose 'no OpenVPN key' }
-        $dirs += (Join-Path $env:ProgramFiles 'OpenVPN\config')
+        $dirs += (Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\config')
         foreach ($pr in $ovpnProfiles) {
             $mine = @(Get-VeroOpenVpnRemote -ProfileName $pr.Profile | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object
             if ($mine.Count -eq 0) { continue }
@@ -2001,16 +2021,16 @@ function Disconnect-VeroForeignVpn {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'on')
     $left = New-Object System.Collections.Generic.List[object]
     foreach ($f in @(Get-VeroForeignVpn -Config $Config)) {
+        if (-not $f.CanDisconnect) { $left.Add($f); continue }             # a VPN app's own tunnel (NB: not inside the switch)
         switch ($f.Kind) {
             'ras'       { rasdial.exe $f.Id /disconnect 2>&1 | Out-Null }
             'wireguard' { Invoke-VeroWgHangUp -ProfileName $f.Id }
             'openvpn'   {
-                $gui = Join-Path $env:ProgramFiles 'OpenVPN\bin\openvpn-gui.exe'
+                $gui = Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\bin\openvpn-gui.exe'
                 if ((Get-Process -Name 'openvpn-gui' -ErrorAction SilentlyContinue) -and (Test-Path $gui)) { Start-Process -FilePath $gui -ArgumentList '--command disconnect_all' -WindowStyle Hidden; Start-Sleep -Seconds 3 }
                 $proc = Get-Process -Id ([int]$f.Id) -ErrorAction SilentlyContinue
                 if ($proc -and $proc.ProcessName -eq 'openvpn') { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
             }
-            default     { $left.Add($f); continue }
         }
         Write-VeroLog "disconnected: $(Format-VeroForeignVpn $f) - you chose it (Disconnect and turn on)" $Action
     }
@@ -2105,9 +2125,12 @@ function Invoke-VeroAction {
                    $foreign = @(Get-VeroForeignVpn -Config $Config)
                    if ($foreign.Count -gt 0 -and $Action -eq 'on') {
                        $what = ($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) -join '; '
-                       Write-VeroLog "NOT turned on: $what. Use Turn VPN on in the tray to choose, or -DisconnectOthers / -Force." $Action
-                       @{ Time = (Get-Date).ToString('o'); Items = @($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) } | ConvertTo-Json -Depth 3 | Set-Content $p.OnRefused
-                       if (-not (Test-VeroArmed)) { return }                          # already on: nothing to refuse, just reported
+                       if (-not (Test-VeroArmed)) {
+                           Write-VeroLog "NOT turned on: $what. Use Turn VPN on in the tray to choose, or -DisconnectOthers / -Force." $Action
+                           @{ Time = (Get-Date).ToString('o'); Items = @($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) } | ConvertTo-Json -Depth 3 | Set-Content $p.OnRefused
+                           return
+                       }
+                       Write-VeroLog "WARNING: already on, next to: $what - their traffic is blocked" $Action   # already on: On just redials
                    }
                    if ($Action -eq 'on-disconnect' -and $foreign.Count -gt 0) {
                        $left = @(Disconnect-VeroForeignVpn -Config $Config -Action $Action)
@@ -2161,11 +2184,10 @@ function Invoke-VeroAction {
             if (-not $mine) { $single.Dispose(); return }
             try {
                 if (-not (Test-VeroNativeRetryDue (Get-VeroNativeBlocked))) { return }      # helper blocked: not yet time to retry
-                $ok = $false
                 while ($true) {
                     try {
                         Invoke-VeroCheck -Action $Action
-                        if (-not $ok) { $ok = $true; Clear-VeroNativeBlocked -Action $Action }
+                        Clear-VeroNativeBlocked -Action $Action                    # every good pass (a cheap Test-Path): also clears a short task's record
                     } catch {
                         if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
                         Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
@@ -2221,7 +2243,7 @@ function Get-VeroLatestRelease {
     return $null
 }
 
-Export-ModuleMember -Function Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
+Export-ModuleMember -Function Get-VeroSystemDir, Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
     Test-VeroNeedsPassword, Test-VeroTunnelAdapter, Protect-VeroOpenVpnDir, Test-VeroOpenVpnConf, Import-VeroOpenVpnProfile, Get-VeroOpenVpnRemote,
     Get-VeroOpenVpnExe, Get-VeroOpenVpnArgs, ConvertFrom-VeroMgmtLine, Format-VeroMgmtValue, Get-VeroStaticChallengeResponse, Get-VeroOpenVpnStatus,
     Get-VeroOpenVpnNic, Test-VeroOpenVpnRunnerAlive, Invoke-VeroOpenVpnDial, Stop-VeroOpenVpn, Invoke-VeroOpenVpnSession, Invoke-VeroOpenVpnRunner,

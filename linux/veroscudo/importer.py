@@ -33,7 +33,7 @@ def add_profiles(raw: str, found: list[dict], names: list[str]) -> tuple[str, li
             raise ValueError(f"no VPN connection named '{n}' (see: veroscudo import)")
         if n in have:
             raise ValueError(f"'{n}' is already configured")
-        if not d["server"]:
+        if not d["server"] or d.get("unsupported"):
             raise ValueError(f"'{n}' cannot be imported: {d['note']}")
         profiles.append(to_profile(d))
         have.add(n)

@@ -47,6 +47,17 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   profile's protocol/port with NetworkManager; the profile type is shown in status, `profiles` and the tray; a notice
   on every switch to a WireGuard profile; `veroscudo status` reports other tunnels next to VeroScudo.
 
+### Fixed (review of the import / other-VPN changes)
+- Windows: the elevated guard took Program Files / ProgramData / System32 from environment variables a non-admin process
+  can plant; they now come from the OS and HKLM.
+- Windows: Teredo, IP-HTTPS, 6to4 and ISATAP no longer count as "another VPN" (On refused every time).
+- Windows: On while already on no longer says "not turned on"; a VPN app's tunnel is no longer logged as disconnected;
+  the prompt offers "Disconnect what it can" next to "Turn on anyway".
+- Windows: a short task that could not load the helper no longer leaves a false *Helper blocked* until reboot, nor delays
+  the watchdog's retry.
+- Linux: `veroscudo import` undoes nmcli's escaping (`host\:4443`, URLs, IPv6); policy-based IPsec (strongSwan,
+  libreswan) is refused - it has no tunnel interface, so it could only stay blocked.
+
 ## [1.2.1] - 2026-10-26
 
 ### Windows

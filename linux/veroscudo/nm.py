@@ -166,7 +166,7 @@ def check(cfg) -> list[str]:
                 out.append(f'{p.name}: WireGuard uses UDP - set "protocol": "udp" and "port": the endpoint\'s port')
             out.append(f"{p.name}: WireGuard - make sure the peer has PersistentKeepalive (e.g. 25): VeroScudo judges the link by its handshakes")
         elif k == "openvpn":
-            d = parse_openvpn_data(_nmcli("-g", "vpn.data", "connection", "show", p.name))
+            d = parse_openvpn_data(unescape(_nmcli("-g", "vpn.data", "connection", "show", p.name)))
             if d["proto"] != p.protocol:
                 out.append(f"{p.name}: OpenVPN uses {d['proto'].upper()} but the profile says {p.protocol.upper()}")
             if d["port"] and d["port"] != p.port:
@@ -293,6 +293,11 @@ _SERVICE_TYPES = {"openvpn": "openvpn", "l2tp": "l2tp", "pptp": "pptp", "sstp": 
                   "libreswan": "ipsec", "openconnect": "openconnect"}
 
 
+def unescape(value: str) -> str:
+    """nmcli's terse output (-t / -g) escapes ':' and '\\' with a backslash. Pure."""
+    return re.sub(r"\\(.)", r"\1", value or "")
+
+
 def split_address(value: str) -> tuple[str, int]:
     """'host', 'host:4443', '[2001:db8::1]:443', 'https://host:8443/x' -> (host, port or 0). Pure."""
     v = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", (value or "").strip()).split("/")[0]
@@ -331,6 +336,10 @@ def describe_vpn(name: str, kind_: str, data: str) -> dict:
     elif kind_ in ("ikev2", "ipsec"):
         host, _ = split_address(d.get("address") or d.get("right", ""))
         out.update(vpn_type=kind_, server=host, protocol="udp", port=4500, username=d.get("user") or d.get("leftxauthusername", ""))
+        # strongSwan / libreswan in NetworkManager are policy-based: no tunnel interface, so the kill-switch could never tell
+        # the tunnel's traffic apart - connected but blocked forever. Refused until a route-based (vti/xfrm) setup is handled.
+        out["unsupported"] = True
+        out["note"] = "policy-based IPsec has no tunnel interface - not supported by VeroScudo on Linux yet"
     elif kind_ == "openconnect":
         host, port = split_address(d.get("gateway", ""))
         out.update(vpn_type="openconnect", server=host, port=port or 443)
@@ -363,7 +372,7 @@ def discover() -> list[dict]:
         name, ctype = parts[0].replace("\\:", ":"), parts[1]
         if ctype == "wireguard":
             d = {"name": name, "vpn_type": "wireguard", "server": "", "port": 51820, "protocol": "udp", "username": "", "note": ""}
-            path = _nmcli("-g", "GENERAL.FILENAME", "connection", "show", name)
+            path = unescape(_nmcli("-g", "GENERAL.FILENAME", "connection", "show", name))
             try:
                 host, port = wireguard_endpoint(Path(path).read_text()) if path else ("", 0)
             except OSError:
@@ -376,5 +385,5 @@ def discover() -> list[dict]:
         elif ctype == "vpn":
             st = _nmcli("-g", "vpn.service-type", "connection", "show", name)
             k = next((v for key, v in _SERVICE_TYPES.items() if key in st), "")
-            out.append(describe_vpn(name, k, _nmcli("-g", "vpn.data", "connection", "show", name)))
+            out.append(describe_vpn(name, k, unescape(_nmcli("-g", "vpn.data", "connection", "show", name))))
     return out

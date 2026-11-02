@@ -993,3 +993,52 @@ Describe 'native helper blocked by Windows (Smart App Control)' {
         Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroCheck -Times 0 -Exactly
     }
 }
+
+Describe 'review of 9052eef: regressions' {
+    It 'does not count Windows'' own tunnels (Teredo, IP-HTTPS, 6to4, ISATAP) as a VPN' {
+        foreach ($d in 'Teredo Tunneling Pseudo-Interface', 'Microsoft IP-HTTPS Platform Adapter', 'Microsoft 6to4 Adapter', 'Microsoft ISATAP Adapter') {
+            Test-VeroTunnelAdapter ([pscustomobject]@{ Description = $d; NetworkInterfaceType = 'Tunnel' }) | Should -BeFalse -Because $d
+        }
+        Test-VeroTunnelAdapter ([pscustomobject]@{ Description = 'WAN Miniport (IKEv2)'; NetworkInterfaceType = 'Ppp' }) | Should -BeTrue
+    }
+    It 'takes system folders from the OS, not from a planted environment variable' {
+        $saved = $env:ProgramFiles
+        try {
+            $env:ProgramFiles = 'C:\Users\planted\x'
+            Get-VeroSystemDir ProgramFiles | Should -Not -Be 'C:\Users\planted\x'
+        } finally { $env:ProgramFiles = $saved }
+    }
+    Context 'native record' {
+        AfterEach { Remove-TestFile (Get-VeroPath).NativeBlocked }
+        It 'a short task''s failure is shown but neither counted nor delaying the watchdog' {
+            Set-VeroNativeBlocked -Message 'x' -Action test -FromTask
+            $b = Get-VeroNativeBlocked
+            [int]$b.Count | Should -Be 0
+            Test-VeroNativeRetryDue $b -Now (Get-Date).AddSeconds(1) | Should -BeTrue
+        }
+    }
+}
+
+Describe 'review of 9052eef: On while already on, and vendor tunnels' {
+    BeforeAll {
+        $script:cfgR2 = Get-VeroConfig -Raw '{"profiles":[{"profile":"PieSoft","server":"vpn.example.com","username":"u"}]}'
+        Mock -ModuleName VeroScudo.Core Get-VeroForeignVpn { [pscustomobject]@{ Name = 'PrivateVPN'; Kind = 'ras'; Configured = $false; CanDisconnect = $true; Id = 'PrivateVPN' } }
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+    }
+    AfterAll { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).OnRefused }
+    It 'already on: plain On warns but does not claim "not turned on"' {
+        Remove-TestFile (Get-VeroPath).OnRefused
+        Set-VeroArmed $true 'test'
+        Invoke-VeroAction -Action on -Config $script:cfgR2
+        Test-Path (Get-VeroPath).OnRefused | Should -BeFalse
+        Test-VeroArmed | Should -BeTrue
+    }
+    It 'never logs a vendor tunnel as disconnected' {
+        Mock -ModuleName VeroScudo.Core Get-VeroForeignVpn { [pscustomobject]@{ Name = 'TAP (PrivateVPN)'; Kind = 'app'; Configured = $false; CanDisconnect = $false; Id = 'TAP' } }
+        $left = @(Disconnect-VeroForeignVpn -Config $script:cfgR2 -Action test)
+        $left.Count | Should -Be 1
+        Get-Content (Get-VeroPath).Log -Tail 3 | Where-Object { $_ -match 'disconnected:' } | Should -BeNullOrEmpty
+    }
+}
