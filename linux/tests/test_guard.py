@@ -182,7 +182,7 @@ def test_a_real_disconnect_after_a_reconnect_still_disarms(env):
 
 
 def test_off_wins_over_a_pending_reconnect(env):
-    g, calls, _ = env
+    g, _, _ = env
     g.arm()
     g.renew_marker.write_text(str(__import__("time").time()))
     g.off()
