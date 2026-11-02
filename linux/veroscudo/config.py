@@ -33,6 +33,28 @@ def _is_host(value: str) -> bool:
         return False
 
 
+# what each VPN type needs to reach its server: (protocol, ports). ESP / GRE are IP protocols without ports.
+VPN_TYPES = {"", "openvpn", "wireguard", "sstp", "l2tp", "ikev2", "ipsec", "pptp", "openconnect"}
+
+
+def server_rules(p: Profile) -> list[tuple[str, tuple[int, ...]]]:
+    """The protocol/port pairs the kill-switch allows to the VPN server, per VPN type. Pure."""
+    t = p.vpn_type
+    if t == "l2tp":
+        return [("udp", (500, 4500, 1701)), ("esp", ())]
+    if t in ("ikev2", "ipsec"):
+        return [("udp", (500, 4500)), ("esp", ())]
+    if t == "pptp":
+        return [("tcp", (1723,)), ("gre", ())]
+    if t == "sstp":
+        return [("tcp", (p.port,))]
+    if t == "openconnect":
+        return [("tcp", (p.port,)), ("udp", (p.port,))]          # TLS + DTLS on the same port
+    if t == "wireguard":
+        return [("udp", (p.port,))]
+    return [(p.protocol, (p.port,))]
+
+
 @dataclass(frozen=True)
 class Profile:
     name: str                      # NetworkManager connection id
@@ -41,6 +63,7 @@ class Profile:
     port: int = 443
     protocol: str = "tcp"          # transport of the VPN control channel: tcp (SSTP/OpenVPN-tcp) or udp (WireGuard, OpenVPN-udp, IKEv2)
     server_ips: tuple[str, ...] = ()   # pinned addresses: when set, nothing is resolved
+    vpn_type: str = ""             # "" = protocol/port above; else the VPN's own ports (server_rules): l2tp, ikev2, ipsec, pptp, ...
 
 
 @dataclass(frozen=True)
@@ -115,7 +138,10 @@ class Config:
                 pins.append(str(ipaddress.ip_address(str(ip))))
             except ValueError:
                 raise ValueError(f"config.json: invalid serverIps entry {ip!r} (profile '{name}')") from None
-        return Profile(name, server, str(p.get("username", "")), port, proto, tuple(pins))
+        vtype = str(p.get("vpnType", "")).lower()
+        if vtype not in VPN_TYPES:
+            raise ValueError(f"config.json: vpnType must be one of {', '.join(sorted(VPN_TYPES))} (profile '{name}')")
+        return Profile(name, server, str(p.get("username", "")), port, proto, tuple(pins), vtype)
 
     @staticmethod
     def from_text(raw: str, active: str | None = None) -> Config:

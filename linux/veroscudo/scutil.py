@@ -112,3 +112,44 @@ def other_tunnels(own: str | None) -> list[str]:
 
 def check(cfg) -> list[str]:
     return [f"{p.name}: no VPN service with this name (System Settings > VPN)" for p in cfg.profiles if not _status(p.name)]
+
+
+# ---- import from macOS (veroscudo import)
+_LIST = re.compile(r'^\*?\s*\((?P<status>[^)]*)\)\s+(?P<id>[0-9A-Fa-f-]{36})\s+(?P<what>.*?)\s+"(?P<name>[^"]+)"\s+\[(?P<kind>[^\]]+)\]\s*$')
+_KINDS = {"PPP/L2TP": "l2tp", "PPP/PPTP": "pptp", "IPSec": "ipsec", "VPN/IKEv2": "ikev2", "IKEv2": "ikev2"}
+
+
+def parse_list(text: str) -> list[dict]:
+    """`scutil --nc list` -> [{name, id, kind}]; kind '' = a VPN type VeroScudo does not handle (an app's own VPN). Pure."""
+    out = []
+    for line in text.splitlines():
+        m = _LIST.match(line.strip())
+        if m:
+            k = m.group("kind")
+            out.append({"name": m.group("name"), "id": m.group("id"), "kind": _KINDS.get(k, "ikev2" if "IKEv2" in k else "")})
+    return out
+
+
+def parse_server(text: str) -> str:
+    """The server address from `scutil --nc show <id>` (RemoteAddress / CommRemoteAddress / ServerAddress). Pure."""
+    for key in ("RemoteAddress", "CommRemoteAddress", "ServerAddress"):
+        m = re.search(rf"\b{key}\s*:\s*(\S+)", text)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def discover() -> list[dict]:
+    out = []
+    for s in parse_list(subprocess.run(["scutil", "--nc", "list"], check=False, capture_output=True, text=True).stdout):
+        d = {"name": s["name"], "vpn_type": s["kind"], "server": "", "port": 4500, "protocol": "udp", "username": "", "note": ""}
+        if not s["kind"]:
+            d["note"] = "VPN type not supported by VeroScudo (an app's own VPN)"
+        else:
+            d["server"] = parse_server(subprocess.run(["scutil", "--nc", "show", s["id"]], check=False, capture_output=True, text=True).stdout)
+            if s["kind"] == "pptp":
+                d.update(port=1723, protocol="tcp")
+            if not d["server"]:
+                d["note"] = "no server found in the service"
+        out.append(d)
+    return out

@@ -857,3 +857,139 @@ Describe 'Update-VeroWgWatch: switching tunnels in the WireGuard app' {
         Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
     }
 }
+
+Describe 'Windows VPN profile details (the editor)' {
+    It 'knows which sign-in needs a password' {
+        Test-VeroRasPassword -AuthMethods @('Eap') -EapXml '<EapHostConfig><EapMethod><Type xmlns="x">26</Type></EapMethod></EapHostConfig>' | Should -BeTrue     # EAP-MSCHAPv2
+        Test-VeroRasPassword -AuthMethods @('Eap') -EapXml '<EapHostConfig><EapMethod><eapCommon:Type>13</eapCommon:Type></EapMethod></EapHostConfig>' | Should -BeFalse  # EAP-TLS
+        Test-VeroRasPassword -AuthMethods @('MachineCertificate') | Should -BeFalse
+        Test-VeroRasPassword -AuthMethods @('MSChapv2') | Should -BeTrue
+    }
+    It 'describes the protocol it found' {
+        Get-VeroRasDescription -TunnelType 'Ikev2' -Password $true | Should -Match 'IKEv2'
+        Get-VeroRasDescription -TunnelType 'Ikev2' -Password $false -AllUsers $true | Should -Match 'no password needed.*all users'
+    }
+    It 'accepts a certificate-only Windows VPN profile without a username, and keeps it that way' {
+        $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"Cert","server":"vpn.example.com","auth":false}]}'
+        $c.Auth | Should -BeFalse; Test-VeroNeedsPassword $c | Should -BeFalse
+        (Get-VeroConfig -Raw (ConvertTo-VeroConfigJson $c)).Auth | Should -BeFalse
+        (Get-VeroConfig -Raw $script:multiJson).Auth | Should -BeTrue
+    }
+}
+
+Describe 'Import from Windows' {
+    It 'splits <a>' -ForEach @(
+        @{ a = 'vpn.example.com';            h = 'vpn.example.com'; p = 0 }
+        @{ a = 'vpn.example.com:4443';       h = 'vpn.example.com'; p = 4443 }
+        @{ a = '203.0.113.5';                h = '203.0.113.5';     p = 0 }
+        @{ a = '[2001:db8::1]:443';          h = '2001:db8::1';     p = 443 }
+        @{ a = 'https://vpn.example.com/x';  h = 'vpn.example.com'; p = 0 }
+    ) { $r = Split-VeroServerAddress $a; $r.Host | Should -Be $h; $r.Port | Should -Be $p }
+    It 'imports <tt> with the right settings' -ForEach @(
+        @{ tt = 'Ikev2';     srv = 'ike.example.com';      pw = $true;  port = 443 }
+        @{ tt = 'Sstp';      srv = 'sstp.example.com:4443'; pw = $true; port = 4443 }
+        @{ tt = 'L2tp';      srv = 'l2tp.example.com';     pw = $true;  port = 443 }
+        @{ tt = 'Pptp';      srv = 'pptp.example.com';     pw = $true;  port = 443 }
+        @{ tt = 'Automatic'; srv = 'auto.example.com';     pw = $true;  port = 443 }
+        @{ tt = 'Ikev2';     srv = 'cert.example.com';     pw = $false; port = 443 }
+    ) {
+        $e = ConvertTo-VeroRasEntry -Vpn ([pscustomobject]@{ Name = "V-$tt"; Server = $srv; TunnelType = $tt; Password = $pw; AllUsers = $false }) -UserName 'jdoe'
+        $e.Type | Should -Be 'ras'; $e.Port | Should -Be $port; $e.Server | Should -Not -Match ':'
+        $e.Auth | Should -Be $pw; $e.Username | Should -Be $(if ($pw) { 'jdoe' } else { '' })
+        $c = Get-VeroConfig -Raw (ConvertTo-Json -Depth 4 -InputObject @{ profiles = @(ConvertTo-VeroProfileObject $e) })     # valid config
+        $c.Profile | Should -Be "V-$tt"
+    }
+}
+
+Describe 'another VPN connected (Turn on asks, never decides)' {
+    BeforeAll {
+        $script:cfgF = Get-VeroConfig -Raw '{"profiles":[{"profile":"PieSoft","server":"vpn.example.com","username":"u"},{"profile":"Backup","server":"b.example.com","username":"u"}],"activeProfile":"PieSoft"}'
+        $script:ras = @()
+        Mock -ModuleName VeroScudo.Core Get-VeroWindowsVpn { $script:ras }
+        Mock -ModuleName VeroScudo.Core Get-Service { }
+        Mock -ModuleName VeroScudo.Core Get-Process { }
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { }
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Mock -ModuleName VeroScudo.Core Disconnect-VeroForeignVpn { }
+    }
+    BeforeEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).OnRefused, (Get-VeroPath).Foreign }
+    AfterAll { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).OnRefused, (Get-VeroPath).Foreign }
+    It 'finds a connected Windows VPN that is not imported, but not the active profile itself' {
+        $script:ras = @([pscustomobject]@{ Name = 'PrivateVPN'; Connected = $true }, [pscustomobject]@{ Name = 'PieSoft'; Connected = $true }, [pscustomobject]@{ Name = 'Idle'; Connected = $false })
+        $f = @(Get-VeroForeignVpn -Config $script:cfgF)
+        $f.Count | Should -Be 1; $f[0].Name | Should -Be 'PrivateVPN'; $f[0].Configured | Should -BeFalse; $f[0].CanDisconnect | Should -BeTrue
+        Format-VeroForeignVpn $f[0] | Should -Match "Windows VPN 'PrivateVPN' is connected \(not a VeroScudo profile\)"
+    }
+    It 'lists a vendor app tunnel as one it cannot disconnect' {
+        $script:ras = @()
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { [pscustomobject]@{ Name = 'Local Area Connection'; Description = 'PrivateVPN TAP Adapter'; NetworkInterfaceType = 'Ethernet'; OperationalStatus = 'Up'; Id = [guid]::NewGuid().ToString() } }
+        $f = @(Get-VeroForeignVpn -Config $script:cfgF)
+        $f.Count | Should -Be 1; $f[0].Kind | Should -Be 'app'; $f[0].CanDisconnect | Should -BeFalse
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { }
+    }
+    It 'plain On refuses while PrivateVPN is connected, and says why' {
+        $script:ras = @([pscustomobject]@{ Name = 'PrivateVPN'; Connected = $true })
+        Invoke-VeroAction -Action on -Config $script:cfgF
+        Test-VeroArmed | Should -BeFalse
+        (Get-Content (Get-VeroPath).OnRefused -Raw | ConvertFrom-Json).Items[0] | Should -Match 'PrivateVPN'
+        Should -Invoke -ModuleName VeroScudo.Core Disconnect-VeroForeignVpn -Times 0 -Exactly
+    }
+    It 'on-disconnect (your choice) ends it, then turns on' {
+        $script:ras = @([pscustomobject]@{ Name = 'PrivateVPN'; Connected = $true })
+        Invoke-VeroAction -Action on-disconnect -Config $script:cfgF
+        Should -Invoke -ModuleName VeroScudo.Core Disconnect-VeroForeignVpn -Times 1 -Exactly
+        Test-VeroArmed | Should -BeTrue
+    }
+    It 'on-force (your choice) turns on without disconnecting it' {
+        $script:ras = @([pscustomobject]@{ Name = 'PrivateVPN'; Connected = $true })
+        Invoke-VeroAction -Action on-force -Config $script:cfgF
+        Should -Invoke -ModuleName VeroScudo.Core Disconnect-VeroForeignVpn -Times 0 -Exactly
+        Test-VeroArmed | Should -BeTrue
+    }
+    It 'On without any other VPN just turns on' {
+        $script:ras = @()
+        Invoke-VeroAction -Action on -Config $script:cfgF
+        Test-VeroArmed | Should -BeTrue
+        Test-Path (Get-VeroPath).OnRefused | Should -BeFalse
+    }
+    It 'a VPN that is not a profile connecting while armed is reported for the tray, not armed' {
+        Set-VeroArmed $true 'test'
+        Mock -ModuleName VeroScudo.Core Get-VeroRasConnected { 'PrivateVPN' }
+        Invoke-VeroAction -Action arm -Config $script:cfgF
+        (Get-Content (Get-VeroPath).Foreign -Raw | ConvertFrom-Json).Name | Should -Be 'PrivateVPN'
+        (Get-VeroConfig -Raw '{"profiles":[{"profile":"PieSoft","server":"vpn.example.com","username":"u"}]}').Profile | Should -Be 'PieSoft'
+    }
+}
+
+Describe 'native helper blocked by Windows (Smart App Control)' {
+    AfterEach { Remove-TestFile (Get-VeroPath).NativeBlocked; InModuleScope VeroScudo.Core { $script:NativeLoadFailed = $false } }
+    It 'waits 1, 5, then 10 minutes between retries' {
+        @(1, 2, 3, 9 | ForEach-Object { Get-VeroNativeRetrySeconds $_ }) | Should -Be @(60, 300, 600, 600)
+    }
+    It 'records each failure in a row and clears once the helper loads again' {
+        Set-VeroNativeBlocked -Message 'policy' -Action test
+        Set-VeroNativeBlocked -Message 'policy' -Action test
+        $b = Get-VeroNativeBlocked
+        $b.Count | Should -Be 2
+        Test-VeroNativeRetryDue $b | Should -BeFalse
+        Test-VeroNativeRetryDue $b -Now (Get-Date).AddMinutes(6) | Should -BeTrue
+        Clear-VeroNativeBlocked -Action test
+        Get-VeroNativeBlocked | Should -BeNullOrEmpty
+        Test-VeroNativeRetryDue $null | Should -BeTrue
+    }
+    It 'the watchdog exits on a blocked helper (a fresh process retries) instead of failing every 15 s' {
+        Mock -ModuleName VeroScudo.Core Invoke-VeroCheck { & (Get-Module VeroScudo.Core) { $script:NativeLoadFailed = $true }; throw 'Application Control policy has blocked this file' }
+        Mock -ModuleName VeroScudo.Core Start-Sleep { throw 'the watchdog kept looping' }
+        { Invoke-VeroAction -Action watchdog -Config (Get-VeroConfig -Raw $script:cfgJson) } | Should -Not -Throw
+        (Get-VeroNativeBlocked).Count | Should -Be 1
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroCheck -Times 1 -Exactly
+    }
+    It 'a fresh watchdog does not even try before the retry time' {
+        Set-VeroNativeBlocked -Message 'policy' -Action test
+        Mock -ModuleName VeroScudo.Core Invoke-VeroCheck { throw 'must not run' }
+        { Invoke-VeroAction -Action watchdog -Config (Get-VeroConfig -Raw $script:cfgJson) } | Should -Not -Throw
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroCheck -Times 0 -Exactly
+    }
+}

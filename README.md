@@ -103,6 +103,13 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 4. Connect the VPN - from Windows, or with the **VeroScudo On** shortcut. The shield in the
    tray turns green. Done.
 
+**More Windows VPN profiles:** tray > **Settings** > **Import from Windows...** lists every VPN of Windows Settings >
+VPN (also those created for all users) with the type, server and sign-in VeroScudo found - Automatic, IKEv2, SSTP,
+L2TP/IPsec with certificate or pre-shared key, PPTP - and adds the one you choose (one per import: not every VPN
+on a PC is for work) with those settings (the port of an
+SSTP server address such as `host:4443` included; a username Windows saved is filled in). Nothing is imported
+automatically. From the command line: `Install.ps1 -ProfileName "<name as in Windows>"`.
+
 A reserve profile (see [Profile types](#profile-types)):
 
 ```powershell
@@ -145,6 +152,8 @@ sudo veroscudo on
 | Disconnect the VPN yourself (Windows UI, tray, shortcut) | disarms: firewall back to normal, icon grey |
 | Sit in a cafe with a captive portal | turn the VPN **off**, log in to the portal, turn it **on** |
 | Pick another profile in tray > *VPN profile* (or `veroscudo use <name>`) | stays blocked, hangs up the old tunnel, dials the new one |
+| Turn on while another VPN is connected (Windows) | the tray asks first: *Disconnect it and turn on*, or *Cancel* (a VPN app's own tunnel: *Turn on anyway*). Nothing is disconnected or imported without your click. The *On* shortcut / `-Action on` refuses and the tray says why; `-DisconnectOthers` / `-Force` decide on the command line |
+| A VPN that is not a VeroScudo profile connects while VeroScudo is on | a notification: its traffic is blocked - disconnect it or import it; the status window lists it under *Other VPNs* |
 | *Reconnect VPN* (tray, status window, `-Action reconnect`, `veroscudo reconnect`) | blocks, hangs up, redials; traffic again once the tunnel is back |
 | The VPN rejects your password | stays blocked, stops redialing, icon *Attention*; store the right password, then *Reconnect* |
 
@@ -190,6 +199,9 @@ ping, no IPv6, and no app gets through on the strength of its own firewall rule.
   dead WireGuard link keeps its adapter up, so VeroScudo judges it by its handshakes: set `PersistentKeepalive = 25`.
   Until a drop is noticed, traffic runs into the dead tunnel and is lost - it never leaks.
 - Every switch to an OpenVPN or WireGuard profile shows a notice (once per switch, not again while it stays active).
+
+Linux / macOS: `veroscudo import` lists the VPN connections NetworkManager (or macOS) has - OpenVPN, WireGuard, L2TP,
+IKEv2/IPsec, PPTP, SSTP, OpenConnect - and `sudo veroscudo import <name>` adds them with their type's server ports.
 
 Linux: NetworkManager already runs OpenVPN and WireGuard connections and reports "user disconnected" for them, so they
 work as ordinary profiles; WireGuard is judged by its handshakes there too. `veroscudo check` compares each profile's

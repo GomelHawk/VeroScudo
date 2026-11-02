@@ -286,3 +286,95 @@ def _watch_polling(profiles, on_up, on_down, interval: float = 2.0) -> None:
             elif last.get(p, False) and not now:
                 on_down(p, False)      # no reason available: treat as failure; `veroscudo off` sets its own marker first
             last[p] = now
+
+
+# ---- import from NetworkManager (veroscudo import)
+_SERVICE_TYPES = {"openvpn": "openvpn", "l2tp": "l2tp", "pptp": "pptp", "sstp": "sstp", "strongswan": "ikev2",
+                  "libreswan": "ipsec", "openconnect": "openconnect"}
+
+
+def split_address(value: str) -> tuple[str, int]:
+    """'host', 'host:4443', '[2001:db8::1]:443', 'https://host:8443/x' -> (host, port or 0). Pure."""
+    v = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", (value or "").strip()).split("/")[0]
+    m = re.match(r"^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$", v)
+    if m:
+        return m.group(1), int(m.group(2) or 0)
+    m = re.match(r"^([^:]+):(\d{1,5})$", v)
+    if m:
+        return m.group(1), int(m.group(2))
+    return v, 0
+
+
+def parse_vpn_data(data: str) -> dict:
+    """NetworkManager's vpn.data ('key = value, key = value') -> dict. Values may contain ', ' (OpenVPN remotes). Pure."""
+    items = {}
+    for part in re.split(r",\s*(?=[A-Za-z0-9_-]+\s*=)", (data or "").strip()):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            items[k.strip()] = v.strip()
+    return items
+
+
+def describe_vpn(name: str, kind_: str, data: str) -> dict:
+    """One NetworkManager VPN connection -> what VeroScudo imports. Pure. server '' = cannot import (see note)."""
+    d = parse_vpn_data(data)
+    out = {"name": name, "vpn_type": "", "server": "", "port": 443, "protocol": "tcp", "username": "", "note": ""}
+    if kind_ == "openvpn":
+        o = parse_openvpn_data(data)
+        out.update(vpn_type="openvpn", server=(o["hosts"] or [""])[0], port=o["port"] or 1194, protocol=o["proto"], username=d.get("username", ""))
+        if len(o["hosts"]) > 1:
+            out["note"] = f"{len(o['hosts'])} remotes - only the first is allowed; pin the others with serverIps"
+    elif kind_ in ("l2tp", "pptp", "sstp"):
+        host, port = split_address(d.get("gateway", ""))
+        out.update(vpn_type=kind_, server=host, username=d.get("user", ""),
+                   port=port or 443, protocol="tcp" if kind_ in ("pptp", "sstp") else "udp")
+    elif kind_ in ("ikev2", "ipsec"):
+        host, _ = split_address(d.get("address") or d.get("right", ""))
+        out.update(vpn_type=kind_, server=host, protocol="udp", port=4500, username=d.get("user") or d.get("leftxauthusername", ""))
+    elif kind_ == "openconnect":
+        host, port = split_address(d.get("gateway", ""))
+        out.update(vpn_type="openconnect", server=host, port=port or 443)
+    else:
+        out["note"] = "VPN plugin not supported by VeroScudo"
+    if not out["server"] and not out["note"]:
+        out["note"] = "no server found in the connection"
+    return out
+
+
+def wireguard_endpoint(keyfile_text: str) -> tuple[str, int]:
+    """The first peer endpoint of a NetworkManager WireGuard keyfile ([wireguard-peer.<key>] endpoint=host:port). Pure."""
+    in_peer = False
+    for line in keyfile_text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            in_peer = s.startswith("[wireguard-peer.")
+        elif in_peer and s.startswith("endpoint="):
+            return split_address(s.split("=", 1)[1])
+    return "", 0
+
+
+def discover() -> list[dict]:
+    """Every VPN / WireGuard connection NetworkManager knows, described for import (needs root for WireGuard endpoints)."""
+    out = []
+    for line in _nmcli("-f", "NAME,TYPE", "connection", "show").splitlines():
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) < 2:
+            continue
+        name, ctype = parts[0].replace("\\:", ":"), parts[1]
+        if ctype == "wireguard":
+            d = {"name": name, "vpn_type": "wireguard", "server": "", "port": 51820, "protocol": "udp", "username": "", "note": ""}
+            path = _nmcli("-g", "GENERAL.FILENAME", "connection", "show", name)
+            try:
+                host, port = wireguard_endpoint(Path(path).read_text()) if path else ("", 0)
+            except OSError:
+                host, port = "", 0
+                d["note"] = "run as root to read the WireGuard endpoint"
+            d.update(server=host, port=port or 51820)
+            if not host and not d["note"]:
+                d["note"] = "no peer endpoint in the connection"
+            out.append(d)
+        elif ctype == "vpn":
+            st = _nmcli("-g", "vpn.service-type", "connection", "show", name)
+            k = next((v for key, v in _SERVICE_TYPES.items() if key in st), "")
+            out.append(describe_vpn(name, k, _nmcli("-g", "vpn.data", "connection", "show", name)))
+    return out

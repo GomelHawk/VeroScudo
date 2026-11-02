@@ -220,7 +220,11 @@ function Get-State {
     $ovpn = if ($type -eq 'openvpn') { Get-VeroOpenVpnStatus $name } else { $null }
     $conflicts = @(if ($armed) { Get-VeroConflictList })
     $why = $null
-    if (-not $cred) { $why = "VPN password for '$name' not stored - open Settings" }
+    $nb = Get-VeroNativeBlocked
+    if ($nb) {
+        $next = try { '{0:HH:mm}' -f [datetime]::Parse([string]$nb.Next, $null, [Globalization.DateTimeStyles]::RoundtripKind) } catch { 'soon' }
+        $why = "Windows blocked VeroScudo's helper (Smart App Control). The kill-switch stays on, but self-repair and automatic redial are paused - next try at $next."
+    } elseif (-not $cred) { $why = "VPN password for '$name' not stored - open Settings" }
     elseif (Test-VeroAuthBlocked $name) { $why = "The password for '$name' was rejected. Store the right one in Settings, then Reconnect - traffic stays blocked meanwhile." }
     elseif ($ovpn -and [string]$ovpn.State -eq 'NEED_OTP') { $why = "'$name' asks for a one-time code: $($ovpn.Challenge)" }
     elseif ($armed -and $up -and $conflicts.Count -gt 0) { $why = "Next to VeroScudo: $($conflicts[0])" }
@@ -291,6 +295,7 @@ function Show-Status {
         $cards[$k] = New-Label $c '' 12 28 185 24 $FontBold
         $i++
     }
+    $other = New-Label $f '' 20 273 420 18 $FontSmall ([System.Drawing.Color]::FromArgb(252,187,45))
     $ev = New-Card $f 20 292 420 160
     New-Label $ev 'RECENT EVENTS' 12 8 200 16 $FontSmall $global:Theme.Sub | Out-Null
     $evText = New-Object System.Windows.Forms.TextBox; $evText.Multiline = $true; $evText.ReadOnly = $true; $evText.BorderStyle = 'None'
@@ -303,7 +308,7 @@ function Show-Status {
     $bRedo.Add_Click(({ Request-Reconnect }).GetNewClosure())
     $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }).GetNewClosure())
     $bCopy.Add_Click(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $bCopy.Text = 'Copied'; }).GetNewClosure())
-    $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Invoke-GuardTask 'On' } }).GetNewClosure())
+    $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Request-TurnOn } }).GetNewClosure())
     $refresh = ({
         $st = Get-State
         $pic.Image = Get-StateImage $st.State 64; $title.Text = $st.Title; $sub.Text = $st.Text
@@ -316,6 +321,8 @@ function Show-Status {
         $cards['Last drop'].Text = Get-LastDrop
         $cards['Redial'].Text = if ($st.Armed -and -not $st.Connected) { 'running' } else { 'idle' }
         $evText.Text = (Get-LastEvents 6) -join "`r`n"; $evText.Select(0, 0)
+        $fv = @(Get-ForeignCached)
+        $other.Text = if ($fv.Count -gt 0) { 'Other VPNs: ' + (($fv | ForEach-Object { '{0} ({1})' -f $_.Name, $(if ($_.Configured) { 'another profile' } elseif ($_.Kind -eq 'app') { 'VPN app' } else { 'not imported' }) }) -join ', ') } else { '' }
         $bOnOff.Text = if ($st.Armed -or $st.Connected) { 'Turn VPN off' } else { 'Turn VPN on' }
     }).GetNewClosure()
     & $refresh
@@ -367,6 +374,36 @@ function Request-Otp {
     }
 }
 
+function Select-WindowsVpn([string[]]$have) {
+    <# Import from Windows: ONE Windows VPN profile per import, chosen by you - not every VPN on a PC is for work. Lists
+       your profiles and those for all users with the type, server and sign-in VeroScudo found; profiles already in the
+       list are not offered again. Nothing is selected in advance. Returns the chosen profile or nothing. #>
+    $all = @(Get-VeroWindowsVpn | Sort-Object Name)
+    $offer = @($all | Where-Object { $have -notcontains $_.Name -and $_.Server })
+    if ($offer.Count -eq 0) {
+        $msg = if ($all.Count -eq 0) { 'No Windows VPN profile found. Create one in Settings > Network & Internet > VPN (any type: Automatic, IKEv2, SSTP, L2TP/IPsec, PPTP), connect once, then import it here.' } else { 'Every Windows VPN profile is already in the list.' }
+        [System.Windows.Forms.MessageBox]::Show($msg, 'VeroScudo') | Out-Null; return
+    }
+    $sf = New-Form 'Import from Windows' 560 380
+    New-Label $sf 'Choose the ONE Windows VPN profile to protect (import others one by one). Server, port, protocol and sign-in are taken from Windows.' 20 14 520 36 $FontSmall $global:Theme.Sub | Out-Null
+    $lbx = New-Object System.Windows.Forms.ListBox; $lbx.Location = (P 20 54); $lbx.Size = (Z 520 250); $lbx.BorderStyle = 'FixedSingle'; $lbx.SelectionMode = 'One'
+    $lbx.BackColor = $global:Theme.Bg; $lbx.ForeColor = $global:Theme.Text; $lbx.Font = $FontUI; $lbx.IntegralHeight = $false
+    foreach ($v in $offer) {
+        $proto = switch ($v.TunnelType) { 'Ikev2' { 'IKEv2' } 'Sstp' { 'SSTP' } 'L2tp' { 'L2TP/IPsec' } 'Pptp' { 'PPTP' } default { 'Automatic' } }
+        [void]$lbx.Items.Add(('{0}  -  {1}  -  {2}  -  {3}{4}' -f $v.Name, $proto, $v.Server, $(if ($v.Password) { 'password' } else { 'certificate' }), $(if ($v.AllUsers) { '  (all users)' } else { '' })))
+    }
+    $lbx.SelectedIndex = -1
+    $sf.Controls.Add($lbx)
+    $res = @{ Value = $null }
+    $ok = New-Button $sf 'Import' 430 318 110 $true; $cancel = New-Button $sf 'Cancel' 310 318 110
+    $ok.Enabled = $false
+    $lbx.Add_SelectedIndexChanged(({ $ok.Enabled = ($lbx.SelectedIndex -ge 0) }).GetNewClosure())
+    $cancel.Add_Click(({ $sf.Close() }).GetNewClosure())
+    $ok.Add_Click(({ if ($lbx.SelectedIndex -ge 0) { $res.Value = $offer[$lbx.SelectedIndex] }; $sf.Close() }).GetNewClosure())
+    $sf.ShowDialog() | Out-Null
+    if ($res.Value) { $res.Value }
+}
+
 function Show-Check([string]$what, [string[]]$warnings) {
     <# The add/edit check: warnings shown before saving. Returns $true to save anyway. #>
     if (@($warnings).Count -eq 0) { return $true }
@@ -393,18 +430,35 @@ function Edit-VpnProfile($entry) {
     $lFile = New-Label $ef 'OpenVPN config (.ovpn) - imported for administrators only' 20 144 380 18 $FontSmall $global:Theme.Sub
     $tFile = New-Input $ef 20 164 290 ''
     $bFile = New-Button $ef 'Browse...' 320 162 80
-    New-Label $ef 'Username' 20 208 200 18 $FontSmall $global:Theme.Sub | Out-Null
+    $lUser = New-Label $ef 'Username' 20 208 200 18 $FontSmall $global:Theme.Sub
     $tUser = New-Input $ef 20 228 380 $(if ($entry) { $entry.Username } else { '' })
     $chkDco = New-Object System.Windows.Forms.CheckBox; $chkDco.Text = 'Keep DCO (faster; the server permit is then not tied to openvpn.exe)'; $chkDco.Location = (P 20 268); $chkDco.Size = (Z 380 24); $chkDco.ForeColor = $global:Theme.Text; $chkDco.Checked = [bool]($entry -and $entry.PSObject.Properties['Dco'] -and $entry.Dco); $ef.Controls.Add($chkDco)
     $bConf = New-Button $ef 'Read .conf...' 20 266 140
     $hint = New-Label $ef '' 20 300 380 36 $FontSmall $global:Theme.Sub
-    $state = @{ Warnings = @(); Auth = $(if ($entry -and $entry.PSObject.Properties['Auth']) { [bool]$entry.Auth } else { $true }); Import = $null }
+    $state = @{ Warnings = @(); Auth = $(if ($entry -and $entry.PSObject.Properties['Auth']) { [bool]$entry.Auth } else { $true }); Import = $null; Ras = @{}; AutoServer = '' }
+    $onPick = ({
+        # Windows VPN: fill in what the Windows profile already knows, say which protocol and sign-in VeroScudo found
+        if ($types[[Math]::Max(0, $cbType.SelectedIndex)] -ne 'ras') { return }
+        $info = $state.Ras[$cb.Text.Trim()]
+        if (-not $info) {
+            $hint.Text = 'Not a Windows VPN profile of this PC: create it in Settings > VPN first, connect once, then pick it here.'
+            foreach ($c in $lPort, $tPort) { $c.Visible = $true }
+            return
+        }
+        if ($info.Server -and (-not $tServer.Text.Trim() -or $tServer.Text.Trim() -eq $state.AutoServer)) { $tServer.Text = $info.Server; $state.AutoServer = $info.Server }
+        $portUsed = $info.TunnelType -in 'Sstp', 'Automatic'                # only SSTP uses the port; the others have fixed ports
+        foreach ($c in $lPort, $tPort) { $c.Visible = $portUsed }
+        if (-not $portUsed) { $tPort.Text = '443' }
+        $state.Auth = [bool]$info.Password
+        foreach ($c in $lUser, $tUser) { if ($c) { $c.Enabled = $state.Auth } }
+        $hint.Text = Get-VeroRasDescription -TunnelType $info.TunnelType -Password $info.Password -AllUsers $info.AllUsers
+    }).GetNewClosure()
     $apply = ({
         $t = $types[[Math]::Max(0, $cbType.SelectedIndex)]
         $keep = if ($entry) { $cb.Text } else { '' }                        # Items.Clear() can blank the text of an edited entry
         $cb.Items.Clear()
         $names = switch ($t) {
-            'ras'       { @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) }
+            'ras'       { $state.Ras = @{}; foreach ($v in @(Get-VeroWindowsVpn)) { $state.Ras[$v.Name] = $v }; @($state.Ras.Keys | Sort-Object) }
             'wireguard' { @(Get-Service -Name 'WireGuardTunnel$*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Substring(16) }) }
             default     { @() }
         }
@@ -418,10 +472,14 @@ function Edit-VpnProfile($entry) {
         $hint.Text = Get-VeroSwitchNotice -Type $t -ProfileName $(if ($cb.Text) { $cb.Text } else { 'this profile' })
         if (-not $entry -and $t -eq 'wireguard' -and $tPort.Text -eq '443') { $tPort.Text = '51820' }
         if (-not $entry -and $t -eq 'ras' -and $tPort.Text -eq '51820') { $tPort.Text = '443' }
+        foreach ($c in $lUser, $tUser) { if ($c) { $c.Enabled = $true } }
+        & $onPick
     }).GetNewClosure()
+    $cb.Add_SelectedIndexChanged($onPick)
+    $cb.Add_Leave($onPick)
     $cbType.Add_SelectedIndexChanged($apply)
     $cbType.SelectedIndex = [Math]::Max(0, [array]::IndexOf($types, $(if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type) { [string]$entry.Type } else { 'ras' })))
-    if ($entry) { $cb.Text = $entry.Profile; $cbType.Enabled = $false }
+    if ($entry) { $cb.Text = $entry.Profile; $cbType.Enabled = $false; & $onPick }
     $bFile.Add_Click(({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'OpenVPN config (*.ovpn;*.conf)|*.ovpn;*.conf|All files|*.*'
         if ($dlg.ShowDialog() -eq 'OK') { $tFile.Text = $dlg.FileName; if (-not $cb.Text) { $cb.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) } }
@@ -459,10 +517,10 @@ function Edit-VpnProfile($entry) {
         } else {
             $port = 0
             if (-not $tServer.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [System.Windows.Forms.MessageBox]::Show('Server and port are required.', 'VeroScudo') | Out-Null; return }
-            if ($t -eq 'ras' -and -not $user) { [System.Windows.Forms.MessageBox]::Show('A username is required.', 'VeroScudo') | Out-Null; return }
+            if ($t -eq 'ras' -and $state.Auth -and -not $user) { [System.Windows.Forms.MessageBox]::Show('A username is required (the one you sign in to this VPN with).', 'VeroScudo') | Out-Null; return }
             if ($t -eq 'wireguard' -and $name -notmatch '^[A-Za-z0-9_=+.-]{1,32}$') { [System.Windows.Forms.MessageBox]::Show('A WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -', 'VeroScudo') | Out-Null; return }
             if ($t -eq 'wireguard' -and -not (Show-Check "WireGuard tunnel '$name':" $state.Warnings)) { return }
-            $res.Value = [pscustomobject]@{ Profile = $name; Type = $t; Server = $tServer.Text.Trim(); Port = $port; Username = $(if ($t -eq 'ras') { $user } else { '' }); ServerIps = $pins; Auth = ($t -eq 'ras'); Dco = $false; ImportFrom = $null }
+            $res.Value = [pscustomobject]@{ Profile = $name; Type = $t; Server = $tServer.Text.Trim(); Port = $port; Username = $(if ($t -eq 'ras' -and $state.Auth) { $user } else { '' }); ServerIps = $pins; Auth = ($t -eq 'ras' -and $state.Auth); Dco = $false; ImportFrom = $null }
         }
         $ef.Close()
     }).GetNewClosure())
@@ -488,13 +546,13 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
 $global:SettingsForm = $null
 function Show-Settings {
     if ($global:SettingsForm -and -not $global:SettingsForm.IsDisposed) { $global:SettingsForm.Activate(); return }
-    $f = New-Form 'VeroScudo settings' 520 600
+    $f = New-Form 'VeroScudo settings' 520 664
     New-Label $f 'VPN profiles' 20 16 200 22 $FontBold | Out-Null
-    $card = New-Card $f 20 42 480 236
+    $card = New-Card $f 20 42 480 300
     $work = New-Object System.Collections.ArrayList
     if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } })) } }
     $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }) }
-    $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 300 210); $lb.BorderStyle = 'FixedSingle'
+    $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 300 276); $lb.BorderStyle = 'FixedSingle'
     $lb.BackColor = $global:Theme.Bg; $lb.ForeColor = $global:Theme.Text; $lb.Font = $FontUI; $lb.IntegralHeight = $false
     $card.Controls.Add($lb)
     $fill = ({
@@ -509,9 +567,20 @@ function Show-Settings {
         if ($lb.Items.Count -gt 0) { $lb.SelectedIndex = [Math]::Max(0, [Math]::Min($sel, $lb.Items.Count - 1)) }
     }).GetNewClosure()
     & $fill
-    $bAdd = New-Button $card 'Add...' 324 12 140; $bEdit = New-Button $card 'Edit...' 324 52 140; $bDel = New-Button $card 'Remove' 324 92 140
-    $bDef = New-Button $card 'Make default' 324 132 140; $bPw = New-Button $card 'Set password...' 324 176 140
-    $bKey = New-Button $card 'Key passphrase...' 324 216 140
+    $bImp = New-Button $card 'Import from Windows...' 324 12 140 $true; $bAdd = New-Button $card 'Add...' 324 52 140
+    $bEdit = New-Button $card 'Edit...' 324 92 140; $bDel = New-Button $card 'Remove' 324 132 140
+    $bDef = New-Button $card 'Make default' 324 172 140; $bPw = New-Button $card 'Set password...' 324 220 140
+    $bKey = New-Button $card 'Key passphrase...' 324 260 140
+    $bImp.Add_Click(({
+        $have = @($work | ForEach-Object Profile)
+        $v = Select-WindowsVpn $have
+        if (-not $v) { return }
+        $e = ConvertTo-VeroRasEntry -Vpn $v -UserName (Get-VeroRasSavedUser -Name $v.Name -AllUsers $v.AllUsers)
+        if ($e.Auth -and -not $e.Username) { $e = Edit-VpnProfile $e }            # the one thing Windows did not tell us
+        if (-not $e) { return }
+        [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }
+        & $fill; $lb.SelectedIndex = $lb.Items.Count - 1
+    }).GetNewClosure())
     $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [System.Windows.Forms.MessageBox]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
     $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Default -eq $work[$i].Profile) { $state.Default = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
     $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile; $work.RemoveAt($i); if ($state.Default -eq $gone) { $state.Default = $work[0].Profile }; & $fill }).GetNewClosure())
@@ -530,15 +599,15 @@ function Show-Settings {
         if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
                     New-Object System.Management.Automation.PSCredential('key', $sec) | Export-Clixml $cp.KeyPass }
     }).GetNewClosure())
-    New-Label $f 'Behaviour' 20 292 200 22 $FontBold | Out-Null
-    $card2 = New-Card $f 20 318 480 150
+    New-Label $f 'Behaviour' 20 356 200 22 $FontBold | Out-Null
+    $card2 = New-Card $f 20 382 480 150
     $chkStrict = New-Object System.Windows.Forms.CheckBox; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
     $chkVm = New-Object System.Windows.Forms.CheckBox; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
     $chkWifi = New-Object System.Windows.Forms.CheckBox; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
     $chkUpd = New-Object System.Windows.Forms.CheckBox; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
-    New-Label $f 'Passwords are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 480 480 36 $FontSmall $global:Theme.Sub | Out-Null
-    $bCancel = New-Button $f 'Close' 270 540 110
-    $bSave   = New-Button $f 'Save' 390 540 110 $true
+    New-Label $f 'Passwords are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 544 480 36 $FontSmall $global:Theme.Sub | Out-Null
+    $bCancel = New-Button $f 'Close' 270 604 110
+    $bSave   = New-Button $f 'Save' 390 604 110 $true
     $bCancel.Add_Click(({ $f.Close() }).GetNewClosure())
     $bSave.Add_Click(({
         if ($work.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
@@ -588,7 +657,7 @@ function Add-MenuSeparator {
 $menu.Renderer.Logo = Get-AppImage 64
 $mHead = Add-MenuItem 'VeroScudo' 'logo' $null; $mHead.Enabled = $false; $mHead.Font = $FontBold
 $null = Add-MenuSeparator
-$mOn   = Add-MenuItem 'Turn VPN on'  'play' { Invoke-GuardTask 'On' }   
+$mOn   = Add-MenuItem 'Turn VPN on'  'play' { Request-TurnOn }   
 $mOff  = Add-MenuItem 'Turn VPN off' 'stop' { Invoke-GuardTask 'Off' }  
 $mRedo = Add-MenuItem 'Reconnect VPN' 'redo' { Request-Reconnect }
 $mProf = Add-MenuItem 'VPN profile' 'globe' $null
@@ -607,6 +676,86 @@ function Set-TrayPref([string]$key, $value) {
 }
 function Test-KeepAwakeSaved { [bool](Get-TrayPref).keepAwake }
 function Save-KeepAwake([bool]$on) { Set-TrayPref 'keepAwake' $on }
+$global:ForeignCache = @{ Time = [datetime]::MinValue; Items = @() }
+function Get-ForeignCached {
+    # the status window refreshes every 3 s; the VPN list is asked for at most every 10 s
+    if (((Get-Date) - $global:ForeignCache.Time).TotalSeconds -ge 10 -and $global:Config) {
+        $global:ForeignCache = @{ Time = Get-Date; Items = @(try { Get-VeroForeignVpn -Config $global:Config } catch { @() }) }
+    }
+    $global:ForeignCache.Items
+}
+
+function Show-ForeignPrompt($foreign) {
+    <# Before Turn on: another VPN is connected. Returns 'disconnect', 'anyway' or 'cancel'. Nothing happens without a click. #>
+    $prof = $global:Config.Profile
+    $canAll = -not @($foreign | Where-Object { -not $_.CanDisconnect })
+    $names = ($foreign | ForEach-Object { '"' + $_.Name + '"' }) -join ', '
+    $one = @($foreign).Count -eq 1
+    $kindText = if ($one -and -not $foreign[0].Configured -and $foreign[0].Kind -ne 'app') { ' It is not a VeroScudo profile.' } elseif ($one -and $foreign[0].Configured) { ' It is another VeroScudo profile.' } else { '' }
+    $msg = $names + $(if ($one) { ' is' } else { ' are' }) + ' connected.' + $kindText + "`r`n" +
+           'VeroScudo will connect "' + $prof + '" and block everything else, including ' + $(if ($one) { 'its' } else { 'their' }) + ' traffic.'
+    if (-not $canAll) { $msg += "`r`n`r`nVeroScudo cannot disconnect a VPN app's own tunnel - close that app first, or turn on anyway (its traffic stays blocked)." }
+    $pf = New-Form 'VeroScudo' 480 230
+    New-Label $pf $msg 20 18 440 120 $FontUI | Out-Null
+    $res = @{ Value = 'cancel' }
+    $label = if (-not $canAll) { 'Turn on anyway' } elseif ($one) { 'Disconnect ' + $foreign[0].Name + ' and turn on' } else { 'Disconnect them and turn on' }
+    if ($label.Length -gt 34) { $label = if ($canAll) { 'Disconnect and turn on' } else { 'Turn on anyway' } }
+    $bGo = New-Button $pf $label 20 170 300 $true; $bNo = New-Button $pf 'Cancel' 340 170 120
+    $bGo.Add_Click(({ $res.Value = $(if ($canAll) { 'disconnect' } else { 'anyway' }); $pf.Close() }).GetNewClosure())
+    $bNo.Add_Click(({ $pf.Close() }).GetNewClosure())
+    $pf.TopMost = $true; $pf.AcceptButton = $bNo
+    $pf.ShowDialog() | Out-Null
+    $res.Value
+}
+
+function Request-TurnOn {
+    <# Turn VPN on: first asks when another VPN is connected (it would be blocked silently otherwise). #>
+    if (-not $global:Config) { Invoke-GuardTask 'On'; return }
+    $foreign = @(try { Get-VeroForeignVpn -Config $global:Config } catch { @() })
+    if ($foreign.Count -eq 0) { Invoke-GuardTask 'On'; return }
+    switch (Show-ForeignPrompt $foreign) {
+        'disconnect' { Invoke-GuardTask 'OnDisconnect' }
+        'anyway'     { Invoke-GuardTask 'OnForce' }
+        default      { Write-Verbose 'turn on cancelled' }
+    }
+}
+
+$global:Stamps = @{}
+function Test-FileChanged([string]$path) {
+    # true once per new write of a state file (the guard writes them; the tray only reads)
+    $t = if (Test-Path $path) { (Get-Item $path).LastWriteTimeUtc.Ticks } else { 0 }
+    $first = -not $global:Stamps.ContainsKey($path)
+    $changed = (-not $first) -and $t -ne 0 -and $global:Stamps[$path] -ne $t
+    $global:Stamps[$path] = $t
+    $changed
+}
+$global:ShownConflicts = @()
+function Show-ForeignNotice {
+    <# The guard refused On (shortcut, script), or a VPN that is not a VeroScudo profile connected while armed. #>
+    if (Test-FileChanged $global:Paths.OnRefused) {
+        try {
+            $j = Get-Content $global:Paths.OnRefused -Raw | ConvertFrom-Json
+            $notify.ShowBalloonTip(10000, 'VeroScudo was not turned on', ((@($j.Items) -join '; ') + '. Use Turn VPN on in the tray menu to choose.'), [System.Windows.Forms.ToolTipIcon]::Warning)
+            return $true
+        } catch { Write-Verbose 'on-refused unreadable' }
+    }
+    if (Test-FileChanged $global:Paths.Foreign) {
+        try {
+            $j = Get-Content $global:Paths.Foreign -Raw | ConvertFrom-Json
+            $text = '"' + $j.Name + '" connected, but it is not a VeroScudo profile.' + "`n" + 'Its traffic is blocked. Disconnect it, or import it in Settings.'
+            $notify.ShowBalloonTip(10000, 'VeroScudo - another VPN', $text, [System.Windows.Forms.ToolTipIcon]::Warning)
+            return $true
+        } catch { Write-Verbose 'foreign unreadable' }
+    }
+    if ((Test-FileChanged $global:Paths.Conflicts) -and (Test-VeroArmed)) {
+        $now = @(Get-VeroConflictList)
+        $new = @($now | Where-Object { $global:ShownConflicts -notcontains $_ })
+        $global:ShownConflicts = $now
+        if ($new.Count -gt 0) { $notify.ShowBalloonTip(10000, 'VeroScudo - another VPN', $new[0], [System.Windows.Forms.ToolTipIcon]::Warning); return $true }
+    }
+    $false
+}
+
 function Request-Reconnect {
     <# Reconnect: the elevated task blocks traffic, hangs up and redials; traffic flows again once the tunnel is back. #>
     if (-not (Test-VeroArmed)) { $notify.ShowBalloonTip(4000, 'VeroScudo', 'The VPN is off - use Turn VPN on.', [System.Windows.Forms.ToolTipIcon]::Info); return }
@@ -690,6 +839,7 @@ function Refresh {
     $mHead.Text = "VeroScudo - $($st.Title)"
     $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected; $mRedo.Enabled = $st.Armed
     $noticed = Show-SwitchNotice
+    if (-not $noticed) { $noticed = Show-ForeignNotice }
     Request-Otp
     if (-not $noticed -and $global:Last -and $global:Last -ne $st.State) {
         $b = switch ($st.State) {

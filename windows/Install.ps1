@@ -62,17 +62,24 @@ function New-ProfileEntry([string]$Name, [string]$Kind, [string]$Srv, [int]$Prt,
         if (-not $Prt) { $Prt = 51820 }
         return [pscustomobject]@{ Profile = $Name; Type = 'wireguard'; Server = $Srv; Port = $Prt; Username = ''; ServerIps = @(); Auth = $false; Dco = $false }
     }
-    if (-not $Srv -or -not $User) { throw 'A Windows VPN profile needs -Server and -UserName too.' }
+    # Windows VPN: imported from the Windows profile - server, port, protocol and sign-in come from there
+    $w = Get-VeroWindowsVpn -Name $Name
+    if ($w) {
+        $e = ConvertTo-VeroRasEntry -Vpn $w -UserName $(if ($User) { $User } else { Get-VeroRasSavedUser -Name $Name -AllUsers $w.AllUsers })
+        if ($Srv) { $e.Server = $Srv }; if ($Prt) { $e.Port = $Prt }
+        Write-Host ("imported from Windows: '{0}' - {1}" -f $Name, (Get-VeroRasDescription -TunnelType $w.TunnelType -Password $w.Password -AllUsers $w.AllUsers))
+        if ($e.Auth -and -not $e.Username) { $e.Username = Read-Host "VPN username for '$Name'" }
+        return $e
+    }
+    if (-not $Srv -or -not $User) { throw "No Windows VPN profile named '$Name' - create it in Settings > VPN first (or give -Server and -UserName)." }
     [pscustomobject]@{ Profile = $Name; Type = 'ras'; Server = $Srv; Port = $(if ($Prt) { $Prt } else { 443 }); Username = $User; ServerIps = @(); Auth = $true; Dco = $false }
 }
 # --- config
 if (-not (Test-Path $p.Config)) {
-    if ($Type -eq 'ras' -and (-not $ProfileName -or -not $Server -or -not $UserName)) {
-        $profiles = @(Get-VpnConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+    if ($Type -eq 'ras' -and -not $ProfileName) {
+        $profiles = @(Get-VeroWindowsVpn | ForEach-Object Name)
         Write-Host "Windows VPN profiles found: $($profiles -join ', ')"
-        if (-not $ProfileName) { $ProfileName = Read-Host 'VPN profile name (exactly as in Windows Settings)' }
-        if (-not $Server)   { $Server   = Read-Host 'VPN server host name' }
-        if (-not $UserName) { $UserName = Read-Host 'VPN username' }
+        $ProfileName = Read-Host 'VPN profile name (exactly as in Windows Settings)'
     }
     if (-not $ProfileName) { $ProfileName = Read-Host 'Profile name' }
     $entry = New-ProfileEntry -Name $ProfileName -Kind $Type -Srv $Server -Prt $Port -User $UserName -Ovpn $OpenVpnConfig -WgConf $WireGuardConfig -KeepDco $Dco.IsPresent
@@ -110,7 +117,7 @@ foreach ($pr in $config.Profiles) {
             }
         }
         default {
-            if (-not (Get-VpnConnection -Name $pr.Profile -ErrorAction SilentlyContinue)) {
+            if (-not (Get-VeroWindowsVpn -Name $pr.Profile)) {
                 Write-Warning "No Windows VPN profile named '$($pr.Profile)' exists for this user. Create it in Settings > VPN first."
             }
         }
@@ -181,6 +188,8 @@ $tasks = @(
     @{ Name = 'Terminated'; Action = (Act 'on-event'); Trigger = @($terminated);         P = $guard; Desc = 'VPN terminated -> user hung up: disarm / else: reconnect' }
     @{ Name = 'Watchdog';   Action = (Act 'watchdog'); Trigger = @($everyMin, $atLogon); P = $guard; Desc = 'keeps the kill-switch exact every 15 s; restarted within a minute if it stops' }
     @{ Name = 'On';         Action = (Act 'on');       Trigger = @();                    P = $guard; Desc = 'manual: arm + connect' }
+    @{ Name = 'OnDisconnect'; Action = (Act 'on-disconnect'); Trigger = @();             P = $guard; Desc = 'tray: end the other connected VPNs (you chose it), then arm + connect' }
+    @{ Name = 'OnForce';    Action = (Act 'on-force'); Trigger = @();                    P = $guard; Desc = 'tray: arm + connect although another VPN is connected (you chose it)' }
     @{ Name = 'Off';        Action = (Act 'off');      Trigger = @();                    P = $guard; Desc = 'manual: disarm + disconnect' }
     @{ Name = 'Switch';     Action = (Act 'switch');   Trigger = @();                    P = $guard; Desc = 'switch the VPN profile requested by the tray' }
     @{ Name = 'Reconnect';  Action = (Act 'reconnect'); Trigger = @();                   P = $guard; Desc = 'manual: block, hang up, redial; traffic again once the tunnel is back' }

@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from .config import Config
+from .config import Config, server_rules
 from .firewall import DnsPolicy
 
 ANCHOR = "com.apple/250.VeroScudo"
@@ -53,8 +53,14 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         else:
             lines.append("pass out quick proto { udp tcp } to any port 53")
     for fam, lst in (("inet", srv4), ("inet6", srv6)):
-        if lst:
-            lines.append(f"pass out quick {fam} proto {cfg.protocol} to {{ {', '.join(lst)} }} port {cfg.port}")
+        if not lst:
+            continue
+        for proto, ports in server_rules(cfg.current):
+            if ports:
+                plist = str(ports[0]) if len(ports) == 1 else "{ " + " ".join(str(x) for x in ports) + " }"
+                lines.append(f"pass out quick {fam} proto {proto} to {{ {', '.join(lst)} }} port {plist}")
+            else:
+                lines.append(f"pass out quick {fam} proto {proto} to {{ {', '.join(lst)} }}")
     for fam, lst in (("inet", lan4), ("inet6", lan6)):
         for cidr in lst:
             lines.append(f"pass quick {fam} to {cidr}")

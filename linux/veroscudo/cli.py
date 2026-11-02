@@ -1,4 +1,4 @@
-"""veroscudo on|off|reconnect|status|profiles|use <profile>|check|awake|arm|disarm|watchdog|daemon|boot
+"""veroscudo on|off|reconnect|status|profiles|use <profile>|import [<connection>...]|check|awake|arm|disarm|watchdog|daemon|boot
 
 reconnect = your Reconnect: block, take the VPN down, redial; traffic again once the tunnel is back."""
 from __future__ import annotations
@@ -8,8 +8,9 @@ import logging
 import logging.handlers
 import os
 import sys
+from pathlib import Path
 
-from . import __version__, keepawake
+from . import __version__, importer, keepawake
 from .backend import firewall, nm
 from .config import Config
 from .daemon import Guard
@@ -49,15 +50,45 @@ def status(cfg: Config, store: StateStore) -> int:
     return 0
 
 
+def do_import(names: list[str]) -> int:
+    """Without names: list the OS's VPN connections and what would be imported. With names (root): add them to config.json."""
+    found = nm.discover()
+    if not names:
+        if not found:
+            print("no VPN connection found - create one in the system's VPN settings first")
+        for d in found:
+            what = f"{d['vpn_type'] or d['protocol']}  {d['server'] or '-'}:{d['port']}" if d["server"] else "-"
+            print(f"  {d['name']:<28} {what}{'  - ' + d['note'] if d['note'] else ''}")
+        print("import: sudo veroscudo import <connection> [<connection> ...]")
+        return 0
+    if os.geteuid() != 0:
+        print("veroscudo: import writes /etc/veroscudo/config.json - run it with sudo", file=sys.stderr)
+        return 2
+    p = Path(os.environ.get("VEROSCUDO_CONFIG", "/etc/veroscudo/config.json"))
+    try:
+        text, msgs = importer.add_profiles(p.read_text() if p.exists() else "", found, names)
+    except ValueError as e:
+        print(f"veroscudo: {e}", file=sys.stderr)
+        return 2
+    importer.write_config(text, p)
+    for m in msgs:
+        print(m)
+    print("restart the daemon to pick them up: sudo systemctl restart veroscudo   (macOS: sudo launchctl kickstart -k system/com.gomelhawk.veroscudo)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
-    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "check", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
-    ap.add_argument("name", nargs="?", help="profile name (for 'use')")
+    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "import", "check", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("name", nargs="*", help="profile name (for 'use'), connection names (for 'import')")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
     _setup_logging()
     if a.action == "awake":          # no config, no root: it only holds a sleep inhibitor
         return keepawake.hold()
+    if a.action == "import":
+        return do_import(a.name)
+    a.name = a.name[0] if a.name else None
     store = StateStore()
     cfg = Config.load(active=store.active)
     if a.action == "status":

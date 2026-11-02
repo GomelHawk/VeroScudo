@@ -24,9 +24,24 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   tunnels, other tunnel adapters and other VPN apps' kill-switch filter layers -> tray *Attention*.
 - **Rejected password**: the redial pauses (still blocked) until a newer password is stored or you press On/Reconnect.
 - OpenVPN: private-key passphrase and one-time codes (static challenge) from the tray; `Set-VpnCredential.ps1 -KeyPassphrase`.
+- **Import from Windows** (tray Settings): every Windows VPN profile - also those for all users - with its detected type
+  (Automatic, IKEv2, SSTP, L2TP/IPsec certificate or pre-shared key, PPTP), server, port and sign-in; the one you choose
+  (one per import) is added with those settings. Certificate sign-in needs no username or password. `Install.ps1 -ProfileName` alone
+  imports from Windows too. The profile editor fills in the server and shows the detected protocol.
+- **Another VPN connected at Turn on**: the tray asks - *Disconnect it and turn on* or *Cancel* (*Turn on anyway* for a
+  VPN app's own tunnel). The *On* shortcut and `-Action on` refuse with a tray message instead of silently blocking the
+  other VPN; `-DisconnectOthers` / `-Force` on the command line. A VPN that is not a profile connecting while VeroScudo is
+  on gets a notification; the status window lists *Other VPNs*. Nothing is disconnected or imported automatically.
+- **Helper blocked by Windows** (Smart App Control / App Control refusing `VeroScudo.Native.dll`): the watchdog no longer
+  fails every 15 s for hours in one stuck process - it logs the block and exits, and a fresh one retries after 1, then 5,
+  then every 10 minutes. The tray shows *Attention* with the next retry time; status shows *Helper: BLOCKED*. The
+  kill-switch filters stay in place meanwhile.
 - New local test `tests-local/Test-Types.ps1`.
 
 ### Linux / macOS
+- `veroscudo import`: NetworkManager's (macOS: System Settings') VPN connections - OpenVPN, WireGuard, L2TP, IKEv2/IPsec,
+  PPTP, SSTP, OpenConnect - added with the right server ports per type (new `vpnType` key; L2TP/IKEv2 also allow ESP,
+  PPTP GRE).
 - `veroscudo reconnect` is now the user's Reconnect (block, take down, redial); the tray has *Reconnect VPN*.
 - WireGuard connections are judged by their handshakes (a silent link is restarted); `veroscudo check` compares each
   profile's protocol/port with NetworkManager; the profile type is shown in status, `profiles` and the tray; a notice

@@ -9,7 +9,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-from .config import Config
+from .config import Config, server_rules
 
 TABLE = "inet veroscudo"
 _IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
@@ -68,8 +68,14 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         else:
             lines += ["    udp dport 53 accept", "    tcp dport 53 accept"]
     for fam, lst in (("ip", srv4), ("ip6", srv6)):
-        if lst:
-            lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {cfg.protocol} dport {cfg.port} accept")   # VPN control channel + redialing
+        if not lst:
+            continue
+        for proto, ports in server_rules(cfg.current):                  # VPN control/data channel + redialing, per VPN type
+            if ports:
+                plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
+                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} accept")
+            else:
+                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} accept")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):
         for cidr in lst:
             lines.append(f"    {fam} daddr {cidr} accept")

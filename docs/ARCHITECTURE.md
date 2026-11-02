@@ -86,6 +86,20 @@ are handled before any removal in a pass, so switching tunnels in the app ends a
 while the service runs (app traffic is what starts a handshake when no keepalive is set; a dead tunnel only loses it - its
 routes point into it). A tunnel without a handshake for 3 minutes counts as down and the redial restarts it.
 
+**Other VPNs at Turn on (Windows).** `Get-VeroForeignVpn` lists every connected VPN that is not the active profile's tunnel:
+another Windows VPN (also another configured profile), a WireGuard tunnel, an `openvpn.exe` VeroScudo did not start, or a
+vendor app's tunnel adapter. The tray asks before *On*; the guard's `on` refuses while any is connected (writes
+`state\on-refused.json`, the tray shows why), `on-disconnect` (tasks `OnDisconnect`, `-DisconnectOthers`) ends them first,
+each the way its own client does, and `on-force` (`OnForce`, `-Force`) turns on next to them. A vendor app's tunnel cannot be
+ended by VeroScudo. A Windows VPN that is not a profile connecting while armed is written to `state\foreign.json` (tray
+notification). Nothing is ever disconnected or imported without the user's choice.
+
+**Helper blocked by Windows.** Smart App Control (or an App Control policy) can refuse the locally compiled, unsigned
+`VeroScudo.Native.dll`. A process that failed to load it keeps failing for its whole life, so the watchdog records the block
+(`state\native-blocked.json`) and exits; its task starts a fresh one, which retries only when due - 1, then 5, then every
+10 minutes - and clears the record on the first successful pass. The filters already applied stay in force; while blocked,
+self-repair and the watchdog's redial are paused and the tray shows *Attention*. A signed release DLL is the real fix.
+
 **Conflicts.** About once a minute the watchdog lists what else tunnels or filters next to VeroScudo (`state\conflicts.json`):
 `openvpn.exe` it did not start, an `.ovpn` with the same server in OpenVPN GUI's or the OpenVPN service's folders, other
 active WireGuard tunnels, any other up tunnel adapter (vendor VPN apps), and WFP providers of known VPN apps. Read-only;
@@ -197,7 +211,7 @@ connecting a VPN that is not configured is ignored.
 | state + log | `%ProgramData%\VeroScudo\state\` - Administrators/SYSTEM full, Users read only | `/var/lib/veroscudo/` (armed flag, active profile, server cache - survive reboot), `/run/veroscudo/` (lock), `/var/log/veroscudo.log` | `/var/lib/veroscudo/`, `/var/run/veroscudo/`, `/var/log/veroscudo.log` |
 | per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `keypass-<profile>.xml` (OpenVPN key), `otp-<profile>.txt` (one-time code, read once), `switch.request`, `update.json`, `tray.json` (keep awake, last profile for the switch notice) | `~/.config/veroscudo/tray.json` | – |
 | OpenVPN (Windows) | `%ProgramData%\VeroScudo\openvpn\<profile>.ovpn` (administrators/SYSTEM only); `state\ovpn-<profile>.json/.log` | – | – |
-| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,Watchdog,On,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
+| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,Watchdog,On,OnDisconnect,OnForce,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
 | kill-switch | WFP provider/sublayer "VeroScudo" + Hyper-V rule `VeroScudo-WSL` | nftables table `inet veroscudo` | pf anchor `com.apple/250.VeroScudo` |
 
 The Windows state location is fixed: it is never taken from an environment variable (a value a
@@ -229,6 +243,10 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
 
 - `profile`: the OS's name for the VPN (Windows Settings > VPN, NetworkManager connection id, macOS VPN service; the
   WireGuard app's tunnel name - 1-32 of `A-Z a-z 0-9 _ = + . -`).
+- `vpnType` (Linux/macOS): what the server permit allows - `l2tp` (UDP 500/4500/1701 + ESP), `ikev2`/`ipsec` (UDP 500/4500
+  + ESP), `pptp` (TCP 1723 + GRE), `sstp` (TCP port), `openconnect` (TCP+UDP port), `openvpn`/`wireguard`/empty (protocol +
+  port). Written by `veroscudo import`. On Windows the protocol is read from the Windows profile itself.
+- `auth` (Windows, `ras`): `false` for a certificate sign-in (no username, no stored password).
 - `type` (Windows): `ras` (default), `openvpn` or `wireguard` - see *Profile types*. `openvpn` needs no `server`
   (the imported `.ovpn`'s `remote` lines are used), `auth` says whether it asks for a password, `dco: true` keeps the
   kernel data channel. `wireguard` needs `server` + `port` (its endpoint) and no username.

@@ -445,6 +445,25 @@ namespace VeroScudo
             return code;
         }
 
+        /// <summary>The username Windows saved for a VPN entry (RasGetCredentials, user name only - the password is never
+        /// requested); "" when none. allUsers: the all-users phonebook.</summary>
+        public static string SavedUserName(string entry, bool allUsers)
+        {
+            const int Size = 4 + 4 + 257 * 2 + 257 * 2 + 16 * 2;          // RASCREDENTIALSW
+            IntPtr buf = Marshal.AllocHGlobal(Size);
+            try
+            {
+                ZeroMemory(buf, Size);
+                Marshal.WriteInt32(buf, 0, Size);
+                Marshal.WriteInt32(buf, 4, 0x1);                              // RASCM_UserName
+                string pbk = allUsers ? Environment.ExpandEnvironmentVariables(@"%ProgramData%\Microsoft\Network\Connections\Pbk\rasphone.pbk") : null;
+                if (Native.RasGetCredentials(pbk, entry, buf) != 0) return "";
+                if ((Marshal.ReadInt32(buf, 4) & 0x1) == 0) return "";
+                return Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 8)) ?? "";
+            }
+            finally { ZeroMemory(buf, Size); Marshal.FreeHGlobal(buf); }
+        }
+
         static void WriteChars(IntPtr buf, int off, string s)
         {
             char[] c = s.ToCharArray();
@@ -575,5 +594,7 @@ namespace VeroScudo
         [DllImport("rasapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "RasDialW")]
         internal static extern uint RasDial(IntPtr extensions, string phonebook, IntPtr dialParams, uint notifierType, IntPtr notifier, out IntPtr rasConn);
         [DllImport("rasapi32.dll", EntryPoint = "RasHangUpW")] internal static extern uint RasHangUp(IntPtr rasConn);
+        [DllImport("rasapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "RasGetCredentialsW")]
+        internal static extern uint RasGetCredentials(string phonebook, string entry, IntPtr credentials);
     }
 }
