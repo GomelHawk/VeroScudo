@@ -61,6 +61,42 @@ public static class VeroKeepAwake {
     }
 }
 
+// Keep-awake badge on the tray icon: a green ring with a dark border in the bottom-right corner, where the
+// shield narrows, so the state glyph stays readable. Drawn at the tray's real pixel size (SM_CXSMICON at the
+// current DPI) instead of shipping a second icon set; proportions are the 16 px design scaled up.
+// The base comes from the shipped <state>-<size>.png, not the .ico: every .ico frame is PNG-compressed and
+// System.Drawing's Icon/DrawIcon cannot decode those (it paints uninitialised memory).
+public static class VeroTrayIcon {
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
+    static readonly int[] Sizes = { 16, 24, 32, 48, 64, 128, 256 };
+    public static Icon WithAwakeBadge(string pngDir, string state) {
+        int px = SystemInformation.SmallIconSize.Width;
+        int src = Sizes[Sizes.Length - 1];
+        foreach (int s in Sizes) if (s >= px) { src = s; break; }        // exact size, else the next larger one scaled down
+        string file = System.IO.Path.Combine(pngDir, state + "-" + src + ".png");
+        using (var baseImg = Image.FromFile(file))
+        using (var bmp = new Bitmap(px, px, System.Drawing.Imaging.PixelFormat.Format32bppArgb)) {
+            using (var g = Graphics.FromImage(bmp)) {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(baseImg, new Rectangle(0, 0, px, px));
+                float u = px / 16f, d = 7f * u, x = px - d;
+                float border = 1.4f * u, hole = border + 1.6f * u;          // dark border, green ring, dark centre
+                using (var dark = new SolidBrush(Color.FromArgb(20, 20, 20)))
+                using (var green = new SolidBrush(Color.FromArgb(46, 204, 64))) {
+                    g.FillEllipse(dark, x, x, d, d);
+                    g.FillEllipse(green, x + border, x + border, d - 2 * border, d - 2 * border);
+                    g.FillEllipse(dark, x + hole, x + hole, d - 2 * hole, d - 2 * hole);
+                }
+            }
+            IntPtr h = bmp.GetHicon();
+            try { return (Icon)Icon.FromHandle(h).Clone(); }               // the clone owns its own copy of the handle
+            finally { DestroyIcon(h); }
+        }
+    }
+}
+
 public class VeroTheme {
     public Color Bg, Card, Border, Text, Sub, Hover, Accent;
     public static VeroTheme Dark() { return new VeroTheme { Bg = Color.FromArgb(32,32,32), Card = Color.FromArgb(43,43,43), Border = Color.FromArgb(58,58,58), Text = Color.FromArgb(240,240,240), Sub = Color.FromArgb(160,160,160), Hover = Color.FromArgb(56,56,56), Accent = Color.FromArgb(96,205,255) }; }
@@ -179,14 +215,18 @@ if ($FontMono.Name -ne 'Cascadia Mono') { $FontMono = New-Object System.Drawing.
 
 # a missing asset means a broken install: say so in the log instead of silently showing a substitute
 function Write-MissingAsset([string]$path) { try { Write-VeroLog "WARNING: missing $path - showing a fallback; reinstall to fix" 'tray' } catch { Write-Verbose 'log not writable' } }
-function Get-StateIcon([string]$state) {
+function Get-StateIcon([string]$state, [switch]$Awake) {
     $variant = if ($global:TaskbarDark) { 'png' } else { 'badge' }
     $key = "$variant/$state"
     if (-not $global:Icons.ContainsKey($key)) {
         $ico = Join-Path $global:IconDir "$variant\$state.ico"
         $global:Icons[$key] = if (Test-Path $ico) { New-Object System.Drawing.Icon($ico) } else { Write-MissingAsset $ico; [System.Drawing.SystemIcons]::Shield }
     }
-    $global:Icons[$key]
+    if (-not $Awake) { return $global:Icons[$key] }
+    if (-not $global:Icons.ContainsKey("$key/awake")) {
+        $global:Icons["$key/awake"] = try { [VeroTrayIcon]::WithAwakeBadge((Join-Path $global:IconDir $variant), $state) } catch { try { Write-VeroLog "WARNING: keep-awake badge not drawn: $($_.Exception.Message)" 'tray' } catch { Write-Verbose 'log not writable' }; $global:Icons[$key] }
+    }
+    $global:Icons["$key/awake"]
 }
 function Get-AppIcon {
     if (-not $global:Icons.ContainsKey('app')) {
@@ -844,7 +884,7 @@ function Invoke-UpdateCheck([switch]$Force) {
 function Refresh {
     if (Update-ConfigCache) { Update-ProfileMenu }
     $st = Get-State
-    $notify.Icon = Get-StateIcon $st.State
+    $notify.Icon = Get-StateIcon $st.State -Awake:([VeroKeepAwake]::Active)
     $tip = "VeroScudo - $($st.Title)$(if ([VeroKeepAwake]::Active) { ', keeping PC awake' })"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))
     $mHead.Text = "VeroScudo - $($st.Title)"
     $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected; $mRedo.Enabled = $st.Armed

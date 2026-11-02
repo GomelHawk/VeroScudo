@@ -8,7 +8,7 @@
     .\Install.ps1                                                                 # re-install / upgrade, keeps config
   Self-tests the WFP interface first (nothing is changed when that fails), copies the program to $InstallDir, compiles the
   native helper, writes %ProgramData%\VeroScudo\config.json (unless present) and locks that folder down to administrators,
-  registers the scheduled tasks, the tray autostart and two Desktop shortcuts, applies the Wi-Fi fix and migrates a 1.0.x
+  registers the scheduled tasks, the tray autostart, two Desktop shortcuts and a Start menu entry for the tray, applies the Wi-Fi fix and migrates a 1.0.x
   Windows-Firewall kill-switch to WFP filters. Idempotent. The VPN password is NOT asked here: each user stores it once
   (tray Settings, or Set-VpnCredential.ps1).
 #>
@@ -214,6 +214,15 @@ if (-not $NoShortcuts) {
         $lnk.TargetPath = "$env:SystemRoot\System32\schtasks.exe"; $lnk.Arguments = "/run /tn `"$Folder$($s.T)`""
         $lnk.WindowStyle = 7; if (Test-Path $s.I) { $lnk.IconLocation = $s.I }; $lnk.Save()
         Write-Host "shortcut: $($s.N)"
+    }
+    # Start menu entry for the tray: the only way back after "Exit tray" short of signing out. It runs the Tray task,
+    # so the tray starts exactly as at sign-in; a second start while it runs exits quietly (single-instance mutex).
+    if (-not $NoTray) {
+        $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'VeroScudo.lnk'))
+        $lnk.TargetPath = "$env:SystemRoot\System32\schtasks.exe"; $lnk.Arguments = "/run /tn `"$($Folder)Tray`""
+        $lnk.WindowStyle = 7; $lnk.Description = 'Show the VeroScudo tray icon'
+        if (Test-Path "$InstallDir\icons\app\app.ico") { $lnk.IconLocation = "$InstallDir\icons\app\app.ico" }; $lnk.Save()
+        Write-Host 'shortcut: Start menu > VeroScudo (tray)'
     }
 }
 schtasks /run /tn "$Folder`Watchdog" | Out-Null

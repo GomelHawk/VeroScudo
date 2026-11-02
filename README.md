@@ -88,7 +88,8 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
    It first checks that this Windows' filtering platform (WFP) offers everything the kill-switch
    needs (and changes nothing if not), copies the program to `C:\Program Files\VeroScudo`, writes
    `%ProgramData%\VeroScudo\config.json` (folder writable by administrators only), registers the
-   scheduled tasks and the tray autostart, and puts **VeroScudo On** / **VeroScudo Off** on your Desktop.
+   scheduled tasks and the tray autostart, puts **VeroScudo On** / **VeroScudo Off** on your Desktop and a
+   **VeroScudo** entry in the Start menu that brings the tray icon back after *Exit tray*.
    More profiles: run it again with another `-ProfileName/-Server/-UserName`, or use tray > Settings.
 3. Store your VPN password for the automatic redial (once per profile, as your normal user - no
    admin): tray > **Settings** > *Set password...*, or

@@ -16,6 +16,9 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   `Install.ps1 -Type openvpn -OpenVpnConfig <file>` / `-Type wireguard -WireGuardConfig <file>`, or tray > Settings.
 - **Reconnect** (tray menu, status window, `-Action reconnect`): blocks traffic, hangs up, redials; traffic flows again
   once the new tunnel is up. VeroScudo's own hang-up is not read as your Off.
+- **Keep awake on the tray icon**: while Keep awake is on, the tray shield carries a small green ring in its
+  bottom-right corner (tray only; windows and shortcuts keep the plain icon).
+- **Start menu entry** *VeroScudo*: starts the tray again after *Exit tray*; removed by `Uninstall.ps1`.
 - **Notice on every switch** to an OpenVPN or WireGuard profile (once per switch), and the type shown in the tray.
 - **Checks when a profile is added**: OpenVPN configs that would run programs are refused; missing `redirect-gateway`,
   DNS, a plain password file or a one-time code are reported; WireGuard without `PersistentKeepalive`, a split tunnel or

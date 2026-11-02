@@ -26,6 +26,7 @@ if (Test-Path $core) {
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WcmSvc' -Name EnableBadStateTracking -ErrorAction SilentlyContinue
 $d = [Environment]::GetFolderPath('Desktop')
 Remove-Item "$d\VeroScudo On.lnk", "$d\VeroScudo Off.lnk" -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Programs')) 'VeroScudo.lnk') -Force -ErrorAction SilentlyContinue   # Start menu entry (one file)
 Remove-Item "$state\reconnect.lock", "$state\wfp.json", "$state\emergency.flag" -Force -ErrorAction SilentlyContinue
 if ($Purge) {
     foreach ($d in (Join-Path $env:ProgramData 'VeroScudo'), (Join-Path $env:LOCALAPPDATA 'VeroScudo')) {
