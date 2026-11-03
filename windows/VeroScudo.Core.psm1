@@ -423,22 +423,44 @@ function Get-VeroRasTermination {
 }
 
 function Get-VeroRasConnected {
-    <# Profile name of the newest RasMan "connected" event (System log - not writable by ordinary users). #>
-    [CmdletBinding()] param([int]$WithinMinutes = 2)
+    <# Profile name of the newest "connected" event: RasMan 20267 (System log - not writable by ordinary users), else
+       RasClient 20225 (Application log): an IKEv2 connect logs ONLY that one (seen live 2026-11-03). The Application log is
+       user-writable, so the caller arms only when that profile really is connected - a forged record can at most turn
+       VeroScudo on (the strict direction), never off. -Names: the configured profiles (to find the name in a 20225). #>
+    [CmdletBinding()] param([int]$WithinMinutes = 2, [string[]]$Names = @())
     $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'RasMan'; Id = 20267
                                             StartTime = (Get-Date).AddMinutes(-$WithinMinutes) } -MaxEvents 1 -ErrorAction SilentlyContinue
     if ($ev -and $ev.Properties.Count -ge 3) { return [string]$ev.Properties[2].Value }
+    $r = Get-VeroRasClientConnect -WithinMinutes $WithinMinutes -Names $Names | Select-Object -First 1
+    if ($r) { return $r.Profile }
     $null
+}
+
+function Get-VeroRasClientConnect {
+    <# RasClient 20225 "connected" records (newest first) whose connection name is one of -Names: @{ Profile; CoId; Time }. #>
+    [CmdletBinding()] param([int]$WithinMinutes = 60, [string[]]$Names = @())
+    $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'RasClient'; Id = 20225
+                                               StartTime = (Get-Date).AddMinutes(-$WithinMinutes) } -MaxEvents 20 -ErrorAction SilentlyContinue)
+    foreach ($e in $evs) {
+        $vals = @($e.Properties | ForEach-Object { [string]$_.Value })
+        $name = $vals | Where-Object { $Names -contains $_ } | Select-Object -First 1
+        $coid = $vals | Where-Object { $_ -match '^\{[0-9A-Fa-f-]{36}\}$' } | Select-Object -First 1
+        if ($name) { [pscustomobject]@{ Profile = $name; CoId = [string]$coid; Time = $e.TimeCreated } }
+    }
 }
 
 function Get-VeroRasConnectedRecord {
     <# The newest RasMan "connected" (20267, System log - ordinary users cannot write it) for a profile, with its connection id
        (CoID). No time limit: it is the connection a later termination must belong to. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName, [switch]$AllowApplicationLog)
     $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'RasMan'; Id = 20267 } -MaxEvents 50 -ErrorAction SilentlyContinue |
           Where-Object { $_.Properties.Count -ge 3 -and [string]$_.Properties[2].Value -eq $ProfileName } | Select-Object -First 1
-    if ($ev) { return [pscustomobject]@{ Profile = $ProfileName; CoId = [string]$ev.Properties[0].Value; Time = $ev.TimeCreated } }
-    $null
+    $rm = if ($ev) { [pscustomobject]@{ Profile = $ProfileName; CoId = [string]$ev.Properties[0].Value; Time = $ev.TimeCreated } } else { $null }
+    if (-not $AllowApplicationLog) { return $rm }
+    # at arm only: IKEv2 has no RasMan record - take the RasClient 20225 of THIS connect (newer than any RasMan one)
+    $rc = Get-VeroRasClientConnect -WithinMinutes 5 -Names @($ProfileName) | Where-Object { $_.CoId } | Select-Object -First 1
+    if ($rc -and (-not $rm -or $rc.Time -gt $rm.Time)) { return $rc }
+    $rm
 }
 
 function Get-VeroExpectedCoId {
@@ -451,6 +473,45 @@ function Get-VeroExpectedCoId {
     $r = Get-VeroRasConnectedRecord -ProfileName $ProfileName
     if ($r -and $r.CoId) { $ids += [string]$r.CoId }
     @($ids | Select-Object -Unique)
+}
+
+function Invoke-VeroArmConnected {
+    <# A Windows VPN profile connected by hand (any protocol): arm for it - the same steps from the Connected task and from the
+       watchdog's own check, so the outcome never depends on which events a protocol logs. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'arm')
+    $p = Get-VeroPath
+    # an SSTP tunnel may still be checking its server certificate's revocation when the filters arrive
+    if ((Get-VeroConfigType $Config) -eq 'ras' -and (Get-VeroTunnelType $Config.Profile) -in 'Sstp', 'Automatic') {
+        Open-VeroCrlWindow -Action $Action -Reason 'SSTP tunnel just connected (revocation check may still run)'
+    }
+    # remember WHICH connection this is: a later "you hung up" must name the same connection id (anti-forgery)
+    $rec = Get-VeroRasConnectedRecord -ProfileName $Config.Profile -AllowApplicationLog
+    if ($rec) { @{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.RasCoId }
+    Set-VeroArmed $true $Action; Sync-VeroKillSwitch -Config $Config -Action $Action
+}
+
+$script:RasSeen = @{}
+function Update-VeroRasWatch {
+    <# Watchdog: a configured Windows VPN profile that BECAME connected since the last pass (15 s) while it is not the armed,
+       active one arms VeroScudo for it - for every protocol, whatever Windows logged (IKEv2 writes no RasMan 20267; a type may
+       write neither event). Edges only: the first look after start changes nothing, and our own Off (disarm, then hang up)
+       is a falling edge. True when it armed. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'watchdog')
+    $up = @(Get-VeroNic | Where-Object { [string]$_.NetworkInterfaceType -eq 'Ppp' -and [string]$_.OperationalStatus -eq 'Up' } | ForEach-Object Name)
+    $armedNow = $false
+    foreach ($pr in @($Config.Profiles | Where-Object Type -eq 'ras')) {
+        $cur = $up -contains $pr.Profile
+        $prev = $script:RasSeen[$pr.Profile]
+        $script:RasSeen[$pr.Profile] = $cur
+        if ($null -eq $prev -or $prev -or -not $cur -or $armedNow) { continue }
+        if ((Test-VeroArmed) -and $pr.Profile -eq $Config.Profile) { continue }      # already protected by it
+        if (Test-VeroLockAlive) { continue }                                         # our own redial / switch is running
+        Write-VeroLog "Windows VPN '$($pr.Profile)' connected - kill-switch on for it (decision source: watchdog saw the tunnel come up)" $Action
+        if ($pr.Profile -ne $Config.Profile) { Set-VeroActiveProfile -Name $pr.Profile -Action $Action }
+        Invoke-VeroArmConnected -Config (Get-VeroConfig) -Action $Action
+        $armedNow = $true
+    }
+    $armedNow
 }
 
 function Get-VeroRasCode {
@@ -1030,12 +1091,15 @@ function Get-VeroKeyPassphrase {
 $script:EventSettleSeconds = 3              # on-event waits this long before reading the termination records (tests: 0)
 $script:RasAuthCodes = @(691)              # "the user name and password combination is not recognized"
 # SSTP could not check the server certificate's revocation (CRL/OCSP offline): CRYPT_E_REVOCATION_OFFLINE / _NO_REVOCATION_CHECK
-$script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012)
+# + WSAEACCES (0x8007271D): seen live 2026-11-03 - with no TCP 80 permit, SSTP's revocation fetch is refused by the filters
+# and RasDial returns "access forbidden" instead of a revocation code
+$script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012, -2147014883, 10013)
 function Open-VeroCrlWindow {
-    <# A dial failed on the revocation check: allow svchost TCP 80 for 2 minutes so the next dial can fetch the CRL. #>
-    [CmdletBinding()] param([string]$Action = 'core')
+    <# Allow svchost TCP 80 for 2 minutes so SSTP can fetch the CRL: after a dial failed on the revocation check, and right
+       after an SSTP tunnel came up (it may still be checking when the filters arrive - seen live: RAS 829 ~5 s after arm). #>
+    [CmdletBinding()] param([string]$Action = 'core', [string]$Reason = 'SSTP could not check the server certificate revocation')
     @{ Until = (Get-Date).AddMinutes(2).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).CrlWindow
-    Write-VeroLog 'SSTP could not check the server certificate revocation - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can' $Action
+    Write-VeroLog "$Reason - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can" $Action
 }
 function Test-VeroCrlWindow {
     $f = (Get-VeroPath).CrlWindow
@@ -1224,6 +1288,7 @@ function Invoke-VeroCheck {
     [CmdletBinding()] param([string]$Action = 'watchdog')
     $cfg = Get-VeroConfig
     $script:CheckCount++
+    try { if (Update-VeroRasWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: Windows VPN watch: $($_.Exception.Message)" $Action }
     if (@($cfg.Profiles | Where-Object Type -eq 'wireguard').Count -gt 0) {
         try { if (Update-VeroWgWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: WireGuard watch: $($_.Exception.Message)" $Action }
     }
@@ -2187,7 +2252,13 @@ function Invoke-VeroAction {
     switch ($Action) {
         'arm' {
             # a VPN connected (RasMan, System log): a configured profile becomes the active one; anything else is ignored
-            $c = Get-VeroRasConnected
+            $names = @($Config.Profiles | ForEach-Object Profile)
+            $c = Get-VeroRasConnected -Names $names
+            # the Connected task also fires on RasClient 20225 (user-writable log): arm only for a tunnel that is really up
+            $who = if ($c -and $names -contains $c) { $c } else { $Config.Profile }
+            if (($names -contains $who) -and -not (Test-VeroVpnConnected $who -Type 'ras')) {
+                if (-not ($c -and $names -notcontains $c)) { Write-VeroLog "connect record for '$who', but it is not connected - ignored" $Action; return }
+            }
             if ($c -and $c -ne $Config.Profile) {
                 if (@($Config.Profiles | ForEach-Object Profile) -notcontains $c) {
                     if (Test-VeroArmed) {                                       # tell the user (tray) - its traffic goes nowhere
@@ -2199,10 +2270,7 @@ function Invoke-VeroAction {
                 Set-VeroActiveProfile -Name $c -Action $Action
                 $Config = Get-VeroConfig
             }
-            # remember WHICH connection this is: a later "you hung up" must name the same connection id (anti-forgery)
-            $rec = Get-VeroRasConnectedRecord -ProfileName $Config.Profile
-            if ($rec) { @{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.RasCoId }
-            Set-VeroArmed $true $Action; Sync-VeroKillSwitch -Config $Config -Action $Action
+            Invoke-VeroArmConnected -Config $Config -Action $Action
         }
         'disarm' { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }
         { $_ -in 'on', 'on-disconnect', 'on-force' } {
@@ -2339,7 +2407,7 @@ function Get-VeroLatestRelease {
     return $null
 }
 
-Export-ModuleMember -Function Get-VeroRasConnectedRecord, Get-VeroExpectedCoId, Open-VeroCrlWindow, Test-VeroCrlWindow, Get-VeroSystemDir, Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
+Export-ModuleMember -Function Invoke-VeroArmConnected, Update-VeroRasWatch, Get-VeroRasClientConnect, Get-VeroRasConnectedRecord, Get-VeroExpectedCoId, Open-VeroCrlWindow, Test-VeroCrlWindow, Get-VeroSystemDir, Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
     Test-VeroNeedsPassword, Test-VeroTunnelAdapter, Protect-VeroOpenVpnDir, Test-VeroOpenVpnConf, Import-VeroOpenVpnProfile, Get-VeroOpenVpnRemote,
     Get-VeroOpenVpnExe, Get-VeroOpenVpnArgs, ConvertFrom-VeroMgmtLine, Format-VeroMgmtValue, Get-VeroStaticChallengeResponse, Get-VeroOpenVpnStatus,
     Get-VeroOpenVpnNic, Test-VeroOpenVpnRunnerAlive, Invoke-VeroOpenVpnDial, Stop-VeroOpenVpn, Invoke-VeroOpenVpnSession, Invoke-VeroOpenVpnRunner,

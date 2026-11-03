@@ -1119,3 +1119,72 @@ Describe 'security review 2026-11-02, second pass' {
         InModuleScope VeroScudo.Core { $script:HyperVFw = $null }
     }
 }
+
+Describe 'IKEv2 connects (only RasClient 20225, no RasMan 20267)' {
+    BeforeAll {
+        $script:cfgI = Get-VeroConfig -Raw '{"profiles":[{"profile":"PrivateVPN","server":"pl-tor.pvdata.host","username":"u"}]}'
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelType { 'Ikev2' }
+        Mock -ModuleName VeroScudo.Core Get-VeroRasConnected { 'PrivateVPN' }
+        Mock -ModuleName VeroScudo.Core Get-VeroRasConnectedRecord { [pscustomobject]@{ Profile = 'PrivateVPN'; CoId = '{25B4B9CC-6854-0007-9972-35265468DD01}'; Time = (Get-Date) } }
+    }
+    BeforeEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).RasCoId }
+    AfterAll { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).RasCoId }
+    It 'arms when the configured profile really is connected, and records its connection id' {
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Invoke-VeroAction -Action arm -Config $script:cfgI
+        Test-VeroArmed | Should -BeTrue
+        (Get-Content (Get-VeroPath).RasCoId -Raw | ConvertFrom-Json).CoId | Should -Be '{25B4B9CC-6854-0007-9972-35265468DD01}'
+        Should -Invoke -ModuleName VeroScudo.Core Get-VeroRasConnectedRecord -ParameterFilter { $AllowApplicationLog } -Times 1 -Exactly
+    }
+    It 'does not arm on a (forged) connect record while that profile is not connected' {
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Invoke-VeroAction -Action arm -Config $script:cfgI
+        Test-VeroArmed | Should -BeFalse
+    }
+    It 'the manual disconnect afterwards (631 with that id) turns VeroScudo off' {
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Invoke-VeroAction -Action arm -Config $script:cfgI
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroRasConnectedRecord { $null }       # no RasMan record for IKEv2
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'PrivateVPN'; CoId = '{25B4B9CC-6854-0007-9972-35265468DD01}'; Code = 631; Conflict = $false } }
+        Invoke-VeroAction -Action on-event -Config $script:cfgI
+        Test-VeroArmed | Should -BeFalse
+    }
+}
+
+Describe 'Update-VeroRasWatch: any Windows VPN type arms, whatever Windows logged' {
+    BeforeAll {
+        Set-Content (Get-VeroPath).Config '{"profiles":[{"profile":"PieSoft","server":"a.example.com","username":"u"},{"profile":"PrivateVPN","server":"b.example.com","username":"u"}],"activeProfile":"PieSoft"}'
+        Mock -ModuleName VeroScudo.Core Invoke-VeroArmConnected { }
+        Mock -ModuleName VeroScudo.Core Test-VeroLockAlive { $false }
+        $script:nicUp = @()
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { foreach ($n in $script:nicUp) { [pscustomobject]@{ Name = $n; NetworkInterfaceType = 'Ppp'; OperationalStatus = 'Up' } } }
+    }
+    BeforeEach { InModuleScope VeroScudo.Core { $script:RasSeen = @{} }; Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).ActiveProfile }
+    AfterAll { Remove-TestFile (Get-VeroPath).Config, (Get-VeroPath).ActiveProfile; Set-VeroArmed $false 'test' }
+    It 'does nothing on its first look, then arms when a profile comes up (and makes it active)' {
+        $script:nicUp = @()
+        Update-VeroRasWatch -Config (Get-VeroConfig) -Action test | Should -BeFalse
+        $script:nicUp = @('PrivateVPN')
+        Update-VeroRasWatch -Config (Get-VeroConfig) -Action test | Should -BeTrue
+        (Get-VeroConfig).Profile | Should -Be 'PrivateVPN'
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroArmConnected -Times 1 -Exactly
+    }
+    It 'never arms on a tunnel that was already up at the first look, nor when it goes down' {
+        $script:nicUp = @('PieSoft')
+        $null = Update-VeroRasWatch -Config (Get-VeroConfig) -Action test
+        $null = Update-VeroRasWatch -Config (Get-VeroConfig) -Action test
+        $script:nicUp = @()
+        $null = Update-VeroRasWatch -Config (Get-VeroConfig) -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroArmConnected -Times 0 -Exactly
+    }
+    It 'leaves our own redial alone' {
+        Mock -ModuleName VeroScudo.Core Test-VeroLockAlive { $true }
+        $script:nicUp = @(); $null = Update-VeroRasWatch -Config (Get-VeroConfig) -Action test
+        $script:nicUp = @('PieSoft'); Update-VeroRasWatch -Config (Get-VeroConfig) -Action test | Should -BeFalse
+        Mock -ModuleName VeroScudo.Core Test-VeroLockAlive { $false }
+    }
+}

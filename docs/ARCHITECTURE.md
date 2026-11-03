@@ -46,7 +46,7 @@ platform's VPN subsystem, never from heuristics:
 
 | Platform | Connected event | Terminated event | User-requested reason |
 |---|---|---|---|
-| Windows | System log, RasMan 20267 (profile = field 2) | Application log, RasClient 20226 | reason code 631 |
+| Windows | System log, RasMan 20267 (profile = field 2); **IKEv2 logs only** Application log, RasClient 20225 - armed only if that profile really is connected; plus the watchdog: any configured Windows VPN profile whose tunnel came up since the last pass arms (every protocol, no event needed) | Application log, RasClient 20226 | reason code 631 |
 | Linux (NetworkManager) | `ActiveConnection.StateChanged` → activated | → deactivated | reason `user-requested` (2) |
 | macOS (alpha) | `scutil --nc status` polling | idem | **none available** - every drop counts as a failure; `veroscudo off` to stop |
 | Windows, OpenVPN profile | the runner reads `>STATE:...,CONNECTED` on the management interface | `>STATE:...,EXITING` / the process ends | only VeroScudo's own `signal SIGTERM` (Off, switch, Reconnect) - any other end is a failure |

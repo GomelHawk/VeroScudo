@@ -25,7 +25,7 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 | DNS / port 53 used as a side door while blocked | only the OS resolver service, only to the network's resolvers |
 | A hostile network spoofing the VPN server's address | server permit limited to the VPN's protocol/port and (Windows) to `svchost.exe`; the server's certificate is still validated by the VPN |
 | Something resets the firewall (GPO refresh, `nft flush ruleset`) | Windows filters are independent of the firewall policy; the watchdog re-checks every 15 s |
-| A forged "user disconnected" event | acted on only for the active profile, only if the tunnel is really down, never when two records conflict |
+| A forged "user disconnected" event | acted on only for the active profile, only if the tunnel is really down, never when two records conflict, only for the connection id seen connecting (SSTP/L2TP/PPTP: System log; IKEv2 logs its connect only in the user-writable Application log, so for IKEv2 this last check is weaker) |
 | Non-admin code redirecting the elevated guard | no environment overrides - system folders (Program Files, ProgramData, System32) come from the OS and HKLM, never from `%ProgramFiles%`-style variables a user can plant in `HKCU\Environment`; state folder writable by administrators only; config validated |
 | The VPN password leaking via process lists / EDR logs | `RasDial` API, never on a command line; DPAPI-encrypted per user |
 | A tampered update link | only this project's GitHub release pages are opened; nothing is installed automatically |

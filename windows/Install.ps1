@@ -198,11 +198,13 @@ function EventTrigger([string]$query) {
 }
 # any VPN: the guard itself decides from the event which profile it was (several profiles can be configured)
 $connected  = EventTrigger "<QueryList><Query Id=`"0`" Path=`"System`"><Select Path=`"System`">*[System[Provider[@Name='RasMan'] and EventID=20267]]</Select></Query></QueryList>"
+# IKEv2 connects log only RasClient 20225 (Application log): a second trigger; the guard checks the tunnel is really up
+$connectedIke = EventTrigger "<QueryList><Query Id=`"0`" Path=`"Application`"><Select Path=`"Application`">*[System[Provider[@Name='RasClient'] and EventID=20225]]</Select></Query></QueryList>"
 $terminated = EventTrigger "<QueryList><Query Id=`"0`" Path=`"Application`"><Select Path=`"Application`">*[System[Provider[@Name='RasClient'] and EventID=20226]]</Select></Query></QueryList>"
 $everyMin   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $atLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
 $tasks = @(
-    @{ Name = 'Connected';  Action = (Act 'arm');      Trigger = @($connected);          P = $guard; Desc = 'VPN connected -> arm kill-switch' }
+    @{ Name = 'Connected';  Action = (Act 'arm');      Trigger = @($connected, $connectedIke);          P = $guard; Desc = 'VPN connected -> arm kill-switch' }
     @{ Name = 'Terminated'; Action = (Act 'on-event'); Trigger = @($terminated);         P = $guard; Desc = 'VPN terminated -> user hung up: disarm / else: reconnect' }
     @{ Name = 'Watchdog';   Action = (Act 'watchdog'); Trigger = @($everyMin, $atLogon); P = $guard; Desc = 'keeps the kill-switch exact every 15 s; restarted within a minute if it stops' }
     @{ Name = 'On';         Action = (Act 'on');       Trigger = @();                    P = $guard; Desc = 'manual: arm + connect' }

@@ -519,7 +519,8 @@ function Edit-VpnProfile($entry) {
     $cb.Add_Leave($onPick)
     $cbType.Add_SelectedIndexChanged($apply)
     $cbType.SelectedIndex = [Math]::Max(0, [array]::IndexOf($types, $(if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type) { [string]$entry.Type } else { 'ras' })))
-    if ($entry) { $cb.Text = $entry.Profile; $cbType.Enabled = $false; & $onPick }
+    # editing never turns one profile into another (that silently replaced it): the name stays; Remove + Add/Import for another
+    if ($entry) { $cb.Text = $entry.Profile; $cbType.Enabled = $false; $cb.Enabled = $false; & $onPick }
     $bFile.Add_Click(({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'OpenVPN config (*.ovpn;*.conf)|*.ovpn;*.conf|All files|*.*'
         if ($dlg.ShowDialog() -eq 'OK') { $tFile.Text = $dlg.FileName; if (-not $cb.Text) { $cb.Text = [IO.Path]::GetFileNameWithoutExtension($dlg.FileName) } }
@@ -611,7 +612,7 @@ function Show-Settings {
     & $fill
     $bImp = New-Button $card 'Import from Windows...' 324 12 140 $true; $bAdd = New-Button $card 'Add...' 324 52 140
     $bEdit = New-Button $card 'Edit...' 324 92 140; $bDel = New-Button $card 'Remove' 324 132 140
-    $bDef = New-Button $card 'Make default' 324 172 140; $bPw = New-Button $card 'Set password...' 324 220 140
+    $bDef = New-Button $card 'Use this profile' 324 172 140; $bPw = New-Button $card 'Set password...' 324 220 140
     $bKey = New-Button $card 'Key passphrase...' 324 260 140
     $bImp.Add_Click(({
         $have = @($work | ForEach-Object Profile)
@@ -660,7 +661,11 @@ function Show-Settings {
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
         } | ConvertTo-Json -Depth 6
         $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Source = $_.ImportFrom } })
-        try { Save-ConfigElevated $json $imports; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close() }
+        try {
+            Save-ConfigElevated $json $imports; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close()
+            # "Use this profile" = the default AND the active one now (before, the default only applied at the next start)
+            if ($state.Default -and $global:Config -and $global:Config.Profile -ne $state.Default) { Request-ProfileSwitch $state.Default }
+        }
         catch { [System.Windows.Forms.MessageBox]::Show("Not saved: $($_.Exception.Message)", 'VeroScudo') | Out-Null }
     }).GetNewClosure())
     $global:SettingsForm = $f

@@ -66,6 +66,12 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   through it); it opens for 2 minutes only after an SSTP dial failed on the certificate revocation check.
 - Windows: a "you hung up" (631) counts only for the connection id VeroScudo saw connect in the System log, and the
   Terminated task waits 3 s so a forged record meets the real one; a 631 raced in with a fresh id no longer disarms.
+- Windows: **IKEv2 profiles never armed** - an IKEv2 connect logs no RasMan 20267, only RasClient 20225. The Connected task
+  now fires on both; it arms only when that profile really is connected. And for every Windows VPN type (Automatic,
+  IKEv2, SSTP, L2TP, PPTP) the watchdog arms within 15 s when a configured profile's tunnel comes up, whatever was logged. SSTP redial under the kill-switch failed with
+  `0x8007271D` (the blocked revocation fetch): that code now opens the 2-minute window too, and a freshly connected SSTP
+  tunnel gets the window as well. Settings: editing a profile no longer lets you turn it into another one; "Make default"
+  is now "Use this profile" and switches to it.
 - Windows: the CRL window opens on the RasDial result only - a forged Application-log record can no longer keep it open.
 - Windows: a 631 may name the recorded connection id or the newest System-log connect (two quick connects no longer
   turn a real Off into a failure); every Hyper-V firewall call is gated, so Off and Status work without it (Windows 10);
