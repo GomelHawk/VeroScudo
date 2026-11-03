@@ -136,16 +136,31 @@ $old = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where
 foreach ($t in $old) { Stop-Process -Id $t.ProcessId -Force -ErrorAction SilentlyContinue }
 if ($old) { Wait-Process -Id $old.ProcessId -Timeout 10 -ErrorAction SilentlyContinue; Write-Host "stopped $($old.Count) running VeroScudo process(es)" }
 
+# --- the native helper must be replaceable: a PowerShell window that ran VeroScudo.ps1 from the install folder keeps the
+# old DLL loaded (and locked) until it is closed. Checked BEFORE anything is copied, so a failed install changes nothing.
+$oldDll = Join-Path $InstallDir 'VeroScudo.Native.dll'
+if (Test-Path -LiteralPath $oldDll) {
+    $locked = $false
+    try { $fs = [IO.File]::Open($oldDll, 'Open', 'ReadWrite', 'None'); $fs.Close() } catch { $locked = $true }
+    if ($locked) {
+        $holders = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { @($_.Modules | Where-Object FileName -eq $oldDll).Count -gt 0 } catch { $false } })
+        $who = if ($holders) { ($holders | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))$(if ($_.Id -eq $PID) { ' - this window' })" }) -join ', ' } else { 'another process' }
+        throw "The installed native helper is in use by $who. Close that PowerShell window (or run Install.ps1 from a fresh one) and try again - nothing was changed."
+    }
+}
+
 # --- program files
 foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1', 'config.example.json') {
     Copy-Item (Join-Path $Src $f) (Join-Path $InstallDir $f) -Force
 }
 # compile the native helper once (a child process: this session already loaded the same types from source)
 $dll = Join-Path $InstallDir 'VeroScudo.Native.dll'
-Remove-Item $dll -Force -ErrorAction SilentlyContinue
+$compileStart = Get-Date
+if (Test-Path -LiteralPath $dll) { Remove-Item -LiteralPath $dll -Force }   # no SilentlyContinue: a locked old DLL must stop the install
 $compile = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$InstallDir\VeroScudo.Native.cs')) -Language CSharp -OutputAssembly '$dll' -OutputType Library"
 & "$Sys\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile
-if (-not (Test-Path $dll)) { throw "native helper was not compiled: $dll" }
+# a DLL that is not brand new is the OLD one: never report INSTALL OK with a helper that does not match the scripts
+if (-not (Test-Path -LiteralPath $dll) -or (Get-Item -LiteralPath $dll).LastWriteTime -lt $compileStart.AddSeconds(-2)) { throw "native helper was not compiled: $dll" }
 $iconsSrc = @((Join-Path $Src 'icons'), (Join-Path (Split-Path $Src -Parent) 'assets\icons')) | Where-Object { Test-Path $_ } | Select-Object -First 1   # release zip layout, then repo layout
 $iconsDst = Join-Path $InstallDir 'icons'
 if ($iconsSrc) {
