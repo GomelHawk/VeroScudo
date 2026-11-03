@@ -28,6 +28,8 @@ if (Test-Path $core) {
     Import-Module $core -Force
     # an OpenVPN started by VeroScudo would otherwise keep running without its runner
     try { foreach ($pr in @((Get-VeroConfig).Profiles | Where-Object Type -eq 'openvpn')) { Stop-VeroOpenVpn -ProfileName $pr.Profile } } catch { Write-Warning "OpenVPN not stopped: $($_.Exception.Message)" }
+    # the 'VeroScudo OpenVPN' adapter the installer / runner created (only that one, by its exact name)
+    try { Remove-VeroOpenVpnAdapter -Action 'uninstall' } catch { Write-Warning "OpenVPN adapter not removed: $($_.Exception.Message)" }
     Disable-VeroKillSwitch -Action uninstall
     try { [VeroScudo.Wfp]::Remove() } catch { Write-Warning "WFP provider not removed: $($_.Exception.Message)" }
 } else {

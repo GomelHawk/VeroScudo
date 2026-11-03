@@ -112,6 +112,10 @@ foreach ($pr in $config.Profiles) {
     switch ($pr.Type) {
         'openvpn' {
             if (-not (Get-VeroOpenVpnExe)) { Write-Warning "OpenVPN profile '$($pr.Profile)': openvpn.exe not found - install OpenVPN (community edition)." }
+            elseif (-not $pr.Dco) {
+                if (Initialize-VeroOpenVpnAdapter -Action 'install') { Write-Host "OpenVPN adapter: 'VeroScudo OpenVPN' (used only by VeroScudo's OpenVPN profiles)" }
+                else { Write-Warning "OpenVPN profile '$($pr.Profile)': no 'VeroScudo OpenVPN' adapter could be created - OpenVPN will use any free TAP adapter (see the log)." }
+            }
             if (-not (Test-Path (Get-VeroPath -VpnProfile $pr.Profile).OvpnConfig)) { Write-Warning "OpenVPN profile '$($pr.Profile)' is not imported - run Install.ps1 -ProfileName '$($pr.Profile)' -Type openvpn -OpenVpnConfig <file>." }
         }
         'wireguard' {
@@ -140,11 +144,18 @@ if ($old) { Wait-Process -Id $old.ProcessId -Timeout 10 -ErrorAction SilentlyCon
 # old DLL loaded (and locked) until it is closed. Checked BEFORE anything is copied, so a failed install changes nothing.
 $oldDll = Join-Path $InstallDir 'VeroScudo.Native.dll'
 if (Test-Path -LiteralPath $oldDll) {
-    $locked = $false
-    try { $fs = [IO.File]::Open($oldDll, 'Open', 'ReadWrite', 'None'); $fs.Close() } catch { $locked = $true }
+    $locked = $true
+    for ($i = 0; $i -lt 15 -and $locked; $i++) {                            # processes stopped just above need a moment to exit
+        try { $fs = [IO.File]::Open($oldDll, 'Open', 'ReadWrite', 'None'); $fs.Close(); $locked = $false } catch { Start-Sleep -Seconds 1 }
+    }
     if ($locked) {
+        $mine = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { try { $_.Location -eq $oldDll } catch { $false } }
         $holders = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { @($_.Modules | Where-Object FileName -eq $oldDll).Count -gt 0 } catch { $false } })
-        $who = if ($holders) { ($holders | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))$(if ($_.Id -eq $PID) { ' - this window' })" }) -join ', ' } else { 'another process' }
+        $ps = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID })
+        $who = if ($mine) { 'THIS PowerShell window (it ran VeroScudo from the install folder)' }
+               elseif ($holders) { ($holders | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', ' }
+               elseif ($ps) { 'another process - probably one of these PowerShell windows: ' + (($ps | ForEach-Object { "PID $($_.ProcessId)" }) -join ', ') }
+               else { 'another process' }
         throw "The installed native helper is in use by $who. Close that PowerShell window (or run Install.ps1 from a fresh one) and try again - nothing was changed."
     }
 }

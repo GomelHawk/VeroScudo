@@ -61,6 +61,53 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
 - Linux: `veroscudo import` undoes nmcli's escaping (`host\:4443`, URLs, IPv6); policy-based IPsec (strongSwan,
   libreswan) is refused - it has no tunnel interface, so it could only stay blocked.
 
+### Fixed (live tests 2026-11-03)
+- **IKEv2 profiles carried no traffic while armed** (and *Automatic* profiles that chose IKEv2): Windows hands IKEv2
+  tunnel data to the firewall as an IP-in-IP flow (protocol 4, 41 for IPv6 inside) to the VPN server, which the
+  kill-switch dropped - the tunnel connected and nothing went through. Now allowed to the profile's server addresses only.
+- Status *Server* showed `name -> , , ,`: the cached server addresses were written into `wfp.json` as objects.
+- The *other VPN* warning stayed up to a minute after the other VPN stopped: re-checked every 15 s while one is reported.
+- Tray, checked in every state with `-Preview` (dark and light):
+  - the status header grows with its text (nothing cut off);
+  - *Protected* + note when another VPN runs next to a working tunnel;
+  - dark scroll bars;
+  - event lines wrap after commas, not inside an address;
+  - disabled buttons drawn readable and visibly disabled;
+  - drop-down lists in the theme's colours, also when locked while editing;
+  - VeroScudo's own message boxes instead of the white Windows ones; *No* is the default of every Yes/No question;
+  - a darker warning colour on the light theme;
+  - wider Settings buttons.
+- **Settings > Save switched the connection**: with the WireGuard app's tunnel up, saving any edit switched to the
+  default Windows VPN. Save now never touches a connection: a new default (*Set as default*) is saved and you stay on
+  the tunnel you are on; it is selected right away only when VeroScudo is off and nothing is connected.
+- **No "connection lost" when you start something yourself**: after Turn on (tray, shortcut), a profile switch or
+  Reconnect, the blocked phase until the tunnel is up is shown as *Connecting* / *Switching* / *Reconnecting* (amber),
+  with one notice "kill-switch on, traffic blocked until ... is connected". A real drop while protected keeps the red
+  *connection lost*; a start still not connected after 2 minutes says so once.
+- **Exit location** in the status window (under the header): country, city and the IP your traffic leaves from. Asked
+  once after each connect/reconnect/switch - only while Protected, so it goes through the tunnel - from ipinfo.io, with
+  Cloudflare's trace page as fallback (IP and country). Shown grey with its time while not protected; *Refresh* asks again;
+  off in Settings (*Show exit location*, your own setting). Also in *Copy report*. Shown as "[PL] Poland / city"; the answer is decoded as UTF-8 (Windows PowerShell garbled non-English city names).
+- **OpenVPN profiles use VeroScudo's own adapter** *VeroScudo OpenVPN* (created with OpenVPN's `tapctl.exe` by the
+  installer, or by the OpenVPN runner when missing; removed by `Uninstall.ps1`). Without DCO, OpenVPN used to take any
+  free TAP adapter - e.g. one another VPN app installed under its own name, which also clashes when that app runs.
+  When the adapter cannot be created (no `tapctl.exe`, no TAP driver) OpenVPN keeps choosing one itself, noted once in the log.
+- **A profile chosen in the tray menu was ignored while another one was being redialed**: the redial loop kept the
+  Switch task busy, and Windows does not start a busy task again. The loop now checks for your choice on every attempt
+  (and while waiting for OpenVPN / WireGuard) and switches to it; the watchdog picks up a request nobody took within 15 s.
+- **OpenVPN start that never finishes**: twice OpenVPN sat in STARTING and never asked for the password, until Off. A start
+  that makes no progress for 45 s is now restarted, and the log names the last messages from OpenVPN; the previous run's
+  OpenVPN log is kept as `.prev.log` (it used to be overwritten by the next start).
+- The tray listed VeroScudo's **own OpenVPN adapter** as "Other VPNs: ... (VPN app)": it is now recognised by the
+  address OpenVPN reported, which works from the tray's session too.
+- Status: the third card of an OpenVPN / WireGuard profile is titled with the client (*OPENVPN* / *WIREGUARD*): it shows
+  the client's state, not the last drop.
+- Status *Server* of an OpenVPN profile shows its `remote` servers (it showed ` -> addresses` without a name).
+- Status window: **Clear** empties *Recent events* from now on. The log file is not touched: it is admin-owned and
+  rotates by itself at 2 MB, and *Open log* still shows everything.
+- `-Preview` now captures every status state, every dialog and message (each answers Cancel/No, nothing is saved) and
+  lists the balloon texts.
+
 ### Security (review 2026-11-02)
 - Windows: TCP 80 from `svchost.exe` is no longer open to anywhere while blocked (BITS / Delivery Optimization could send
   through it); it opens for 2 minutes only after an SSTP dial failed on the certificate revocation check.
@@ -71,7 +118,18 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   IKEv2, SSTP, L2TP, PPTP) the watchdog arms within 15 s when a configured profile's tunnel comes up, whatever was logged. SSTP redial under the kill-switch failed with
   `0x8007271D` (the blocked revocation fetch): that code now opens the 2-minute window too, and a freshly connected SSTP
   tunnel gets the window as well. Settings: editing a profile no longer lets you turn it into another one; "Make default"
-  is now "Use this profile" and switches to it.
+  is now "Set as default" and never switches a running connection (see below).
+- Windows: **a VPN server that moved was blocked forever** (since 1.0): while down VeroScudo used only cached addresses.
+  It now looks the server up before arming (no filters yet) and again after a failed redial (DNS is allowed then), and
+  lets a new address through. Seen live: vpn.corp.example.com moved, the tunnel was cut 5 s after arming, every redial refused.
+- Windows: the native helper is loaded from its bytes instead of as a file: Smart App Control blocked the locally
+  compiled, unsigned DLL (Code Integrity 3077) and with it On/Off/redial in the affected process. A signed release DLL
+  remains the proper fix. Side effect: the DLL is no longer locked, so reinstalling never hits "file in use".
+- Windows: the status window's events scroll vertically and wrap long lines; a password is asked every time a profile is
+  imported or added (leave it empty to keep one stored before); status shows the server name and the addresses allowed.
+- Windows: switching profiles always hangs the old tunnel up and waits until it is gone before dialing the new one (the
+  new dial failed for about a minute otherwise); after Off nothing re-arms for 30 s, and a redial that still connects
+  after Off is hung up - Off always ends disconnected. Failed attempts log the RasDial result.
 - Windows: the CRL window opens on the RasDial result only - a forged Application-log record can no longer keep it open.
 - Windows: a 631 may name the recorded connection id or the newest System-log connect (two quick connects no longer
   turn a real Off into a failure); every Hyper-V firewall call is gated, so Off and Status work without it (Windows 10);
