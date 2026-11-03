@@ -18,13 +18,16 @@ param(
     [string]$OpenVpnConfig,          # openvpn: the .ovpn to import (checked, key files inlined, stored admin-only)
     [string]$WireGuardConfig,        # wireguard: optional .conf to read the endpoint from and check (the tunnel itself lives in the WireGuard app)
     [switch]$Dco,                    # openvpn: keep the kernel data channel (the server permit is then not tied to openvpn.exe)
-    [string]$InstallDir = "$env:ProgramFiles\VeroScudo",
+    [string]$InstallDir = '',     # default: <Program Files>\VeroScudo, resolved from the OS (never %ProgramFiles%)
     [switch]$NoTray, [switch]$NoShortcuts
 )
 $ErrorActionPreference = 'Stop'
 if (-not [Environment]::Is64BitProcess) { throw 'Run Install.ps1 from 64-bit PowerShell (C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe).' }
 $Src = $PSScriptRoot
 Import-Module (Join-Path $Src 'VeroScudo.Core.psm1') -Force
+# system folders from the OS: this runs elevated with YOUR environment, where any program you run can plant %ProgramFiles%
+$Sys = Get-VeroSystemDir System
+if (-not $InstallDir) { $InstallDir = Join-Path (Get-VeroSystemDir ProgramFiles) 'VeroScudo' }
 
 # --- self-test before touching anything: the kill-switch is built from these WFP layer/field ids
 Test-VeroNative | Out-Null
@@ -112,7 +115,7 @@ foreach ($pr in $config.Profiles) {
             if (-not (Test-Path (Get-VeroPath -VpnProfile $pr.Profile).OvpnConfig)) { Write-Warning "OpenVPN profile '$($pr.Profile)' is not imported - run Install.ps1 -ProfileName '$($pr.Profile)' -Type openvpn -OpenVpnConfig <file>." }
         }
         'wireguard' {
-            if (-not (Test-Path (Join-Path $env:ProgramFiles "WireGuard\Data\Configurations\$($pr.Profile).conf.dpapi"))) {
+            if (-not (Test-Path (Join-Path (Get-VeroSystemDir ProgramFiles) "WireGuard\Data\Configurations\$($pr.Profile).conf.dpapi"))) {
                 Write-Warning "WireGuard profile '$($pr.Profile)': no such tunnel in the WireGuard app - import it there under exactly this name."
             }
         }
@@ -141,7 +144,7 @@ foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'V
 $dll = Join-Path $InstallDir 'VeroScudo.Native.dll'
 Remove-Item $dll -Force -ErrorAction SilentlyContinue
 $compile = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$InstallDir\VeroScudo.Native.cs')) -Language CSharp -OutputAssembly '$dll' -OutputType Library"
-& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile
+& "$Sys\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile
 if (-not (Test-Path $dll)) { throw "native helper was not compiled: $dll" }
 $iconsSrc = @((Join-Path $Src 'icons'), (Join-Path (Split-Path $Src -Parent) 'assets\icons')) | Where-Object { Test-Path $_ } | Select-Object -First 1   # release zip layout, then repo layout
 $iconsDst = Join-Path $InstallDir 'icons'
@@ -173,7 +176,7 @@ $guard     = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -Ru
 $limited   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited      # the tray needs no admin rights
 $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden
-function Act([string]$a) { New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "//B //Nologo `"$InstallDir\run.vbs`" $a" }
+function Act([string]$a) { New-ScheduledTaskAction -Execute "$Sys\wscript.exe" -Argument "//B //Nologo `"$InstallDir\run.vbs`" $a" }
 function EventTrigger([string]$query) {
     $t = New-CimInstance -CimClass (Get-CimClass MSFT_TaskEventTrigger root/Microsoft/Windows/TaskScheduler) -ClientOnly
     $t.Subscription = $query; $t.Enabled = $true; $t
@@ -196,7 +199,7 @@ $tasks = @(
     @{ Name = 'OpenVPN';    Action = (Act 'openvpn');  Trigger = @();                    P = $guard; Desc = 'runs openvpn.exe for an OpenVPN profile while VeroScudo is on (started by the guard)' }
 )
 if (-not $NoTray) {
-    $trayAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "//B //Nologo `"$InstallDir\run.vbs`" tray"
+    $trayAction = New-ScheduledTaskAction -Execute "$Sys\wscript.exe" -Argument "//B //Nologo `"$InstallDir\run.vbs`" tray"
     $tasks += @{ Name = 'Tray'; Action = $trayAction; Trigger = @((New-ScheduledTaskTrigger -AtLogOn -User $user)); P = $limited; Desc = 'tray icon at sign-in' }
 }
 foreach ($t in $tasks) {
@@ -211,7 +214,7 @@ if (-not $NoShortcuts) {
     $desktop = [Environment]::GetFolderPath('Desktop'); $shell = New-Object -ComObject WScript.Shell
     foreach ($s in @(@{ N = 'VeroScudo On'; T = 'On'; I = "$InstallDir\icons\png\protected.ico" }, @{ N = 'VeroScudo Off'; T = 'Off'; I = "$InstallDir\icons\png\off.ico" })) {
         $lnk = $shell.CreateShortcut((Join-Path $desktop "$($s.N).lnk"))
-        $lnk.TargetPath = "$env:SystemRoot\System32\schtasks.exe"; $lnk.Arguments = "/run /tn `"$Folder$($s.T)`""
+        $lnk.TargetPath = "$Sys\schtasks.exe"; $lnk.Arguments = "/run /tn `"$Folder$($s.T)`""
         $lnk.WindowStyle = 7; if (Test-Path $s.I) { $lnk.IconLocation = $s.I }; $lnk.Save()
         Write-Host "shortcut: $($s.N)"
     }
@@ -219,7 +222,7 @@ if (-not $NoShortcuts) {
     # so the tray starts exactly as at sign-in; a second start while it runs exits quietly (single-instance mutex).
     if (-not $NoTray) {
         $lnk = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'VeroScudo.lnk'))
-        $lnk.TargetPath = "$env:SystemRoot\System32\schtasks.exe"; $lnk.Arguments = "/run /tn `"$($Folder)Tray`""
+        $lnk.TargetPath = "$Sys\schtasks.exe"; $lnk.Arguments = "/run /tn `"$($Folder)Tray`""
         $lnk.WindowStyle = 7; $lnk.Description = 'Show the VeroScudo tray icon'
         if (Test-Path "$InstallDir\icons\app\app.ico") { $lnk.IconLocation = "$InstallDir\icons\app\app.ico" }; $lnk.Save()
         Write-Host 'shortcut: Start menu > VeroScudo (tray)'

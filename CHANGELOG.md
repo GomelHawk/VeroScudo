@@ -61,6 +61,21 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
 - Linux: `veroscudo import` undoes nmcli's escaping (`host\:4443`, URLs, IPv6); policy-based IPsec (strongSwan,
   libreswan) is refused - it has no tunnel interface, so it could only stay blocked.
 
+### Security (review 2026-11-02)
+- Windows: TCP 80 from `svchost.exe` is no longer open to anywhere while blocked (BITS / Delivery Optimization could send
+  through it); it opens for 2 minutes only after an SSTP dial failed on the certificate revocation check.
+- Windows: a "you hung up" (631) counts only for the connection id VeroScudo saw connect in the System log, and the
+  Terminated task waits 3 s so a forged record meets the real one; a 631 raced in with a fresh id no longer disarms.
+- Windows: no DNS permit at all when no resolver is known (was: svchost to any address); DHCP only from svchost.
+- Windows: `powershell.exe`, `schtasks.exe`, `rasdial.exe` and `wscript.exe` always by full System32 path (a bare name is
+  resolved through the user's App Paths key); the installer and uninstaller take Program Files / ProgramData from the OS.
+- Windows: the OpenVPN log moved to the administrators-only folder; the OpenVPN folder check no longer recurses or
+  follows junctions; a filter layer with VeroScudo's top priority is reported; missing Hyper-V firewall is logged.
+- Linux: an `input` chain (the host was reachable while blocked); established traffic only for flows VeroScudo allowed
+  (conntrack mark), so a tunnel flow cannot continue over the NIC; no DNS-to-anywhere fallback (NetworkManager's resolvers
+  are used); a stale Off marker can no longer turn a later drop into a disarm; systemd hardening for the daemon; the tray's
+  update file now persists. macOS: pf states bound to their interface; no DNS-to-anywhere fallback.
+
 ## [1.2.1] - 2026-10-26
 
 ### Windows

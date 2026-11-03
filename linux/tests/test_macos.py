@@ -12,9 +12,10 @@ def test_pf_ends_with_a_quick_block_and_scopes_every_pass():
     rs = pf.render_ruleset(CFG, ["203.0.113.5"], "ipsec0", vm_allowed=False)
     lines = [ln for ln in rs.splitlines() if ln]
     assert lines[-1] == "block drop quick all"
-    assert "pass quick on ipsec0 all" in lines
-    assert "pass out quick inet proto udp to { 203.0.113.5 } port 4500" in lines
-    assert "pass quick inet to 192.168.1.0/24" in lines
+    assert "pass quick on ipsec0 all keep state (if-bound)" in lines
+    assert "pass out quick inet proto udp to { 203.0.113.5 } port 4500 keep state (if-bound)" in lines
+    assert "pass quick inet to 192.168.1.0/24 keep state (if-bound)" in lines
+    assert "pass in quick inet from 192.168.1.0/24 keep state (if-bound)" in lines
     for ln in lines:
         if ln.startswith("pass"):
             assert "quick" in ln and ln not in ("pass quick all", "pass out quick all")

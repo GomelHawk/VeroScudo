@@ -38,6 +38,14 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
    Run it once per profile type you use (switch with the tray first). Until it has passed on a real
    machine, OpenVPN and WireGuard stay **beta**.
 
+**Still to verify live after the 2026-11-02 security review** (not provable in CI):
+- SSTP redial when the CRL cache has expired: the log must show `SSTP could not check the server certificate revocation`
+  and the next attempt must connect (the exact RAS error code for an offline revocation check is assumed, not observed).
+- `Test-Live.ps1` with an IKEv2, an L2TP and a PPTP profile too (only SSTP has a recorded run): ESP / GRE under the
+  kill-switch.
+- A manual disconnect (`rasdial /disconnect`) still disarms - it now has to name the connection id recorded at arm.
+- Linux (beta): the daemon starts under the new systemd hardening; `nft list table inet veroscudo` shows the input chain.
+
 Expected: every leak probe `False` while blocked, `dns=True` (documented), filters present
 throughout, all phases `PASS`.
 

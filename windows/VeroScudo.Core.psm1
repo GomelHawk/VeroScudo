@@ -38,6 +38,8 @@ function Get-VeroSystemDir {
     if ($Kind -eq 'ProgramFiles') { $drive + '\Program Files' } else { $drive + '\ProgramData' }
 }
 $script:Svchost      = (Get-VeroSystemDir System) + '\svchost.exe'
+$script:Rasdial      = (Get-VeroSystemDir System) + '\rasdial.exe'            # elevated callers: never resolved by name
+$script:Schtasks     = (Get-VeroSystemDir System) + '\schtasks.exe'
 $script:HomeOverride = $null                                            # tests only (Set-VeroHome); never read from the environment
 $script:UserOverride = $null                                            # tests only (Set-VeroHome -UserDir)
 $script:ReleasePrefix = 'https://github.com/GomelHawk/VeroScudo/releases/'
@@ -129,6 +131,8 @@ function Get-VeroPath {
         Renew         = Join-Path $state 'renew.json'
         Conflicts     = Join-Path $state 'conflicts.json'
         NativeBlocked = Join-Path $state 'native-blocked.json'             # Windows refused to load VeroScudo.Native.dll
+        CrlWindow     = Join-Path $state 'crl-window.json'                 # SSTP revocation check: TCP 80 briefly allowed
+        RasCoId       = Join-Path $state 'ras-coid.json'                   # connection id of the connect VeroScudo saw (System log)
         OnRefused     = Join-Path $state 'on-refused.json'                 # On refused: another VPN is connected (the tray says so)
         Foreign       = Join-Path $state 'foreign.json'                    # a VPN that is not a VeroScudo profile connected while armed
         OpenVpnDir    = Join-Path $home_ 'openvpn'
@@ -153,7 +157,7 @@ function Get-VeroPath {
         $p.OvpnConfig = Join-Path (Join-Path $home_ 'openvpn') "$safe.ovpn"   # admin-only copy made at import
         $p.OvpnStatus = Join-Path $state "ovpn-$safe.json"
         $p.OvpnStop = Join-Path $state "ovpn-$safe.stop"
-        $p.OvpnLog = Join-Path $state "ovpn-$safe.log"
+        $p.OvpnLog = Join-Path (Join-Path $home_ 'openvpn') "$safe.log"     # administrators only (it names servers and users)
         $p.OvpnPw = Join-Path $state "ovpn-$safe.pw"
     }
     $p
@@ -392,7 +396,7 @@ function Test-VeroVpnConnected {
     $c = Get-VpnConnection -Name $ProfileName -ErrorAction SilentlyContinue
     if (-not $c) { $c = Get-VpnConnection -Name $ProfileName -AllUserConnection -ErrorAction SilentlyContinue }
     if ($c) { return $c.ConnectionStatus -eq 'Connected' }
-    return ((rasdial.exe) -join ' ') -match ('\b' + [regex]::Escape($ProfileName) + '\b')
+    return ((& $script:Rasdial) -join ' ') -match ('\b' + [regex]::Escape($ProfileName) + '\b')
 }
 
 function Get-VeroRasVerdict {
@@ -424,6 +428,26 @@ function Get-VeroRasConnected {
     $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'RasMan'; Id = 20267
                                             StartTime = (Get-Date).AddMinutes(-$WithinMinutes) } -MaxEvents 1 -ErrorAction SilentlyContinue
     if ($ev -and $ev.Properties.Count -ge 3) { return [string]$ev.Properties[2].Value }
+    $null
+}
+
+function Get-VeroRasConnectedRecord {
+    <# The newest RasMan "connected" (20267, System log - ordinary users cannot write it) for a profile, with its connection id
+       (CoID). No time limit: it is the connection a later termination must belong to. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
+    $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'RasMan'; Id = 20267 } -MaxEvents 50 -ErrorAction SilentlyContinue |
+          Where-Object { $_.Properties.Count -ge 3 -and [string]$_.Properties[2].Value -eq $ProfileName } | Select-Object -First 1
+    if ($ev) { return [pscustomobject]@{ Profile = $ProfileName; CoId = [string]$ev.Properties[0].Value; Time = $ev.TimeCreated } }
+    $null
+}
+
+function Get-VeroExpectedCoId {
+    <# The connection id VeroScudo saw connect for this profile (recorded at arm), else the newest one in the System log. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
+    $f = (Get-VeroPath).RasCoId
+    if (Test-Path $f) { try { $j = Get-Content $f -Raw | ConvertFrom-Json; if ([string]$j.Profile -eq $ProfileName -and [string]$j.CoId) { return [string]$j.CoId } } catch { Write-Verbose 'ras-coid unreadable' } }
+    $r = Get-VeroRasConnectedRecord -ProfileName $ProfileName
+    if ($r) { return $r.CoId }
     $null
 }
 
@@ -461,7 +485,8 @@ function Get-VeroFilterSpec {
         [string]$TunnelType = 'Automatic',
         [string]$Svchost = $script:Svchost,
         [object[]]$Endpoints = $null,          # OpenVPN / WireGuard: @{ Ip; Proto (6|17); Port } - replaces the RAS ports above
-        [string]$EndpointApp = ''              # OpenVPN without DCO: only openvpn.exe may reach them; '' = kernel socket (no program)
+        [string]$EndpointApp = '',             # OpenVPN without DCO: only openvpn.exe may reach them; '' = kernel socket (no program)
+        [bool]$CrlWindow = $false              # SSTP only: a dial just failed on the certificate revocation check (see Open-VeroCrlWindow)
     )
     Import-VeroNative
     $C4 = [VeroScudo.Layer]::ConnectV4; $C6 = [VeroScudo.Layer]::ConnectV6
@@ -521,8 +546,8 @@ function Get-VeroFilterSpec {
     }
 
     # link maintenance: DHCP / DHCPv6 leases, IPv6 neighbour discovery on the link only
-    foreach ($l in $C4, $R4) { $null = (New-Spec 'DHCP' $l $true $permit).Protocol(17).LocalPort(68).RemotePort(67) }
-    foreach ($l in $C6, $R6) { $null = (New-Spec 'DHCPv6' $l $true $permit).Protocol(17).LocalPort(546).RemotePort(547) }
+    foreach ($l in $C4, $R4) { $null = (New-Spec 'DHCP' $l $true $permit).Protocol(17).LocalPort(68).RemotePort(67).App($Svchost) }   # the DHCP client service only
+    foreach ($l in $C6, $R6) { $null = (New-Spec 'DHCPv6' $l $true $permit).Protocol(17).LocalPort(546).RemotePort(547).App($Svchost) }
     foreach ($l in $C6, $R6) {
         $s = (New-Spec 'NDP' $l $true $permit).Protocol(58)
         foreach ($t in 133..137) { $null = $s.IcmpType([uint16]$t) }
@@ -530,18 +555,20 @@ function Get-VeroFilterSpec {
     }
 
     if (-not $TunnelLuid) {
-        # redial needs to resolve the server name and SSTP checks certificate revocation; both only through Windows' own
-        # services (svchost), DNS only to the resolvers the network handed out
+        # redial needs to resolve the server name: only through Windows' DNS client (svchost), only to the resolvers the
+        # network handed out. No resolver known yet (link coming up) = no DNS permit at all, never "port 53 anywhere".
         $dns = Split-Family $DnsServers
-        $known = (@($DnsServers | Where-Object { $_ }).Count -gt 0)            # $null-safe: no resolver known yet (link still coming up)
         foreach ($pair in @(@($C4, $dns[0]), @($C6, $dns[1]))) {
             $layer = $pair[0]; $srv = @($pair[1])
-            if ($known -and $srv.Count -eq 0) { continue }
+            if ($srv.Count -eq 0) { continue }
             $s = (New-Spec 'DNS (redial)' $layer $true $permit).Protocol(17).Protocol(6).RemotePort(53).App($Svchost)
             foreach ($ip in $srv) { $null = $s.Remote($ip) }
         }
-        if ($null -eq $Endpoints) {                                        # SSTP's revocation check: the built-in client only
-            foreach ($l in $C4, $C6) { $null = (New-Spec 'CRL (redial)' $l $true $permit).Protocol(6).RemotePort(80).App($Svchost) }
+        # SSTP's certificate revocation check (HTTP to the CA's CRL/OCSP servers, anywhere): NOT open by default - BITS,
+        # Delivery Optimization and WPAD share svchost.exe, so a standing "svchost may use TCP 80" permit is a side door.
+        # Opened only for a short window after a dial failed on exactly that check (Open-VeroCrlWindow), SSTP profiles only.
+        if ($CrlWindow -and $null -eq $Endpoints -and $TunnelType -in 'Sstp', 'Automatic') {
+            foreach ($l in $C4, $C6) { $null = (New-Spec 'CRL (redial window)' $l $true $permit).Protocol(6).RemotePort(80).App($Svchost) }
         }
     }
 
@@ -690,9 +717,18 @@ function Get-VeroTunnelType([string]$ProfileName) {
 
 function Test-VeroVmWanted {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config)
+    if ($Config.Vm -eq $false) { return $false }
+    if (-not (Get-Command Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue)) {
+        # no Hyper-V firewall (older Windows): WSL/VM traffic cannot be controlled - say so instead of silently skipping it
+        if (Get-VeroNic | Where-Object { $_.Name -like 'vEthernet*' -and [string]$_.OperationalStatus -eq 'Up' }) {
+            if (-not $script:VmWarned) { Write-VeroLog 'WARNING: virtual machines / WSL are present but this Windows has no Hyper-V firewall - their traffic is NOT covered by the kill-switch' 'core'; $script:VmWarned = $true }
+        }
+        return $false
+    }
     if ($Config.Vm -eq 'auto') { return [bool](Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue | Where-Object VMCreatorId -eq $script:WslCreator) }
     return [bool]$Config.Vm
 }
+$script:VmWarned = $false
 
 function Set-VeroVmAccess {
     <# WSL traffic is NAT-forwarded, so the host's WFP filters do not see it; the Hyper-V firewall does. While armed the WSL
@@ -879,7 +915,9 @@ function Sync-VeroKillSwitchCore {
     $wsl = if ($vm) { Get-VeroWslLuid } else { [uint64]0 }
     $dns = @(if (-not $tun) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
     $rasType = if ($type -eq 'ras') { Get-VeroTunnelType $Config.Profile } else { 'Automatic' }
-    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app
+    $crl = ($type -eq 'ras') -and (Test-VeroCrlWindow)
+    if (-not $tun -and @($dns).Count -eq 0) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
+    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl
     $fp = Get-VeroSpecFingerprint $specs
     $prev = Get-VeroAppliedState
     $present = Get-VeroWfpCount
@@ -974,7 +1012,21 @@ function Get-VeroKeyPassphrase {
     $null
 }
 
+$script:EventSettleSeconds = 3              # on-event waits this long before reading the termination records (tests: 0)
 $script:RasAuthCodes = @(691)              # "the user name and password combination is not recognized"
+# SSTP could not check the server certificate's revocation (CRL/OCSP offline): CRYPT_E_REVOCATION_OFFLINE / _NO_REVOCATION_CHECK
+$script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012)
+function Open-VeroCrlWindow {
+    <# A dial failed on the revocation check: allow svchost TCP 80 for 2 minutes so the next dial can fetch the CRL. #>
+    [CmdletBinding()] param([string]$Action = 'core')
+    @{ Until = (Get-Date).AddMinutes(2).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).CrlWindow
+    Write-VeroLog 'SSTP could not check the server certificate revocation - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can' $Action
+}
+function Test-VeroCrlWindow {
+    $f = (Get-VeroPath).CrlWindow
+    if (-not (Test-Path $f)) { return $false }
+    try { return ((Get-Date) -lt [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)) } catch { return $false }
+}
 function Invoke-VeroDial {
     <# One connection attempt for the active profile's type.
        RAS: RasDial API with the DPAPI-stored credential - the password never appears on a command line (process lists, EDR,
@@ -992,10 +1044,15 @@ function Invoke-VeroDial {
         if ($code -ne 0) { Write-Verbose "RasDial: $code" }
     } else {
         Write-VeroLog "WARNING: no stored credential for '$($Config.Profile)' (tray Settings or Set-VpnCredential.ps1) - dialing without password" $Action
-        rasdial.exe $Config.Profile 2>&1 | Out-Null
+        & $script:Rasdial $Config.Profile 2>&1 | Out-Null
         $code = $LASTEXITCODE
     }
-    if ($script:RasAuthCodes -contains [int]$code) { Set-VeroAuthFailed -ProfileName $Config.Profile -Reason "RAS error $code" -Action $Action }
+    if ($script:RasAuthCodes -contains [int64]$code) { Set-VeroAuthFailed -ProfileName $Config.Profile -Reason "RAS error $code" -Action $Action }
+    $evt = if ($code -ne 0) { Get-VeroRasCode -EventId 20227 -ProfileName $Config.Profile -WithinMinutes 1 } else { 0 }
+    if (($script:RasRevocationCodes -contains [int64]$code -or $script:RasRevocationCodes -contains [int64]$evt) -and -not (Test-VeroCrlWindow)) {
+        Open-VeroCrlWindow -Action $Action
+        Sync-VeroKillSwitch -Config $Config -Action $Action                # the next attempt can reach the CRL
+    }
 }
 
 function Invoke-VeroHangUp {
@@ -1006,7 +1063,7 @@ function Invoke-VeroHangUp {
     switch ($Type) {
         'openvpn'   { Stop-VeroOpenVpn -ProfileName $ProfileName }
         'wireguard' { Invoke-VeroWgHangUp -ProfileName $ProfileName }
-        default     { rasdial.exe $ProfileName /disconnect 2>&1 | Out-Null }
+        default     { & $script:Rasdial $ProfileName /disconnect 2>&1 | Out-Null }
     }
 }
 
@@ -1493,7 +1550,7 @@ function Invoke-VeroOpenVpnDial {
         Remove-Item $p.OvpnStop -Force -ErrorAction SilentlyContinue
         Set-VeroOpenVpnStatus $Config.Profile @{ State = 'STARTING'; Reason = ''; LocalIp = ''; Challenge = '' }   # not the last run's result
         Write-VeroLog "starting OpenVPN for '$($Config.Profile)'" $Action
-        schtasks.exe /run /tn '\VeroScudo\OpenVPN' 2>&1 | Out-Null
+        & $script:Schtasks /run /tn '\VeroScudo\OpenVPN' 2>&1 | Out-Null
     }
     $t = Get-Date
     while (((Get-Date) - $t).TotalSeconds -lt 30) {
@@ -1949,7 +2006,11 @@ function Get-VeroConflict {
             if ($mine.Count -eq 0) { continue }
             foreach ($d in @($dirs + $auto | Select-Object -Unique)) {
                 if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
-                foreach ($f in @(Get-ChildItem -LiteralPath $d -Filter '*.ovpn' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 50)) {
+                # the folder and its direct subfolders only, never through junctions/links: these folders belong to the user,
+                # and a junction to C:\ must not turn this admin-run check into a disk scan every minute
+                $where = @($d) + @(Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 20 | ForEach-Object FullName)
+                $files = @(foreach ($w in $where) { Get-ChildItem -LiteralPath $w -Filter '*.ovpn' -File -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } })
+                foreach ($f in @($files | Select-Object -First 50)) {
                     $theirs = @((Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($f.FullName)) -ReadFile { param($x) $null = $x; [byte[]]@() }).Remotes | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object
                     if ($theirs.Count -gt 0 -and (@($theirs | Where-Object { $mine -contains $_ }).Count -gt 0)) {
                         $where = if ($d -eq $auto) { 'the OpenVPN service starts it by itself' } else { "OpenVPN GUI lists it - don't connect it there" }
@@ -1967,6 +2028,12 @@ function Get-VeroConflict {
             if ($type -eq 'wireguard' -and $n -match 'WireGuard') { continue }    # the active tunnel's own filters
             if ($type -eq 'openvpn' -and $n -match 'OpenVPN') { continue }
             $items.Add("another app's filter layer is installed: '$n'")
+        }
+        # a sublayer with the same top weight as ours: WFP evaluates equal weights in no defined order, so its hard permits
+        # could be seen before our block
+        foreach ($sl in @([VeroScudo.Wfp]::SubLayers())) {
+            $parts = $sl -split '\|', 2
+            if ([int]$parts[0] -ge 0xFFFF) { $items.Add("another filter layer has the same top priority as VeroScudo's: '$($parts[1])' - its rules may win") }
         }
     } catch { Write-Verbose "WFP providers: $($_.Exception.Message)" }
     @($items | Select-Object -Unique)
@@ -2023,7 +2090,7 @@ function Disconnect-VeroForeignVpn {
     foreach ($f in @(Get-VeroForeignVpn -Config $Config)) {
         if (-not $f.CanDisconnect) { $left.Add($f); continue }             # a VPN app's own tunnel (NB: not inside the switch)
         switch ($f.Kind) {
-            'ras'       { rasdial.exe $f.Id /disconnect 2>&1 | Out-Null }
+            'ras'       { & $script:Rasdial $f.Id /disconnect 2>&1 | Out-Null }
             'wireguard' { Invoke-VeroWgHangUp -ProfileName $f.Id }
             'openvpn'   {
                 $gui = Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\bin\openvpn-gui.exe'
@@ -2116,6 +2183,9 @@ function Invoke-VeroAction {
                 Set-VeroActiveProfile -Name $c -Action $Action
                 $Config = Get-VeroConfig
             }
+            # remember WHICH connection this is: a later "you hung up" must name the same connection id (anti-forgery)
+            $rec = Get-VeroRasConnectedRecord -ProfileName $Config.Profile
+            if ($rec) { @{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.RasCoId }
             Set-VeroArmed $true $Action; Sync-VeroKillSwitch -Config $Config -Action $Action
         }
         'disarm' { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }
@@ -2149,6 +2219,9 @@ function Invoke-VeroAction {
                    if ($type -eq 'openvpn' -or (Test-VeroVpnConnected $Config.Profile -Type $type)) {
                        Invoke-VeroHangUp $Config.Profile $type; Write-VeroLog "disconnected '$($Config.Profile)' by user (off; source: VeroScudo Off)" $Action } }
         'on-event' {
+            # let RAS write all its records first: a forged 631 raced in right after a real failure must meet the real
+            # record (same connection: conflict) - and a 631 for any other connection id than the one we saw connect is refused
+            if ($script:EventSettleSeconds -gt 0) { Start-Sleep -Seconds $script:EventSettleSeconds }
             $t = Get-VeroRasTermination
             if (-not $t) { Write-VeroLog 'VPN terminated, but no recent RAS record - running a check' $Action; Invoke-VeroCheck -Action $Action; return }
             Write-VeroLog "VPN '$($t.Profile)' terminated, RAS code $($t.Code)" $Action
@@ -2157,6 +2230,13 @@ function Invoke-VeroAction {
             if (Test-VeroVpnConnected $Config.Profile) { Write-VeroLog "'$($Config.Profile)' is still connected - stale or forged event, ignored" $Action; return }
             $code = $t.Code
             if ($t.Conflict) { Write-VeroLog 'conflicting termination records for one connection (forged?) - treated as a failure' $Action; $code = 0 }
+            if ($code -eq 631) {
+                $want = Get-VeroExpectedCoId -ProfileName $t.Profile
+                if (-not $want -or [string]$t.CoId -ne $want) {
+                    Write-VeroLog ("'you hung up' record names connection {0}, but VeroScudo saw {1} connect - forged or stale, treated as a failure" -f $t.CoId, $(if ($want) { $want } else { 'none' })) $Action
+                    $code = 0
+                }
+            }
             $when = if ($t.PSObject.Properties['Time']) { $t.Time } else { $null }
             if ($code -eq 631 -and $when -and (Test-VeroRenewHangUp -Marker (Get-VeroRenewMarker) -ProfileName $t.Profile -EventTime $when)) {
                 Write-VeroLog "631 comes from VeroScudo's own hang-up for Reconnect - not your Off; stays armed" $Action; $code = 0
@@ -2243,7 +2323,7 @@ function Get-VeroLatestRelease {
     return $null
 }
 
-Export-ModuleMember -Function Get-VeroSystemDir, Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
+Export-ModuleMember -Function Get-VeroRasConnectedRecord, Get-VeroExpectedCoId, Open-VeroCrlWindow, Test-VeroCrlWindow, Get-VeroSystemDir, Get-VeroNativeRetrySeconds, Get-VeroNativeBlocked, Set-VeroNativeBlocked, Clear-VeroNativeBlocked, Test-VeroNativeRetryDue, Get-VeroForeignVpn, Format-VeroForeignVpn, Disconnect-VeroForeignVpn, Split-VeroServerAddress, ConvertTo-VeroRasEntry, Get-VeroRasSavedUser, Get-VeroWindowsVpn, Test-VeroRasPassword, Get-VeroRasDescription, ConvertTo-VeroProfileObject, Get-VeroTypeLabel, Get-VeroSwitchNotice, Get-VeroProfileType, Test-VeroElevated,
     Test-VeroNeedsPassword, Test-VeroTunnelAdapter, Protect-VeroOpenVpnDir, Test-VeroOpenVpnConf, Import-VeroOpenVpnProfile, Get-VeroOpenVpnRemote,
     Get-VeroOpenVpnExe, Get-VeroOpenVpnArgs, ConvertFrom-VeroMgmtLine, Format-VeroMgmtValue, Get-VeroStaticChallengeResponse, Get-VeroOpenVpnStatus,
     Get-VeroOpenVpnNic, Test-VeroOpenVpnRunnerAlive, Invoke-VeroOpenVpnDial, Stop-VeroOpenVpn, Invoke-VeroOpenVpnSession, Invoke-VeroOpenVpnRunner,

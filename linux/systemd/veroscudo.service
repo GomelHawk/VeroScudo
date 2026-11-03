@@ -13,6 +13,20 @@ StateDirectory=veroscudo
 # keep the reconnect lock's directory across restarts; the armed flag itself is in StateDirectory (survives reboot)
 RuntimeDirectoryPreserve=restart
 Environment=VEROSCUDO_HOME=/run/veroscudo
+# hardening: root, but only what a firewall + NetworkManager client needs (nft, nmcli over D-Bus, wg show).
+# ProtectKernelModules is NOT set on purpose: nftables loads its modules on demand.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=strict
+ReadWritePaths=/var/log
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

@@ -31,15 +31,24 @@ def _split(addrs) -> tuple[list[str], list[str]]:
     return v4, v6
 
 
+MARK = "0x5653"          # conntrack mark of flows VeroScudo allowed outside the tunnel ("VS")
+
+
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
                    dns: DnsPolicy | None = None) -> str:
-    """Default-drop output (and forward, for containers/VMs) with the documented allow-list. DNS is allowed only while
-    the tunnel is down: while it is up, name resolution goes through the tunnel like everything else (no DNS leak)."""
+    """Default-drop output, input and forward (containers/VMs) with the documented allow-list. DNS is allowed only while
+    the tunnel is down: while it is up, name resolution goes through the tunnel like everything else (no DNS leak).
+
+    Every explicit permit outside the tunnel marks its connection; established traffic is accepted only with that mark. So a
+    flow that used the tunnel (a connected UDP socket, a TCP socket bound to the tunnel address) cannot carry on over the
+    physical NIC once the tunnel is gone - it was never marked. Inbound: nothing but replies to marked flows, the tunnel,
+    DHCP replies and neighbour discovery: the host is not reachable over the physical network while armed."""
     if tun_iface is not None and not _IFNAME.match(tun_iface):
         raise ValueError(f"refusing interface name {tun_iface!r}")
     dns = dns or DnsPolicy()
     srv4, srv6 = _split(server_ips)
     lan4, lan6 = _split(cfg.lan_allow)
+    keep = f"ct mark set {MARK} accept"
     lines = [
         f"table {TABLE}",
         f"delete table {TABLE}",
@@ -47,38 +56,60 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         "  chain output {",
         "    type filter hook output priority 0; policy drop;",
         "    oifname lo accept",
-        "    ct state established,related accept",      # replies to allowed flows only; new flows still hit the rules below
     ]
     if tun_iface:
         lines.append(f'    oifname "{tun_iface}" accept')
     lines += [
-        "    udp sport 68 udp dport 67 accept",                           # DHCP
-        "    udp sport 546 udp dport 547 accept",                         # DHCPv6
+        f"    ct state established,related ct mark {MARK} accept",      # only flows VeroScudo allowed itself
+        f"    udp sport 68 udp dport 67 {keep}",                         # DHCP
+        f"    udp sport 546 udp dport 547 {keep}",                       # DHCPv6
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, mld-listener-report } accept",
     ]
     if not tun_iface:
+        # DNS only while down (to find the VPN server): the system resolver's user, else only the known resolvers -
+        # with neither known there is NO DNS permit (never "port 53 to anywhere"); the redial then uses cached addresses
         if dns.uid is not None:
-            lines += [f"    meta skuid {dns.uid} udp dport 53 accept", f"    meta skuid {dns.uid} tcp dport 53 accept"]
+            lines += [f"    meta skuid {dns.uid} udp dport 53 {keep}", f"    meta skuid {dns.uid} tcp dport 53 {keep}"]
         elif dns.servers:
             d4, d6 = _split(dns.servers)
             for fam, lst in (("ip", d4), ("ip6", d6)):
                 if lst:
-                    lines += [f"    {fam} daddr {{ {', '.join(lst)} }} udp dport 53 accept",
-                              f"    {fam} daddr {{ {', '.join(lst)} }} tcp dport 53 accept"]
-        else:
-            lines += ["    udp dport 53 accept", "    tcp dport 53 accept"]
+                    lines += [f"    {fam} daddr {{ {', '.join(lst)} }} udp dport 53 {keep}",
+                              f"    {fam} daddr {{ {', '.join(lst)} }} tcp dport 53 {keep}"]
     for fam, lst in (("ip", srv4), ("ip6", srv6)):
         if not lst:
             continue
         for proto, ports in server_rules(cfg.current):                  # VPN control/data channel + redialing, per VPN type
             if ports:
                 plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
-                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} accept")
+                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {keep}")
             else:
-                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} accept")
+                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} {keep}")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):
         for cidr in lst:
-            lines.append(f"    {fam} daddr {cidr} accept")
+            lines.append(f"    {fam} daddr {cidr} {keep}")
+    lines += [
+        "  }",
+        "  chain input {",
+        "    type filter hook input priority 0; policy drop;",
+        "    iifname lo accept",
+    ]
+    if tun_iface:
+        lines.append(f'    iifname "{tun_iface}" accept')
+    lines += [
+        f"    ct state established,related ct mark {MARK} accept",      # replies to the flows allowed above
+        "    udp sport 67 udp dport 68 accept",                           # DHCP replies (often broadcast, not tracked)
+        "    udp sport 547 udp dport 546 accept",                         # DHCPv6 replies
+        "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept",
+    ]
+    for fam, lst in (("ip", srv4), ("ip6", srv6)):                       # IPsec ESP / PPTP GRE from the server itself
+        if lst:
+            for proto, ports in server_rules(cfg.current):
+                if not ports:
+                    lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} meta l4proto {proto} accept")
+    for fam, lst in (("ip", lan4), ("ip6", lan6)):                       # lanAllow: both directions
+        for cidr in lst:
+            lines.append(f"    {fam} saddr {cidr} accept")
     lines += [
         "  }",
         "  chain forward {",
@@ -86,7 +117,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     ]
     if tun_iface and vm_allowed:
         lines.append(f'    oifname "{tun_iface}" accept')                 # containers/VMs out through the tunnel only
-        lines.append("    ct state established,related accept")
+        lines.append(f'    iifname "{tun_iface}" ct state established,related accept')
     lines += ["  }", "}", ""]
     return "\n".join(lines)
 

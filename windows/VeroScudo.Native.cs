@@ -166,6 +166,12 @@ namespace VeroScudo
             using (var e = new Engine()) return e.LayerFields(layer);
         }
 
+        /// <summary>"weight|name" of every other WFP sublayer (read-only; the conflict check warns about one with our top weight).</summary>
+        public static string[] SubLayers()
+        {
+            using (var e = new Engine()) return e.SubLayerNames();
+        }
+
         /// <summary>Display names of every other WFP provider (read-only; the conflict check looks for other VPN apps' kill-switches).</summary>
         public static string[] Providers()
         {
@@ -370,6 +376,36 @@ namespace VeroScudo
                 }
             }
             finally { Native.FwpmProviderDestroyEnumHandle0(h, en); }
+            return names.ToArray();
+        }
+
+        public string[] SubLayerNames()
+        {
+            var names = new List<string>();
+            IntPtr en;
+            Check(Native.FwpmSubLayerCreateEnumHandle0(h, IntPtr.Zero, out en), "FwpmSubLayerCreateEnumHandle0");
+            try
+            {
+                while (true)
+                {
+                    IntPtr entries; uint n;
+                    Check(Native.FwpmSubLayerEnum0(h, en, 64, out entries, out n), "FwpmSubLayerEnum0");
+                    try
+                    {
+                        for (int i = 0; i < n; i++)
+                        {
+                            IntPtr pp = Marshal.ReadIntPtr(entries, i * IntPtr.Size);
+                            var sl = (FWPM_SUBLAYER0)Marshal.PtrToStructure(pp, typeof(FWPM_SUBLAYER0));
+                            if (sl.subLayerKey == Wfp.SubLayerKey) continue;
+                            string name = sl.displayData.name != IntPtr.Zero ? Marshal.PtrToStringUni(sl.displayData.name) : sl.subLayerKey.ToString();
+                            names.Add(sl.weight.ToString() + "|" + name);
+                        }
+                    }
+                    finally { if (entries != IntPtr.Zero) Native.FwpmFreeMemory0(ref entries); }
+                    if (n < 64) break;
+                }
+            }
+            finally { Native.FwpmSubLayerDestroyEnumHandle0(h, en); }
             return names.ToArray();
         }
 
@@ -588,6 +624,9 @@ namespace VeroScudo
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderCreateEnumHandle0(IntPtr engineHandle, IntPtr enumTemplate, out IntPtr enumHandle);
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderEnum0(IntPtr engineHandle, IntPtr enumHandle, uint numEntriesRequested, out IntPtr entries, out uint numEntriesReturned);
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmProviderDestroyEnumHandle0(IntPtr engineHandle, IntPtr enumHandle);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmSubLayerCreateEnumHandle0(IntPtr engineHandle, IntPtr enumTemplate, out IntPtr enumHandle);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmSubLayerEnum0(IntPtr engineHandle, IntPtr enumHandle, uint numEntriesRequested, out IntPtr entries, out uint numEntriesReturned);
+        [DllImport("fwpuclnt.dll")] internal static extern uint FwpmSubLayerDestroyEnumHandle0(IntPtr engineHandle, IntPtr enumHandle);
         [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)] internal static extern uint FwpmGetAppIdFromFileName0(string fileName, out IntPtr appId);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceIndexToLuid(uint ifIndex, out ulong luid);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceGuidToLuid(ref Guid guid, out ulong luid);

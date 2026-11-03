@@ -127,14 +127,24 @@ IPv4 and IPv6, outbound and unsolicited inbound, and on Linux anything forwarded
 | loopback | - | always |
 | the tunnel | its interface (Windows: LUID, Linux: `oifname`, macOS: `on ipsecN`) - only the **active** profile's | while up |
 | the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows TCP/UDP only from `svchost.exe` (SstpSvc, IKEEXT, RasMan) | always (keeps the tunnel and lets it redial) |
-| DHCP / DHCPv6, IPv6 neighbour discovery (link-local only) | ports / ICMPv6 types | always |
-| DNS | UDP/TCP 53, Windows: only `svchost.exe` (DNS Client) and only to the resolvers of the up physical links; Linux: only the `systemd-resolve` user, else only the resolvers in `resolv.conf`; macOS: only those resolvers | **only while the tunnel is down** (to resolve the server) |
-| certificate revocation (Windows) | TCP 80 from `svchost.exe` (SstpSvc/CryptSvc) | only while the tunnel is down (SSTP checks it on every dial) |
+| DHCP / DHCPv6, IPv6 neighbour discovery (link-local only) | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
+| DNS | UDP/TCP 53, Windows: only `svchost.exe` (DNS Client) and only to the resolvers of the up physical links; Linux: only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; macOS: only those resolvers. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
+| certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check** (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
 | host ↔ WSL switch (Windows) | the WSL vEthernet interface (LUID, re-bound every 15 s - it changes at every boot) | always |
 | `lanAllow` ranges | each CIDR, IPv4 `/8`+ / IPv6 `/16`+ only | always |
 
 While the tunnel is up there is no DNS permit outside it: name resolution goes through the tunnel,
 so nothing is resolved by the local network's DNS server (no DNS leak).
+
+**Linux (nftables).** Every explicit permit outside the tunnel sets a conntrack mark; established traffic is accepted only
+with that mark, so a flow that used the tunnel cannot continue over the physical NIC after a drop. An `input` chain with
+policy drop admits only loopback, the tunnel, replies to marked flows, DHCP replies, neighbour discovery, ESP/GRE from the
+VPN server and `lanAllow`. **macOS (pf)**: every pass keeps its state bound to its interface (`if-bound`).
+
+**Windows: "you hung up" must name the right connection.** At arm the guard records the connection id (CoID) of the RasMan
+20267 it saw in the System log (users cannot write that log). A RasClient 20226 with code 631 counts only if it names that
+same CoID; any other id - a forged record with a fresh GUID raced in after a real failure - is a failure. The `Terminated`
+task also waits 3 s first, so a forged 631 for the real CoID meets the real record and the conflict check sees both.
 
 ### Windows: WFP, not firewall rules
 

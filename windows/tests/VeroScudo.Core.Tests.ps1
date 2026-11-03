@@ -139,11 +139,20 @@ Describe 'Get-VeroFilterSpec (the allow-list)' {
     It 'gives the catch-all block the lowest weight and every permit a higher one' {
         foreach ($s in $script:up) { if ($s.Permit) { $s.Weight | Should -BeGreaterThan 0 } else { $s.Weight | Should -Be 0 } }
     }
-    It 'scopes every permit (never a blanket accept)' {
+    It 'scopes every permit to an address, an interface or loopback - a port plus a program is not a scope' {
         foreach ($t in (Get-SpecText ($script:up + $script:down))) {
             $parts = $t -split '\|'
-            if ($parts[2] -eq 'permit') { $parts[4] | Should -Not -BeNullOrEmpty -Because "permit '$($parts[0])' must have conditions" }
+            if ($parts[2] -ne 'permit') { continue }
+            $parts[4] | Should -Not -BeNullOrEmpty -Because "permit '$($parts[0])' must have conditions"
+            if ($parts[0] -in 'DHCP', 'DHCPv6') { $parts[4] | Should -Match "$($script:F.App)=.*svchost\.exe" -Because 'DHCP: the DHCP client service only'; continue }
+            ($parts[4] -match $script:F.Addr -or $parts[4] -match $script:F.If -or $parts[4] -match $script:F.Flags) | Should -BeTrue -Because "permit '$($parts[0])' needs an address, interface or loopback: $($parts[4])"
         }
+    }
+    It 'opens TCP 80 for the SSTP revocation check only in its short window, and only for SSTP' {
+        @(Get-SpecText $script:down | Where-Object { $_ -like 'CRL*' }).Count | Should -Be 0
+        @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -DnsServers @('192.168.1.1') -TunnelType 'Sstp' -CrlWindow $true) | Where-Object { $_ -like 'CRL*' }).Count | Should -Be 2
+        @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Ikev2' -CrlWindow $true) | Where-Object { $_ -like 'CRL*' }).Count | Should -Be 0
+        @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelLuid 9 -TunnelType 'Sstp' -CrlWindow $true) | Where-Object { $_ -like 'CRL*' }).Count | Should -Be 0
     }
     It 'allows the tunnel and WSL only by their interface, and only when known' {
         @(Get-SpecText $script:up | Where-Object { $_ -like 'VPN tunnel|*' -and $_ -like "*$($script:F.If)=luid:6473924464345088*" }).Count | Should -Be 4
@@ -159,8 +168,8 @@ Describe 'Get-VeroFilterSpec (the allow-list)' {
     It 'has no server permit when nothing resolved (never a wildcard)' {
         @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @() -TunnelType 'Sstp') | Where-Object { $_ -like 'VPN server*' }).Count | Should -Be 0
     }
-    It 'allows DNS and CRL only while the tunnel is down - no DNS leak while protected' {
-        @(Get-SpecText $script:down | Where-Object { $_ -like 'DNS*' -or $_ -like 'CRL*' }).Count | Should -BeGreaterThan 0
+    It 'allows DNS only while the tunnel is down - no DNS leak while protected' {
+        @(Get-SpecText $script:down | Where-Object { $_ -like 'DNS*' }).Count | Should -BeGreaterThan 0
         @(Get-SpecText $script:up | Where-Object { $_ -like 'DNS*' -or $_ -like 'CRL*' }).Count | Should -Be 0
     }
     It 'restricts DNS to svchost and to the network-provided resolvers' {
@@ -168,10 +177,8 @@ Describe 'Get-VeroFilterSpec (the allow-list)' {
         $dns.Count | Should -Be 1                                 # IPv4 resolver only -> no IPv6 DNS permit
         $dns[0] | Should -Match "$($script:F.App)=.*svchost\.exe"; $dns[0] | Should -Match "$($script:F.Addr)=192\.168\.1\.1"; $dns[0] | Should -Match "$($script:F.RPort)=53"
     }
-    It 'falls back to svchost-only DNS when no resolver is known' {
-        $dns = @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Sstp') | Where-Object { $_ -like 'DNS*' })
-        $dns.Count | Should -Be 2
-        foreach ($d in $dns) { $d | Should -Match "$($script:F.App)=.*svchost\.exe"; $d | Should -Not -Match $script:F.Addr }
+    It 'has no DNS permit at all when no resolver is known (never port 53 to anywhere)' {
+        @(Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Sstp') | Where-Object { $_ -like 'DNS*' }).Count | Should -Be 0
     }
     It 'uses the IKEv2 ports for an IKEv2 profile' {
         $s = (Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Ikev2') | Where-Object { $_ -like 'VPN server*' }) -join "`n"
@@ -328,6 +335,8 @@ Describe 'WSL setting restore' {
 
 Describe 'on-event (mocked RAS)' {
     BeforeAll {
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroExpectedCoId { 'Z' }
         $script:cfgE = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
         Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
         Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
@@ -354,6 +363,22 @@ Describe 'on-event (mocked RAS)' {
         Invoke-VeroAction -Action on-event -Config $script:cfgE
         Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
         Test-VeroArmed | Should -BeTrue
+    }
+    It 'treats a 631 for another connection id than the one VeroScudo saw connect as a failure (raced forgery)' {
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'FRESH-GUID'; Code = 631; Conflict = $false } }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Invoke-VeroAction -Action on-event -Config $script:cfgE
+        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroReconnect -Times 1 -Exactly
+        Test-VeroArmed | Should -BeTrue
+    }
+    It 'treats a 631 as a failure when no connect of that profile was ever seen' {
+        Mock -ModuleName VeroScudo.Core Get-VeroExpectedCoId { $null }
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'Z'; Code = 631; Conflict = $false } }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Invoke-VeroAction -Action on-event -Config $script:cfgE
+        Test-VeroArmed | Should -BeTrue
+        Mock -ModuleName VeroScudo.Core Get-VeroExpectedCoId { 'Z' }
     }
     It 'disarms on a genuine 631 for the active profile' {
         Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'Z'; Code = 631; Conflict = $false } }
@@ -715,6 +740,7 @@ Describe 'Test-VeroRenewHangUp (our own hang-up is not "you hung up")' {
 
 Describe 'on-event during a Reconnect (mocked RAS)' {
     BeforeAll {
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }
         $script:cfgE2 = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
         Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
         Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
@@ -826,7 +852,8 @@ Describe 'rejected password pause regressions' {
 }
 
 Describe 'on-event ignores RAS events for other profile types' {
-    BeforeAll { Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }; Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }; Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false } }
+    BeforeAll {
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }; Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }; Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }; Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false } }
     AfterEach { Set-VeroArmed $false 'test' }
     It 'a (forged) 631 naming a WireGuard profile does not disarm' {
         Set-VeroArmed $true 'test'
@@ -1040,5 +1067,23 @@ Describe 'review of 9052eef: On while already on, and vendor tunnels' {
         $left = @(Disconnect-VeroForeignVpn -Config $script:cfgR2 -Action test)
         $left.Count | Should -Be 1
         Get-Content (Get-VeroPath).Log -Tail 3 | Where-Object { $_ -match 'disconnected:' } | Should -BeNullOrEmpty
+    }
+}
+
+
+Describe 'security review 2026-11-02' {
+    It 'resolves rasdial, schtasks and svchost to System32, not by name' {
+        InModuleScope VeroScudo.Core { $script:Rasdial } | Should -Match 'System32\\rasdial\.exe$'
+        InModuleScope VeroScudo.Core { $script:Schtasks } | Should -Match 'System32\\schtasks\.exe$'
+        InModuleScope VeroScudo.Core { $script:Svchost } | Should -Match 'System32\\svchost\.exe$'
+    }
+    It 'the CRL window opens for 2 minutes and then closes' {
+        Remove-TestFile (Get-VeroPath).CrlWindow
+        Test-VeroCrlWindow | Should -BeFalse
+        Open-VeroCrlWindow -Action test
+        Test-VeroCrlWindow | Should -BeTrue
+        @{ Until = (Get-Date).AddMinutes(-1).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).CrlWindow
+        Test-VeroCrlWindow | Should -BeFalse
+        Remove-TestFile (Get-VeroPath).CrlWindow
     }
 }

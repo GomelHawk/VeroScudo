@@ -82,7 +82,7 @@ def main() -> int:
     awake_handler = awake_item.connect("toggled", on_awake)
     upd_item = Gtk.MenuItem(label="Check for updates"); menu.append(upd_item)
     latest = {"rel": None}
-    upd_file = store.home / "update.json"
+    upd_file = keepawake.pref_file().parent / "update.json"        # the user's own folder (the run directory is root's)
 
     def check_updates(force: bool = False) -> None:
         if not force and not cfg.update_check:
@@ -106,6 +106,7 @@ def main() -> int:
             latest["rel"] = None
             upd_item.set_label("Check for updates")
         try:
+            upd_file.parent.mkdir(parents=True, exist_ok=True)
             upd_file.write_text(json.dumps(info))
         except OSError:
             pass

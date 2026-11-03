@@ -79,6 +79,10 @@ def nameservers(path: Path = Path("/etc/resolv.conf")) -> list[str]:
     return sorted(set(out))
 
 
+def nm_dns() -> list[str]:
+    return []                                 # resolvers come from resolv.conf on macOS
+
+
 def watch(profiles, on_up, on_down, interval: float = 2.0) -> None:
     """Polling: macOS has no reason code, so a drop is reported as a failure (`veroscudo off` sets its own marker)."""
     last = {p: is_connected(p) for p in profiles()}

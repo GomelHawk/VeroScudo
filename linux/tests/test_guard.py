@@ -22,6 +22,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "resolver_uid", lambda: 101)
     monkeypatch.setattr(nm, "nameservers", list)
     monkeypatch.setattr(nm, "kind", lambda p: "vpn")
+    monkeypatch.setattr(nm, "nm_dns", list)
 
     def up(p):
         calls["up"].append(p)
@@ -187,3 +188,26 @@ def test_off_wins_over_a_pending_reconnect(env):
     g.renew_marker.write_text(str(__import__("time").time()))
     g.off()
     assert not g.store.armed and not g.renew_marker.exists()
+
+
+
+def test_off_while_already_down_leaves_no_marker_that_could_disarm_a_later_drop(env):
+    g, calls, connected = env
+    g.arm()                                   # armed, tunnel down
+    g.off()                                   # no down-event follows: no marker may stay behind
+    assert not g.off_marker.exists()
+    g.arm()
+    connected.add("Work")
+    connected.discard("Work")
+    g.reconnect_async = lambda: None
+    g.on_event_down("Work", user_requested=False)   # a real failure later
+    assert g.store.armed and calls["clear"] == 1    # the one clear is from the Off above, not from this drop
+
+
+def test_a_stale_off_marker_is_ignored(env):
+    g, calls, _ = env
+    g.arm()
+    g.off_marker.write_text(str(__import__("time").time() - 3600))
+    g.reconnect_async = lambda: None
+    g.on_event_down("Work", user_requested=False)
+    assert g.store.armed and calls["clear"] == 0

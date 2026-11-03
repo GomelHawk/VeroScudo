@@ -232,6 +232,23 @@ def nameservers(path: Path = Path("/etc/resolv.conf")) -> list[str]:
     return sorted(set(out))
 
 
+def nm_dns() -> list[str]:
+    """The DNS servers NetworkManager handed out on the physical links (when resolv.conf only names a local stub such as
+    dnsmasq, unbound or Pi-hole): the only DNS destinations while blocked. No loopback."""
+    out = []
+    for line in _nmcli("-f", "IP4.DNS,IP6.DNS", "device", "show").splitlines():
+        if ":" not in line:
+            continue
+        v = unescape(line.split(":", 1)[1]).strip()
+        try:
+            a = ipaddress.ip_address(v.split("%")[0])
+        except ValueError:
+            continue
+        if not a.is_loopback:
+            out.append(str(a))
+    return sorted(set(out))
+
+
 USER_REQUESTED_REASONS = {"user-requested", "user-disconnected"}
 
 

@@ -57,7 +57,7 @@ class Guard:
     def desired_ruleset(self, tunnel_up: bool) -> str:
         cfg = self.cfg
         tun = nm.iface(cfg.profile) if tunnel_up else None
-        dns = None if tun else firewall.DnsPolicy(nm.resolver_uid(), tuple(nm.nameservers()))
+        dns = None if tun else firewall.DnsPolicy(nm.resolver_uid(), tuple(nm.nameservers() or nm.nm_dns()))
         return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and self.vm_wanted(), dns=dns)
 
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
@@ -94,6 +94,7 @@ class Guard:
 
     # ---- actions -------------------------------------------------------------
     def arm(self) -> None:
+        self.off_marker.unlink(missing_ok=True)            # a stale Off must never turn a later real drop into a disarm
         if self.store.set_armed(True):
             log.info("ARMED")
         self.enable_killswitch(nm.is_connected(self.cfg.profile))
@@ -126,6 +127,15 @@ class Guard:
             nm.down(cfg.profile)
         self.reconnect()
 
+    def _take_off_marker(self, max_age: float = 60.0) -> bool:
+        """True (once) when `veroscudo off` took the connection down within the last `max_age` seconds."""
+        try:
+            started = float(self.off_marker.read_text().strip() or 0)
+        except (OSError, ValueError):
+            return False
+        self.off_marker.unlink(missing_ok=True)
+        return time.time() - started <= max_age
+
     def _take_renew_marker(self, max_age: float = 120.0) -> bool:
         """True (once) when our own Reconnect took the connection down within the last `max_age` seconds."""
         try:
@@ -137,9 +147,11 @@ class Guard:
 
     def off(self) -> None:
         self.renew_marker.unlink(missing_ok=True)
-        self.off_marker.touch()
+        connected = nm.is_connected(self.cfg.profile)
+        if connected:                                      # only when a down-event will follow and consume it
+            self.off_marker.write_text(str(time.time()))
         self.disarm()
-        if nm.is_connected(self.cfg.profile):
+        if connected:
             nm.down(self.cfg.profile)
             log.info("disconnected '%s' by user (off)", self.cfg.profile)
 
@@ -180,7 +192,7 @@ class Guard:
         if nm.is_connected(profile):
             log.info("VPN '%s' reported down but is connected - ignored", profile)
             return
-        off = self.off_marker.exists()
+        off = self._take_off_marker()
         renewing = self._take_renew_marker()
         deliberate = off or (user_requested and not renewing)
         if renewing and not off:

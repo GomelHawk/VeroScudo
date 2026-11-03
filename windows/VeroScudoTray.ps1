@@ -277,7 +277,7 @@ function Get-State {
     }
     [pscustomobject]@{ State = $state; Title = $title; Text = $text; Armed = $armed; Connected = $up }
 }
-function Invoke-GuardTask([string]$name) { Start-Process schtasks.exe -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
+function Invoke-GuardTask([string]$name) { Start-Process (Join-Path (Get-VeroSystemDir System) 'schtasks.exe') -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
 function Get-LastEvents([int]$n = 6) { if (Test-Path $global:Paths.Log) { Get-Content $global:Paths.Log -Tail $n | ForEach-Object { $_ -replace '^\d{4}-\d\d-\d\d ', '' } } else { @() } }
 function Get-LastDrop {
     if ($global:Config -and $global:Config.Type -eq 'openvpn') { $s = Get-VeroOpenVpnStatus $global:Config.Profile; if ($s) { return ('{0}{1}' -f $s.State, $(if ($s.Reason) { ' - ' + $s.Reason })) }; return '-' }
@@ -579,7 +579,9 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
     $script = "try { Import-Module '$mod' -Force; `$list = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$imp')) | ConvertFrom-Json; foreach (`$i in @(`$list | ForEach-Object { `$_ })) { if (`$i) { `$null = Import-VeroOpenVpnProfile -ProfileName `$i.Profile -Source `$i.Source } }; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
+    # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
+    $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
+    $pr = Start-Process $psExe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
     if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
 }
 

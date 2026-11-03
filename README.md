@@ -176,9 +176,11 @@ the platform details.
 ### What is allowed while blocked
 
 Only: the tunnel itself, the VPN server's address on the profile's protocol and port (on Windows
-only from the VPN service), DHCP, and - only while redialing - DNS from the system resolver to
-the network's DNS servers and, on Windows, the certificate-revocation check the VPN service
-performs. DNS while redialing is the one documented side-channel - it is needed to resolve the
+only from the VPN service), DHCP (on Windows only from the DHCP client service), and - only while
+redialing - DNS from the system resolver to the network's DNS servers (none known: no DNS at all).
+On Windows, the SSTP certificate-revocation check (HTTP) is allowed for 2 minutes only after a
+dial failed on exactly that check. On Linux nothing reaches the machine from outside either: only
+replies to the flows above, the tunnel, DHCP replies and neighbour discovery. DNS while redialing is the one documented side-channel - it is needed to resolve the
 VPN server. Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
 ping, no IPv6, and no app gets through on the strength of its own firewall rule.
 

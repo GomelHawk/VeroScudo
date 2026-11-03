@@ -85,11 +85,11 @@ def test_config_rejects_an_unknown_vpn_type():
 
 
 @pytest.mark.parametrize("vtype,nft,pfl", [
-    ("l2tp", ["udp dport { 500, 4500, 1701 } accept", "meta l4proto esp accept"], ["proto udp to { 203.0.113.5 } port { 500 4500 1701 }", "proto esp to { 203.0.113.5 }"]),
-    ("ikev2", ["udp dport { 500, 4500 } accept", "meta l4proto esp accept"], ["port { 500 4500 }", "proto esp"]),
-    ("pptp", ["tcp dport 1723 accept", "meta l4proto gre accept"], ["proto tcp to { 203.0.113.5 } port 1723", "proto gre"]),
-    ("sstp", ["tcp dport 4443 accept"], ["proto tcp to { 203.0.113.5 } port 4443"]),
-    ("openconnect", ["tcp dport 4443 accept", "udp dport 4443 accept"], ["proto udp to { 203.0.113.5 } port 4443"]),
+    ("l2tp", ["udp dport { 500, 4500, 1701 } ct mark set", "meta l4proto esp ct mark set"], ["proto udp to { 203.0.113.5 } port { 500 4500 1701 }", "proto esp to { 203.0.113.5 }"]),
+    ("ikev2", ["udp dport { 500, 4500 } ct mark set", "meta l4proto esp ct mark set"], ["port { 500 4500 }", "proto esp"]),
+    ("pptp", ["tcp dport 1723 ct mark set", "meta l4proto gre ct mark set"], ["proto tcp to { 203.0.113.5 } port 1723", "proto gre"]),
+    ("sstp", ["tcp dport 4443 ct mark set"], ["proto tcp to { 203.0.113.5 } port 4443"]),
+    ("openconnect", ["tcp dport 4443 ct mark set", "udp dport 4443 ct mark set"], ["proto udp to { 203.0.113.5 } port 4443"]),
 ])
 def test_each_vpn_type_gets_its_own_server_rules(vtype, nft, pfl):
     cfg = Config.from_text(json.dumps({"profiles": [{"profile": "X", "server": "s.example.com", "port": 4443, "vpnType": vtype}]}))
