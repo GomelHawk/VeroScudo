@@ -1087,3 +1087,35 @@ Describe 'security review 2026-11-02' {
         Remove-TestFile (Get-VeroPath).CrlWindow
     }
 }
+
+
+Describe 'security review 2026-11-02, second pass' {
+    It 'a forged 20227 in the Application log cannot open the CRL window (only the RasDial result decides)' {
+        Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
+        Remove-TestFile (Get-VeroPath).CrlWindow
+        Mock -ModuleName VeroScudo.Core Get-VeroRasCode { -2146885613 }
+        Mock -ModuleName VeroScudo.Core Get-VeroCredential { $null }
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
+        InModuleScope VeroScudo.Core { $script:Rasdial = 'Write-Output' }        # a dial that does nothing, on any OS
+        try { Invoke-VeroDial -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}') -Action test } catch { Write-Verbose 'no rasdial here' }
+        Test-VeroCrlWindow | Should -BeFalse
+        Should -Invoke -ModuleName VeroScudo.Core Get-VeroRasCode -Times 0 -Exactly
+        InModuleScope VeroScudo.Core { $script:Rasdial = (Get-VeroSystemDir System) + '\rasdial.exe' }
+        Set-VeroHome $script:TestHomeDir
+    }
+    It 'accepts a 631 for the recorded OR the newest System-log connection id' {
+        Mock -ModuleName VeroScudo.Core Get-VeroRasConnectedRecord { [pscustomobject]@{ Profile = 'Work'; CoId = 'SECOND' } }
+        @{ Profile = 'Work'; CoId = 'FIRST' } | ConvertTo-Json | Set-Content (Get-VeroPath).RasCoId
+        $ids = @(Get-VeroExpectedCoId -ProfileName 'Work')
+        $ids | Should -Contain 'FIRST'; $ids | Should -Contain 'SECOND'
+        Remove-TestFile (Get-VeroPath).RasCoId
+    }
+    It 'never calls a Hyper-V firewall cmdlet on a Windows without it (Off and Status keep working)' {
+        InModuleScope VeroScudo.Core { $script:HyperVFw = $false }
+        Mock -ModuleName VeroScudo.Core Get-NetFirewallHyperVRule { throw 'not on this Windows' }
+        Mock -ModuleName VeroScudo.Core Set-NetFirewallHyperVVMSetting { throw 'not on this Windows' }
+        { Restore-VeroVmAccess } | Should -Not -Throw
+        { Set-VeroVmAccess -Allow $true -Action test } | Should -Not -Throw
+        InModuleScope VeroScudo.Core { $script:HyperVFw = $null }
+    }
+}

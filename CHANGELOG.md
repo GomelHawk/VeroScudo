@@ -66,6 +66,10 @@ Reserve VPN types, Reconnect, and a pause on rejected passwords.
   through it); it opens for 2 minutes only after an SSTP dial failed on the certificate revocation check.
 - Windows: a "you hung up" (631) counts only for the connection id VeroScudo saw connect in the System log, and the
   Terminated task waits 3 s so a forged record meets the real one; a 631 raced in with a fresh id no longer disarms.
+- Windows: the CRL window opens on the RasDial result only - a forged Application-log record can no longer keep it open.
+- Windows: a 631 may name the recorded connection id or the newest System-log connect (two quick connects no longer
+  turn a real Off into a failure); every Hyper-V firewall call is gated, so Off and Status work without it (Windows 10);
+  the "no DNS server known" line is logged once per change, not every 15 s.
 - Windows: no DNS permit at all when no resolver is known (was: svchost to any address); DHCP only from svchost.
 - Windows: `powershell.exe`, `schtasks.exe`, `rasdial.exe` and `wscript.exe` always by full System32 path (a bare name is
   resolved through the user's App Paths key); the installer and uninstaller take Program Files / ProgramData from the OS.

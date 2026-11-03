@@ -442,13 +442,15 @@ function Get-VeroRasConnectedRecord {
 }
 
 function Get-VeroExpectedCoId {
-    <# The connection id VeroScudo saw connect for this profile (recorded at arm), else the newest one in the System log. #>
+    <# The connection ids a "you hung up" may name: the one recorded at arm AND the newest System-log connect of the profile -
+       both are trusted sources (two connects within a second can leave the record one connection behind). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
+    $ids = @()
     $f = (Get-VeroPath).RasCoId
-    if (Test-Path $f) { try { $j = Get-Content $f -Raw | ConvertFrom-Json; if ([string]$j.Profile -eq $ProfileName -and [string]$j.CoId) { return [string]$j.CoId } } catch { Write-Verbose 'ras-coid unreadable' } }
+    if (Test-Path $f) { try { $j = Get-Content $f -Raw | ConvertFrom-Json; if ([string]$j.Profile -eq $ProfileName -and [string]$j.CoId) { $ids += [string]$j.CoId } } catch { Write-Verbose 'ras-coid unreadable' } }
     $r = Get-VeroRasConnectedRecord -ProfileName $ProfileName
-    if ($r) { return $r.CoId }
-    $null
+    if ($r -and $r.CoId) { $ids += [string]$r.CoId }
+    @($ids | Select-Object -Unique)
 }
 
 function Get-VeroRasCode {
@@ -715,10 +717,18 @@ function Get-VeroTunnelType([string]$ProfileName) {
     $script:TunnelTypes[$ProfileName]
 }
 
+$script:HyperVFw = $null
+function Test-VeroHyperVFirewall {
+    <# Does this Windows have the Hyper-V firewall (Windows 11 22H2+)? Every Hyper-V firewall call is gated by this. #>
+    if ($null -eq $script:HyperVFw) {
+        $script:HyperVFw = [bool]((Get-Command Get-NetFirewallHyperVVMCreator, Get-NetFirewallHyperVRule, Set-NetFirewallHyperVVMSetting -ErrorAction SilentlyContinue | Measure-Object).Count -ge 3)
+    }
+    $script:HyperVFw
+}
 function Test-VeroVmWanted {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config)
     if ($Config.Vm -eq $false) { return $false }
-    if (-not (Get-Command Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue)) {
+    if (-not (Test-VeroHyperVFirewall)) {
         # no Hyper-V firewall (older Windows): WSL/VM traffic cannot be controlled - say so instead of silently skipping it
         if (Get-VeroNic | Where-Object { $_.Name -like 'vEthernet*' -and [string]$_.OperationalStatus -eq 'Up' }) {
             if (-not $script:VmWarned) { Write-VeroLog 'WARNING: virtual machines / WSL are present but this Windows has no Hyper-V firewall - their traffic is NOT covered by the kill-switch' 'core'; $script:VmWarned = $true }
@@ -734,6 +744,7 @@ function Set-VeroVmAccess {
     <# WSL traffic is NAT-forwarded, so the host's WFP filters do not see it; the Hyper-V firewall does. While armed the WSL
        VM's default outbound is Block, and our allow rule is enabled only while the tunnel is up. #>
     [CmdletBinding()] param([Parameter(Mandatory)][bool]$Allow, [string]$Action = 'core')
+    if (-not (Test-VeroHyperVFirewall)) { return }
     $p = Get-VeroPath
     if (-not (Test-Path $p.VmBackup)) {
         $vs = Get-NetFirewallHyperVVMSetting -PolicyStore PersistentStore -Name $script:WslCreator -ErrorAction SilentlyContinue
@@ -761,6 +772,7 @@ function Set-VeroVmAccess {
 }
 function Restore-VeroVmAccess {
     $p = Get-VeroPath
+    if (-not (Test-VeroHyperVFirewall)) { Remove-Item $p.VmBackup -Force -ErrorAction SilentlyContinue; return }   # nothing was ever changed
     $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
     if ($r) { Remove-NetFirewallHyperVRule -Name $script:VmRule }
     if (Test-Path $p.VmBackup) {
@@ -916,7 +928,9 @@ function Sync-VeroKillSwitchCore {
     $dns = @(if (-not $tun) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
     $rasType = if ($type -eq 'ras') { Get-VeroTunnelType $Config.Profile } else { 'Automatic' }
     $crl = ($type -eq 'ras') -and (Test-VeroCrlWindow)
-    if (-not $tun -and @($dns).Count -eq 0) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
+    $noDns = (-not $tun) -and @($dns).Count -eq 0
+    if ($noDns -and -not $script:NoDnsLogged) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
+    $script:NoDnsLogged = $noDns                                              # once per change, not every 15 s
     $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl
     $fp = Get-VeroSpecFingerprint $specs
     $prev = Get-VeroAppliedState
@@ -957,6 +971,7 @@ function Sync-VeroKillSwitchCore {
     $false
 }
 $script:SyncCount = 0
+$script:NoDnsLogged = $false
 $script:VmAllowed = $null
 
 function Disable-VeroKillSwitch {
@@ -1048,8 +1063,9 @@ function Invoke-VeroDial {
         $code = $LASTEXITCODE
     }
     if ($script:RasAuthCodes -contains [int64]$code) { Set-VeroAuthFailed -ProfileName $Config.Profile -Reason "RAS error $code" -Action $Action }
-    $evt = if ($code -ne 0) { Get-VeroRasCode -EventId 20227 -ProfileName $Config.Profile -WithinMinutes 1 } else { 0 }
-    if (($script:RasRevocationCodes -contains [int64]$code -or $script:RasRevocationCodes -contains [int64]$evt) -and -not (Test-VeroCrlWindow)) {
+    # ONLY the RasDial result decides - never the Application log (RasClient 20227): ordinary users can write that log, and
+    # a forged "revocation offline" record would keep svchost's HTTP open for as long as the redial runs
+    if ($script:RasRevocationCodes -contains [int64]$code -and -not (Test-VeroCrlWindow)) {
         Open-VeroCrlWindow -Action $Action
         Sync-VeroKillSwitch -Config $Config -Action $Action                # the next attempt can reach the CRL
     }
@@ -2127,7 +2143,7 @@ function Get-VeroStatus {
     [CmdletBinding()] param($Config)
     if (-not $Config) { $Config = Get-VeroConfig }
     $p = Get-VeroPath -VpnProfile $Config.Profile
-    $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
+    $r = if (Test-VeroHyperVFirewall) { Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue } else { $null }
     $type = Get-VeroConfigType $Config
     $armed = Test-VeroArmed; $up = Test-VeroVpnConnected $Config.Profile -Type $type
     $applied = Get-VeroAppliedState
@@ -2231,9 +2247,9 @@ function Invoke-VeroAction {
             $code = $t.Code
             if ($t.Conflict) { Write-VeroLog 'conflicting termination records for one connection (forged?) - treated as a failure' $Action; $code = 0 }
             if ($code -eq 631) {
-                $want = Get-VeroExpectedCoId -ProfileName $t.Profile
-                if (-not $want -or [string]$t.CoId -ne $want) {
-                    Write-VeroLog ("'you hung up' record names connection {0}, but VeroScudo saw {1} connect - forged or stale, treated as a failure" -f $t.CoId, $(if ($want) { $want } else { 'none' })) $Action
+                $want = @(Get-VeroExpectedCoId -ProfileName $t.Profile)
+                if ($want -notcontains [string]$t.CoId) {
+                    Write-VeroLog ("'you hung up' record names connection {0}, but VeroScudo saw {1} connect - forged or stale, treated as a failure" -f $t.CoId, $(if ($want) { $want -join ' / ' } else { 'none' })) $Action
                     $code = 0
                 }
             }

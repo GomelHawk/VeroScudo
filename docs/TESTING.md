@@ -40,10 +40,14 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
 
 **Still to verify live after the 2026-11-02 security review** (not provable in CI):
 - SSTP redial when the CRL cache has expired: the log must show `SSTP could not check the server certificate revocation`
-  and the next attempt must connect (the exact RAS error code for an offline revocation check is assumed, not observed).
+  and the next attempt must connect. The window opens only on the `RasDial` return code (`0x80092013` / `0x80092012`,
+  assumed, not observed). If the live run shows a generic code instead, take the signal from the System log
+  (RasSstp provider) - never from RasClient in the Application log, which users can write.
 - `Test-Live.ps1` with an IKEv2, an L2TP and a PPTP profile too (only SSTP has a recorded run): ESP / GRE under the
   kill-switch.
-- A manual disconnect (`rasdial /disconnect`) still disarms - it now has to name the connection id recorded at arm.
+- A manual disconnect (`rasdial /disconnect`) still disarms - its 631 has to name the connection id recorded at arm or
+  the newest System-log connect of that profile.
+- On a Windows without the Hyper-V firewall (Windows 10): On, Off and Status work, and the log says VM traffic is not covered.
 - Linux (beta): the daemon starts under the new systemd hardening; `nft list table inet veroscudo` shows the input chain.
 
 Expected: every leak probe `False` while blocked, `dns=True` (documented), filters present
