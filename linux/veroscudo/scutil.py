@@ -9,8 +9,8 @@ import re
 import subprocess
 import time
 
-from .netutil import IFNAME as _IFNAME  # noqa: F401  (part of this backend's contract)
-from .netutil import nameservers, resolve  # noqa: F401
+from .netutil import IFNAME as _IFNAME
+from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's contract)
 
 
 def _status(profile: str) -> str:

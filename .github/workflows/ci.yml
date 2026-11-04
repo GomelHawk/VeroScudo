@@ -17,22 +17,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Install Pester and PSScriptAnalyzer
+      - name: Get Pester and PSScriptAnalyzer (exact versions, into the job's own folder)
+        # Save-Module, not Install-Module: the lint step runs in pwsh and the tests in Windows PowerShell 5.1, and each shell
+        # has its own module folders. A folder of the job, put first on PSModulePath in both steps, is read by both.
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          # AllUsers: the lint step runs in pwsh and the tests in Windows PowerShell 5.1 - only the machine-wide folder is on both module paths
-          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope AllUsers          # exact: a new major must be a deliberate change
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope AllUsers
+          $d = Join-Path $env:RUNNER_TEMP 'psmodules'
+          Save-Module Pester -RequiredVersion 5.7.1 -Path $d -Force                 # exact: a new major must be a deliberate change
+          Save-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Path $d -Force
       - name: Lint
         shell: pwsh
         run: |
+          $env:PSModulePath = (Join-Path $env:RUNNER_TEMP 'psmodules') + [IO.Path]::PathSeparator + $env:PSModulePath
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
           $r = Invoke-ScriptAnalyzer -Path windows -Recurse -Settings windows/PSScriptAnalyzerSettings.psd1
           $r | Format-Table -AutoSize
           if ($r | Where-Object Severity -in 'ParseError','Error','Warning') { throw "PSScriptAnalyzer found $($r.Count) issue(s)" }
       - name: Unit tests (Windows PowerShell 5.1, the runtime the guard uses)
         shell: powershell
         run: |
+          $env:PSModulePath = (Join-Path $env:RUNNER_TEMP 'psmodules') + ';' + $env:PSModulePath
           Import-Module Pester -RequiredVersion 5.7.1
           $cfg = New-PesterConfiguration
           $cfg.Run.Path = 'windows/tests'
