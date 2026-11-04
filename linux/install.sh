@@ -15,7 +15,9 @@ BIN="$(command -v veroscudo || true)"
 case "$BIN" in /*) ;; *) echo "veroscudo installed, but no 'veroscudo' command on root's PATH - is pip's bin folder on PATH?"; exit 1 ;; esac
 PY3="$(command -v python3)"
 for f in "$BIN" "$(dirname "$BIN")" "$PY3"; do
-  [ "$(stat -L -c %u "$f")" = "0" ] && [ -z "$(find -L "$f" -maxdepth 0 -perm /022)" ] || { echo "$f is not root-owned and closed to others - refusing (root would run a program others can replace)"; exit 1; }
+  if [ "$(stat -L -c %u "$f")" != "0" ] || [ -n "$(find -L "$f" -maxdepth 0 -perm /022)" ]; then
+    echo "$f is not root-owned and closed to others - refusing (root would run a program others can replace)"; exit 1
+  fi
 done
 case "$BIN$PY3" in *[!A-Za-z0-9/._-]*) echo "unexpected characters in '$BIN' / '$PY3' - refusing"; exit 1 ;; esac
 install -d -m 755 -o root -g root /etc/veroscudo /usr/share/veroscudo/icons /var/lib/veroscudo

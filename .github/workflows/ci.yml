@@ -21,8 +21,9 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser          # exact: a new major must be a deliberate change
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+          # AllUsers: the lint step runs in pwsh and the tests in Windows PowerShell 5.1 - only the machine-wide folder is on both module paths
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope AllUsers          # exact: a new major must be a deliberate change
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope AllUsers
       - name: Lint
         shell: pwsh
         run: |

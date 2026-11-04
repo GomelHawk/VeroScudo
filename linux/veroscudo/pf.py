@@ -77,7 +77,7 @@ def _run(args: list[str], **kw) -> subprocess.CompletedProcess:
 def enabled() -> bool:
     """pf itself is on. `pfctl -d` (by anyone as root, or another tool) turns it off with the anchor still listed."""
     r = _run(["-s", "info"])
-    return r.returncode == 0 and re.search(r"^Status:\s*Enabled", r.stdout, re.M) is not None
+    return r.returncode == 0 and re.search(r"^Status:\s*Enabled", r.stdout, re.MULTILINE) is not None
 
 
 def _enable() -> None:

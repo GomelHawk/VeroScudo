@@ -71,6 +71,11 @@ All notable changes to VeroScudo are recorded here. The format follows
   `VeroScudo.Core.psm1` is the loader that dot-sources them in a fixed order and exports the public functions. One
   module, one scope: callers, tests and the installed layout see the same module name as before. The installer copies
   the parts; the release archive and the signing step include them.
+- Windows: the tray's C# helpers (DPI, dark title bars, keep-awake badge, theme, menu renderer, themed message box) are
+  one file, `VeroScudo.Tray.cs`, loaded by the tray exactly as before and compiled by the unit suite, so a broken helper
+  fails the tests rather than the tray at sign-in.
+- Linux, macOS: every guard test runs against both backend pairs (nftables + NetworkManager, pf + scutil) through one
+  parametrized fixture that reads rulesets only through a backend-neutral check.
 - Windows: **the tray has unit tests.** What the tray decides - state, title and text from the guard's facts, the exit
   location line, "a state file changed", the per-user preferences, the update-notice rule - moved from the WinForms
   script into `VeroScudo.Tray.psm1` as functions with explicit inputs, tested in `tests/VeroScudo.Tray.Tests.ps1`

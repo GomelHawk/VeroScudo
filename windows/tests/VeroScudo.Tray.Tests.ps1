@@ -120,3 +120,12 @@ Describe 'Resolve-VeroUpdateNotice: the update check decision' {
         $again.Balloon | Should -BeFalse; $again.Update.Tag | Should -Be 'v9.9.9'
     }
 }
+
+Describe 'the tray native helpers (VeroScudo.Tray.cs) compile' {
+    It 'compiles with the references the tray uses and defines every class the tray calls' -Skip:($env:OS -ne 'Windows_NT') {
+        $src = Get-Content (Join-Path $PSScriptRoot '..\VeroScudo.Tray.cs') -Raw
+        { Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $src -ErrorAction Stop } | Should -Not -Throw
+        foreach ($t in 'VeroNative', 'VeroKeepAwake', 'VeroTrayIcon', 'VeroTheme', 'VeroMenuRenderer', 'VeroMsg') { ($t -as [type]) | Should -Not -BeNullOrEmpty -Because $t }
+        [VeroMsg]::Show.OverloadDefinitions.Count | Should -Be 4
+    }
+}

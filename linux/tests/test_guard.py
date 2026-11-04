@@ -1,21 +1,31 @@
-"""The guard's event handling and profile switching, with NetworkManager and nft replaced by fakes."""
+"""The guard's event handling and profile switching, with the VPN control and the firewall replaced by fakes - run once per
+backend pair: nftables + NetworkManager (Linux) and pf + scutil (macOS). The tests read the applied rulesets only through
+`calls["allows_tunnel"]`, so they know nothing about either syntax."""
 import pytest
 
-from veroscudo import daemon, firewall, nm
+from veroscudo import daemon, firewall, nm, pf, scutil
 from veroscudo.config import Config
 from veroscudo.state import StateStore
 
 MULTI = ('{"profiles":[{"profile":"Work","server":"vpn.example.com"},'
          '{"profile":"Backup","server":"vpn2.example.com","serverIps":["198.51.100.9"]}],"activeProfile":"Work"}')
+BACKENDS = {
+    "nftables": (firewall, nm, lambda rs: 'oifname "tun0"' in rs.split("chain forward")[0]),
+    "pf":       (pf, scutil, lambda rs: "pass quick on tun0 all" in rs),
+}
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    calls = {"apply": [], "up": [], "down": [], "clear": 0}
+@pytest.fixture(params=list(BACKENDS))
+def env(request, tmp_path, monkeypatch):
+    fw, vpn, allows_tunnel = BACKENDS[request.param]
+    monkeypatch.setattr(daemon, "firewall", fw)
+    monkeypatch.setattr(daemon, "nm", vpn)
+    calls = {"apply": [], "up": [], "down": [], "clear": 0, "backend": request.param, "fw": fw, "nm": vpn, "allows_tunnel": allows_tunnel}
     connected = set()
-    monkeypatch.setattr(firewall, "apply", calls["apply"].append)
-    monkeypatch.setattr(firewall, "clear", lambda: calls.__setitem__("clear", calls["clear"] + 1))
-    monkeypatch.setattr(firewall, "is_active", lambda: bool(calls["apply"]))
+    monkeypatch.setattr(fw, "apply", calls["apply"].append)
+    monkeypatch.setattr(fw, "clear", lambda: calls.__setitem__("clear", calls["clear"] + 1))
+    monkeypatch.setattr(fw, "is_active", lambda: bool(calls["apply"]))
+    nm = vpn                                                   # the rest of the fixture fakes the chosen VPN backend
     monkeypatch.setattr(nm, "is_connected", lambda p: p in connected)
     monkeypatch.setattr(nm, "iface", lambda p: "tun0" if p in connected else None)
     monkeypatch.setattr(nm, "resolve", lambda s: ["203.0.113.5"])
@@ -70,7 +80,7 @@ def test_switch_while_armed_stays_blocked_and_dials_the_new_profile(env):
     g.use("Backup")
     assert g.store.active == "Backup" and g.cfg.profile == "Backup"
     assert calls["down"] == ["Work"] and calls["up"] == ["Backup"]
-    blocked = [rs for rs in calls["apply"] if 'oifname "tun0"' not in rs.split("chain forward")[0]]
+    blocked = [rs for rs in calls["apply"] if not calls["allows_tunnel"](rs)]
     assert blocked, "a blocked ruleset must be in force between the two tunnels"
     assert "198.51.100.9" in calls["apply"][-1]            # pinned server address of the new profile
     assert g.store.armed
@@ -108,17 +118,17 @@ def test_watchdog_reapplies_a_flushed_table(env, monkeypatch):
     n = len(calls["apply"])
     g.watchdog()
     assert len(calls["apply"]) == n                        # unchanged and present -> nothing to do
-    monkeypatch.setattr(firewall, "is_active", lambda: False)
+    monkeypatch.setattr(calls["fw"], "is_active", lambda: False)
     g.watchdog()
-    assert len(calls["apply"]) == n + 1                    # `nft flush ruleset` by another tool -> back within one tick
+    assert len(calls["apply"]) == n + 1                    # `nft flush ruleset` / `pfctl -d` by another tool -> back within one tick
 
 
 def test_server_cache_merges_and_survives_a_failed_lookup(env, monkeypatch):
-    g, _, _ = env
+    g, calls, _ = env
     assert g.server_ips(g.cfg) == ["203.0.113.5"]
-    monkeypatch.setattr(nm, "resolve", lambda s: [])
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: [])
     assert g.server_ips(g.cfg) == ["203.0.113.5"]           # blocked + DNS failing: the last known address still works
-    monkeypatch.setattr(nm, "resolve", lambda s: ["203.0.113.77"])
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: ["203.0.113.77"])
     assert g.server_ips(g.cfg) == ["203.0.113.77", "203.0.113.5"]
 
 
@@ -136,11 +146,11 @@ def test_reconnect_blocks_before_taking_down_and_dials_again(env):
     connected.add("Work")
     g.arm()
     order = []
-    import veroscudo.firewall as fw
+    fw, nm = calls["fw"], calls["nm"]
     real_apply = fw.apply
 
     def apply(rs):
-        order.append("block" if 'oifname "tun0"' not in rs.split("chain forward")[0] else "allow-tunnel")
+        order.append("allow-tunnel" if calls["allows_tunnel"](rs) else "block")
         real_apply(rs)
     fw.apply = apply
     real_down = nm.down
@@ -216,7 +226,9 @@ def test_a_stale_off_marker_is_ignored(env):
 
 def test_bridges_are_in_the_ruleset_when_vm_is_wanted(env, monkeypatch):
     g, calls, connected = env
-    monkeypatch.setattr(nm, "vm_bridges", lambda: ["docker0"])
+    if calls["backend"] != "nftables":
+        pytest.skip("VMs and containers are not filtered on macOS (alpha)")
+    monkeypatch.setattr(calls["nm"], "vm_bridges", lambda: ["docker0"])
     monkeypatch.setattr(g, "vm_wanted", lambda: True)
     connected.add("Work")
     g.arm()
@@ -231,7 +243,7 @@ def test_watchdog_never_removes_a_table_another_process_just_armed(env, monkeypa
     """Issue #5 (4): the watchdog read 'disarmed', then cleared the table; a `veroscudo on` in another process that armed in
     between lost its filters - armed but open for up to 15 s. The clear now re-checks the flag under the cross-process lock."""
     import contextlib
-    g, calls, connected = env
+    g, calls, _ = env
     calls["apply"].append("a table left behind")                 # is_active() -> True while disarmed: the watchdog wants to tidy up
     real_lock = g.store.firewall_lock
 
@@ -248,15 +260,14 @@ def test_watchdog_never_removes_a_table_another_process_just_armed(env, monkeypa
 def test_firewall_lock_is_exclusive_across_processes_and_reentrant_within(env):
     import fcntl
     import os
-    g, calls, connected = env
-    with g.store.firewall_lock():
-        with g.store.firewall_lock():                            # re-entrant: arm() holds it and enable_killswitch() takes it again
-            fd = os.open(g.store.fw_lock_file, os.O_RDWR)        # a second open file description, as another process would have
-            try:
-                with pytest.raises(BlockingIOError):
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            finally:
-                os.close(fd)
+    g, _, _ = env
+    with g.store.firewall_lock(), g.store.firewall_lock():       # re-entrant: arm() holds it and enable_killswitch() takes it again
+        fd = os.open(g.store.fw_lock_file, os.O_RDWR)            # a second open file description, as another process would have
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
     fd = os.open(g.store.fw_lock_file, os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)           # released once the outermost block ends
@@ -266,7 +277,7 @@ def test_firewall_lock_is_exclusive_across_processes_and_reentrant_within(env):
 
 
 def test_user_off_still_clears_even_if_a_stale_table_exists(env):
-    g, calls, connected = env
+    g, calls, _ = env
     g.arm()
     g.disarm()
     assert calls["clear"] == 1 and not g.store.armed

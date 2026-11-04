@@ -1,5 +1,6 @@
-from veroscudo import daemon, firewall
 import pytest
+
+from veroscudo import daemon, firewall
 from veroscudo.config import Config
 from veroscudo.state import StateStore
 

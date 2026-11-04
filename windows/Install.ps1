@@ -173,7 +173,7 @@ if (Test-Path -LiteralPath $oldDll) {
 }
 
 # --- program files
-foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Tray.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1', 'config.example.json') {
+foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Tray.psm1', 'VeroScudo.Native.cs', 'VeroScudo.Tray.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1', 'config.example.json') {
     Copy-Item (Join-Path $Src $f) (Join-Path $InstallDir $f) -Force
 }
 # the module's parts (Core\*.ps1): the module lists the files it loads, so copy exactly those

@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 
 from .config import Config, server_rules
-from .netutil import IFNAME  # noqa: F401  (re-exported for the pf backend)
+from .netutil import IFNAME  # also re-exported for the pf backend
 
 TABLE = "inet veroscudo"
 

@@ -13,12 +13,14 @@ BIN="$PREFIX/bin/veroscudo"
 # Apple's python3 only (root-owned): the venv's interpreter is what the root daemon runs. `command -v python3` could find
 # Homebrew's, which the user owns on Intel Macs - the same swap problem as /usr/local, one level down.
 PYTHON=/usr/bin/python3
-[ -x "$PYTHON" ] && "$PYTHON" -c 'import venv' 2>/dev/null || { echo "missing: Apple's python3 - run: xcode-select --install"; exit 1; }
+if ! { [ -x "$PYTHON" ] && "$PYTHON" -c 'import venv' 2>/dev/null; }; then echo "missing: Apple's python3 - run: xcode-select --install"; exit 1; fi
 
 install -d -m 755 -o root -g wheel /opt "$PREFIX" "$PREFIX/bin" /etc/veroscudo /var/lib/veroscudo
 # every folder the daemon and the sudo rule run from must be root's and not writable by others - refuse otherwise
 for d in /opt "$PREFIX" "$PREFIX/bin"; do
-  [ "$(stat -f %u "$d")" = "0" ] && [ -z "$(find "$d" -maxdepth 0 -perm +022)" ] || { echo "$d is not root-owned and closed to others - refusing (an owner could swap the program the root daemon runs)"; exit 1; }
+  if [ "$(stat -f %u "$d")" != "0" ] || [ -n "$(find "$d" -maxdepth 0 -perm +022)" ]; then
+    echo "$d is not root-owned and closed to others - refusing (an owner could swap the program the root daemon runs)"; exit 1
+  fi
 done
 "$PYTHON" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$HERE/../linux"
@@ -28,10 +30,10 @@ chown -R root:wheel "$PREFIX"
 rm -rf /usr/local/lib/veroscudo
 [ -L /usr/local/bin/veroscudo ] && rm -f /usr/local/bin/veroscudo
 # a convenience link only where /usr/local/bin already exists and is root's: the installer never creates or chowns it
-RULE_PATHS="$BIN"
+RULE_PATHS=("$BIN")
 if [ -d /usr/local/bin ] && [ "$(stat -f %u /usr/local/bin)" = "0" ]; then
   ln -sfh "$BIN" /usr/local/bin/veroscudo
-  RULE_PATHS="$BIN /usr/local/bin/veroscudo"
+  RULE_PATHS+=(/usr/local/bin/veroscudo)
 fi
 
 if [ ! -f /etc/veroscudo/config.json ]; then
@@ -60,7 +62,7 @@ launchctl bootstrap system /Library/LaunchDaemons/com.gomelhawk.veroscudo.plist
 
 # passwordless only for the four user actions, only by root-owned paths
 RULE=""
-for b in $RULE_PATHS; do
+for b in "${RULE_PATHS[@]}"; do
   for a in on off reconnect "use *"; do RULE="$RULE${RULE:+, }$b $a"; done
 done
 cat > /etc/sudoers.d/veroscudo.tmp <<EOF

@@ -31,4 +31,4 @@ else:
 check_contract(nm, VPN_API)
 check_contract(firewall, FIREWALL_API)
 
-__all__ = ["firewall", "nm", "VPN_API", "FIREWALL_API", "check_contract"]
+__all__ = ["FIREWALL_API", "VPN_API", "check_contract", "firewall", "nm"]

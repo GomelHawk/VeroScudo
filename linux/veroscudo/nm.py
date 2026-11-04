@@ -8,7 +8,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from .netutil import IFNAME as _IFNAME, nameservers, resolve  # noqa: F401  (part of this backend's contract)
+from .netutil import IFNAME as _IFNAME  # noqa: F401  (part of this backend's contract)
+from .netutil import nameservers, resolve  # noqa: F401
+
 SYS_NET = Path("/sys/class/net")
 
 
