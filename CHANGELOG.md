@@ -3,9 +3,13 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
-## [Unreleased]
+## [1.3.0] - 2026-11-04
 
-Reserve VPN types, Reconnect, and a pause on rejected passwords.
+Reserve VPN types (OpenVPN, WireGuard - beta), every Windows VPN type armed, Reconnect, import from Windows, a working
+IKEv2 kill-switch, profile switching you can rely on, and the exit location in the tray.
+
+Tested live on Windows 11 (Windows VPN: SSTP and IKEv2; OpenVPN; WireGuard). Linux (beta) and macOS (alpha) changes are
+covered by unit tests only.
 
 ### Windows
 - **Profile types** (beta): besides Windows' built-in client (`ras`, still the stable default), a profile can be
