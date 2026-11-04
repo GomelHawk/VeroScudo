@@ -109,6 +109,11 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 4. Connect the VPN - from Windows, or with the **VeroScudo On** shortcut. The shield in the
    tray turns green. Done.
 
+**IKEv2 on a PC with several user accounts:** Windows logs an IKEv2 connect only in the Application log, which every
+local account can write. VeroScudo's defence against a forged "you hung up" record is therefore weaker for IKEv2 than for
+SSTP, L2TP or PPTP: another local user could make a real drop look like your Off. On a single-user PC this does not
+apply; on a shared one prefer SSTP or L2TP (see docs/SECURITY.md).
+
 **More Windows VPN profiles:** tray > **Settings** > **Import from Windows...** lists every VPN of Windows Settings >
 VPN (also those created for all users) with the type, server and sign-in VeroScudo found - Automatic, IKEv2, SSTP,
 L2TP/IPsec with certificate or pre-shared key, PPTP - and adds the one you choose (one per import: not every VPN

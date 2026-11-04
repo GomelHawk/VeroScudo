@@ -663,17 +663,17 @@ function New-VpnProfileForm($entry) {
         $name = $cb.Text.Trim(); $user = $tUser.Text.Trim(); $pins = if ($entry) { @($entry.ServerIps) } else { @() }
         if (-not $name) { [VeroMsg]::Show('A profile name is required.', 'VeroScudo') | Out-Null; return }
         if ($t -eq 'openvpn') {
-            $import = $null; $auth = $state.Auth
+            $import = $null; $importText = $null; $auth = $state.Auth
             if ($tFile.Text.Trim() -or -not $entry) {
                 $src = $tFile.Text.Trim()
                 if (-not $src -or -not (Test-Path -LiteralPath $src)) { [VeroMsg]::Show('Choose the .ovpn file to import.', 'VeroScudo') | Out-Null; return }
                 $r = Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($src)) -BaseDir (Split-Path -Parent $src)
                 if ($r.Errors.Count -gt 0) { [VeroMsg]::Show("This config cannot be used:`r`n`r`n" + ($r.Errors -join "`r`n"), 'VeroScudo - OpenVPN config') | Out-Null; return }
                 if (-not (Show-Check "OpenVPN config $([IO.Path]::GetFileName($src)):" $r.Warnings)) { return }
-                $import = $src; $auth = $r.Auth
+                $import = $src; $importText = $r.Text; $auth = $r.Auth      # the complete text, inlined here as you - the elevated save gets text, never a path
             }
             if ($auth -and -not $user) { [VeroMsg]::Show('This OpenVPN config asks for a username and password: enter the username.', 'VeroScudo') | Out-Null; return }
-            $res.Value = [pscustomobject]@{ Profile = $name; Type = 'openvpn'; Server = ''; Port = 1194; Username = $user; ServerIps = @(); Auth = $auth; Dco = $chkDco.Checked; ImportFrom = $import }
+            $res.Value = [pscustomobject]@{ Profile = $name; Type = 'openvpn'; Server = ''; Port = 1194; Username = $user; ServerIps = @(); Auth = $auth; Dco = $chkDco.Checked; ImportFrom = $import; ImportText = $importText }
         } else {
             $port = 0
             if (-not $tServer.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [VeroMsg]::Show('Server and port are required.', 'VeroScudo') | Out-Null; return }
@@ -697,20 +697,27 @@ function Edit-VpnProfile($entry) {
 
 function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     <# The tray runs without admin rights: config.json is written by an elevated PowerShell (UAC prompt) that validates it
-       again. The JSON travels Base64-encoded inside -EncodedCommand - no temp file another process could swap. OpenVPN
-       configs to import ({ Profile; Source }) are read, checked and stored by that same elevated process, before the config. #>
+       again. Everything it needs - the config text and the OpenVPN configs to import ({ Profile; Text }, inlined here as
+       the user) - goes in one payload file in the user's own folder; the elevated side reads that file, checks all of it
+       and writes. Why a file: a command line is visible to every local process and to audit logs, and it is too short for
+       a config with inlined keys. Why text, not paths: an elevated process must not open files a non-elevated one chose. #>
     $null = Get-VeroConfig -Raw $json                                       # validate here first for a readable error
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-    $imp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($imports | ForEach-Object { @{ Profile = $_.Profile; Source = $_.Source } }) -Depth 3 -Compress)))
-    $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
-    # the elevated child pins its module path first (a planted module in the user's Documents would otherwise run as admin)
-    $sysMods = "`$env:PSModulePath = `"`$PSHOME\Modules;`" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'); "
-    $script = $sysMods + "try { Import-Module '$mod' -Force; `$list = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$imp')) | ConvertFrom-Json; foreach (`$i in @(`$list | ForEach-Object { `$_ })) { if (`$i) { `$null = Import-VeroOpenVpnProfile -ProfileName `$i.Profile -Source `$i.Source } }; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
-    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
-    $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
-    $pr = Start-Process $psExe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
-    if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
+    $payload = @{ Config = $json; Imports = @($imports | ForEach-Object { @{ Profile = [string]$_.Profile; Text = [string]$_.Text } }) } | ConvertTo-Json -Depth 4 -Compress
+    New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null
+    $file = Join-Path $global:Paths.UserDir ('save-' + [guid]::NewGuid().ToString('N') + '.json')
+    [IO.File]::WriteAllText($file, $payload, (New-Object Text.UTF8Encoding($false)))
+    try {
+        $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
+        $arg = $file -replace "'", "''"
+        # the elevated child pins its module path first (a planted module in the user's Documents would otherwise run as admin)
+        $sysMods = "`$env:PSModulePath = `"`$PSHOME\Modules;`" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'); "
+        $script = $sysMods + "try { Import-Module '$mod' -Force; Import-VeroSavePayload -Path '$arg'; exit 0 } catch { exit 1 }"
+        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
+        $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
+        $pr = Start-Process $psExe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
+        if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
+    } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }   # the tray's own payload file, nothing else
 }
 
 $global:SettingsForm = $null
@@ -720,7 +727,7 @@ function Show-Settings {
     New-Label $f 'VPN profiles' 20 16 200 22 $FontBold | Out-Null
     $card = New-Card $f 20 42 480 300
     $work = New-Object System.Collections.ArrayList
-    if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } })) } }
+    if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } }, @{ n = 'ImportText'; e = { $null } })) } }
     $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }); Use = $null }
     $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 284 276); $lb.BorderStyle = 'FixedSingle'
     $lb.BackColor = $global:Theme.Bg; $lb.ForeColor = $global:Theme.Text; $lb.Font = $FontUI; $lb.IntegralHeight = $false
@@ -793,7 +800,7 @@ function Show-Settings {
             retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
         } | ConvertTo-Json -Depth 6
-        $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Source = $_.ImportFrom } })
+        $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Text = $_.ImportText } })
         try {
             Save-ConfigElevated $json $imports; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close()
             # Save never moves you off a connection (seen live: an edit while the WireGuard app's tunnel ran switched to the

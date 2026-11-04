@@ -143,11 +143,9 @@ function Invoke-VeroActionWatchdog {
     [CmdletBinding()] param([string]$Action = 'watchdog')
     # long-running, exactly one per session: the task re-triggers every minute so a crashed loop is back within a minute,
     # and every extra start exits here at once (the launcher returning early once let one loop pile up per minute)
-    # the name is per home folder: a unit test (Set-VeroHome to a temp folder) must never meet the installed watchdog's mutex
-    $single = New-Object System.Threading.Mutex($false, ('Local\VeroScudo-Watchdog' + $(if ($script:HomeOverride) { '-' + ($script:HomeOverride -replace '[^A-Za-z0-9]', '') })))
-    $mine = $false
-    try { $mine = $single.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $mine = $true }
-    if (-not $mine) { $single.Dispose(); return }
+    # a lock file in the state folder (per home, so a unit test with a temp home never meets the installed watchdog's lock)
+    $single = Enter-VeroSingleton -Name 'watchdog'
+    if (-not $single) { return }
     try {
         if (-not (Test-VeroNativeRetryDue (Get-VeroNativeBlocked))) { return }      # helper blocked: not yet time to retry
         while ($true) {
@@ -160,7 +158,7 @@ function Invoke-VeroActionWatchdog {
             }
             Start-Sleep -Seconds 15
         }
-    } finally { $single.ReleaseMutex(); $single.Dispose() }
+    } finally { $single.Dispose() }
 }
 
 function Invoke-VeroActionSwitch {

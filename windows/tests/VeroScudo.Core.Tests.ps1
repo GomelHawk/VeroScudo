@@ -1464,6 +1464,66 @@ Describe 'profile types: one handler per type (the dispatch table)' {
     }
 }
 
+Describe 'one holder per lock (files in the administrators-only locks folder, not named mutexes)' {
+    It 'the first holder wins, a second call fails until the handle is disposed' {
+        $a = Enter-VeroSingleton -Name 'unit-test'
+        $a | Should -Not -BeNullOrEmpty
+        Enter-VeroSingleton -Name 'unit-test' | Should -BeNullOrEmpty
+        Test-VeroSingletonHeld -Name 'unit-test' | Should -BeTrue
+        $a.Dispose()
+        Test-VeroSingletonHeld -Name 'unit-test' | Should -BeFalse
+        $b = Enter-VeroSingleton -Name 'unit-test'
+        $b | Should -Not -BeNullOrEmpty; $b.Dispose()
+    }
+    It 'waits up to the given time, then gives up' {
+        $a = Enter-VeroSingleton -Name 'unit-wait'
+        $t = [Diagnostics.Stopwatch]::StartNew()
+        Enter-VeroSingleton -Name 'unit-wait' -WaitMs 500 | Should -BeNullOrEmpty
+        $t.ElapsedMilliseconds | Should -BeGreaterOrEqual 400
+        $a.Dispose()
+    }
+    It 'the lock files live under the state folder of this (test) home' {
+        (& (Get-Module VeroScudo.Core) { Get-VeroLockDir }) | Should -Be (Join-Path (Get-VeroPath).State 'locks')
+    }
+}
+
+Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads one file, text only' {
+    BeforeAll {
+        Mock -ModuleName VeroScudo.Core Import-VeroOpenVpnText { }
+        Mock -ModuleName VeroScudo.Core Save-VeroConfig { }
+    }
+    It 'imports every OpenVPN text, then saves the config' {
+        $f = Join-Path (Get-VeroPath).State 'payload.json'
+        @{ Config = $script:cfgJson; Imports = @(@{ Profile = 'ovpn'; Text = "client`ndev tun" }) } | ConvertTo-Json -Depth 4 | Set-Content $f
+        Import-VeroSavePayload -Path $f
+        Should -Invoke -ModuleName VeroScudo.Core Import-VeroOpenVpnText -Times 1 -Exactly -ParameterFilter { $ProfileName -eq 'ovpn' -and $Text -eq "client`ndev tun" }
+        Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 1 -Exactly -ParameterFilter { $Json -eq $script:cfgJson }
+        Remove-TestFile $f
+    }
+    It 'a payload without a config, or no file, is refused before anything is written' {
+        $f = Join-Path (Get-VeroPath).State 'payload2.json'
+        '{"Imports":[]}' | Set-Content $f
+        { Import-VeroSavePayload -Path $f } | Should -Throw '*without a config*'
+        { Import-VeroSavePayload -Path (Join-Path (Get-VeroPath).State 'missing.json') } | Should -Throw
+        Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 0 -Exactly
+        Remove-TestFile $f
+    }
+}
+
+Describe 'Import-VeroOpenVpnText: stores a complete config after checking it as a whole' {
+    BeforeAll { Mock -ModuleName VeroScudo.Core Protect-VeroOpenVpnDir { } }
+    It 'writes the checked text to the profile''s admin copy and refuses a file reference left in it' {
+        $text = "client`ndev tun`nremote vpn.example.com 1194`n<ca>`n-----BEGIN CERTIFICATE-----`nAAAA`n-----END CERTIFICATE-----`n</ca>`n"
+        $dst = (Get-VeroPath -VpnProfile 'ovpn-text').OvpnConfig
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+        $r = Import-VeroOpenVpnText -ProfileName 'ovpn-text' -Text $text
+        $r.Remotes.Count | Should -Be 1
+        (Get-Content $dst -Raw) | Should -Match 'remote vpn.example.com 1194'
+        { Import-VeroOpenVpnText -ProfileName 'ovpn-text' -Text "client`ndev tun`nremote vpn.example.com 1194`nca C:\somewhere\ca.crt`n" } | Should -Throw '*refused*'
+        Remove-TestFile $dst
+    }
+}
+
 Describe 'Resolve-VeroTerminationCode (pure: when a 631 is really "you hung up")' {
     BeforeAll {
         $script:now = Get-Date

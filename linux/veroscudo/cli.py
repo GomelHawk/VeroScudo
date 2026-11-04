@@ -22,8 +22,11 @@ LOG = "/var/log/veroscudo.log"
 def _setup_logging() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     try:
+        path = os.environ.get("VEROSCUDO_LOG", LOG)
+        if not os.path.exists(path):                     # created by root: readable by root only (profile names, servers, decisions)
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o640))
         # bounded like the Windows log: 2 MB + one rotated copy
-        handlers.append(logging.handlers.RotatingFileHandler(os.environ.get("VEROSCUDO_LOG", LOG), maxBytes=2 * 1024 * 1024, backupCount=1))
+        handlers.append(logging.handlers.RotatingFileHandler(path, maxBytes=2 * 1024 * 1024, backupCount=1))
     except OSError:
         pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
@@ -38,7 +41,9 @@ def status(cfg: Config, store: StateStore) -> int:
     print(f"armed      : {armed}")
     print(f"connected  : {up}")
     print(f"state      : {state}")
-    print(f"killswitch : {'active' if firewall.is_active() else 'inactive'}")
+    # asking the firewall needs root: for a user the answer would always be "inactive", which is wrong and alarming
+    ks = ("active" if firewall.is_active() else "inactive") if os.geteuid() == 0 else "unknown (run with sudo to see it)"
+    print(f"killswitch : {ks}")
     print(f"tunnel     : {nm.iface(cfg.profile) or '-'}")
     print(f"reconnect  : {store.lock_alive()}")
     others = nm.other_tunnels(nm.iface(cfg.profile))

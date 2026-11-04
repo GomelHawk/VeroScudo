@@ -6,6 +6,9 @@ param([string]$InstallDir = '', [switch]$Purge)
 # module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
 # System folders only, before anything else is loaded (-NoProfile does not cover this).
 $env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
+# the signed-in user's folders are removed below: with over-the-shoulder UAC this session is another account - refuse, like Install.ps1
+$console = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+if ($console -and $console -ne "$env:USERDOMAIN\$env:USERNAME") { throw "signed in as '$console', but this elevated session runs as '$env:USERDOMAIN\$env:USERNAME' - run Uninstall.ps1 from the signed-in administrator account." }
 # system folders from the OS and HKLM, never from environment variables (this runs elevated with your environment)
 function Get-SysFolder([string]$Name, [string]$Key) {
     $drive = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\')

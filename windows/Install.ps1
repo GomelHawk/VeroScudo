@@ -185,7 +185,8 @@ foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'Core') -Filter '*.p
 $dll = Join-Path $InstallDir 'VeroScudo.Native.dll'
 $compileStart = Get-Date
 if (Test-Path -LiteralPath $dll) { Remove-Item -LiteralPath $dll -Force }   # no SilentlyContinue: a locked old DLL must stop the install
-$compile = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$InstallDir\VeroScudo.Native.cs')) -Language CSharp -OutputAssembly '$dll' -OutputType Library"
+$q = { param($s) $s -replace "'", "''" }                                                   # a quote in a path must not end the string
+$compile = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$(& $q "$InstallDir\VeroScudo.Native.cs")')) -Language CSharp -OutputAssembly '$(& $q $dll)' -OutputType Library"
 & "$Sys\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile
 # a DLL that is not brand new is the OLD one: never report INSTALL OK with a helper that does not match the scripts
 if (-not (Test-Path -LiteralPath $dll) -or (Get-Item -LiteralPath $dll).LastWriteTime -lt $compileStart.AddSeconds(-2)) { throw "native helper was not compiled: $dll" }

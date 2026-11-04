@@ -231,6 +231,21 @@ function Get-VeroProfileType {
 }
 
 $script:Elevated = $null
+function Import-VeroSavePayload {
+    <# The elevated half of the tray's Save: one JSON file { Config = <config.json text>; Imports = [ { Profile; Text } ] }.
+       Every import is checked and stored (Import-VeroOpenVpnText), then the config is validated and written. The file holds
+       what the tray produced as the user; nothing in it is trusted - it is checked here as if typed by hand. A reparse point
+       at the path is refused (the elevated side opens exactly the file, never a link to somewhere else). #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing a link at $Path" }
+    $payload = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    if (-not $payload -or -not $payload.PSObject.Properties['Config']) { throw 'save payload without a config' }
+    $imports = @(if ($payload.PSObject.Properties['Imports']) { $payload.Imports } else { @() }) | Where-Object { $_ }
+    foreach ($i in $imports) { $null = Import-VeroOpenVpnText -ProfileName ([string]$i.Profile) -Text ([string]$i.Text) }
+    Save-VeroConfig -Json ([string]$payload.Config) | Out-Null
+}
+
 function Test-VeroElevated {
     if ($null -eq $script:Elevated) {
         try { $script:Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }

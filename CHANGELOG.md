@@ -42,6 +42,19 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Release: the tag name reaches the workflows only as environment data and must look like a version; CI installs
   Pester and PSScriptAnalyzer at exact versions.
 
+- Windows: **the elevated save reads text, never a path the tray chose.** The tray inlines an OpenVPN config's key files
+  as the user and hands the complete text to the elevated side, which checks it as a whole and stores it; an elevated
+  process no longer opens files a non-elevated one picked. The config and the imports travel in one payload file in
+  the user's own folder instead of the elevated process's command line (visible to every local process and to audit
+  logs, and too short for inlined keys).
+- Windows: the guard's single-instance locks (watchdog, filter sync, OpenVPN runner) are exclusive file handles in an
+  administrators-only folder instead of named mutexes, which any process of the account could have created first and
+  so stalled self-repair and redial for good.
+- Windows: `Uninstall.ps1` refuses over-the-shoulder UAC like the installer (it removes the signed-in user's folders).
+- Linux: `veroscudo status` without root says the kill-switch state is unknown instead of "inactive"; the log file is
+  created readable by root only.
+- Documented: IKEv2's "you hung up" defence is weaker on a PC with several accounts (README, SECURITY.md).
+
 ### Fixed
 - Linux: **Docker and libvirt networking broke while armed, even with the tunnel up** (B5 of the review). The forward
   chain let containers out through the tunnel, but policy drop in all three chains cut everything that stays on the

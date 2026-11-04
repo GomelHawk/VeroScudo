@@ -420,14 +420,11 @@ function Sync-VeroKillSwitch {
 function Invoke-VeroLocked([scriptblock]$Script, [object[]]$Arguments = @()) {
     <# Applying and removing filters never overlap (watchdog, event tasks and On/Off run in parallel processes). Seen live:
        a slow disarm finished after a re-arm had applied its filters and left an armed machine without any. #>
-    $mutex = New-Object System.Threading.Mutex($false, 'Local\VeroScudo-Sync')
-    $owned = $false
+    $held = Enter-VeroSingleton -Name 'sync' -WaitMs 60000                 # after a minute: go ahead anyway (as before)
     try {
-        try { $owned = $mutex.WaitOne(60000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
         & $Script @Arguments                       # values passed explicitly, not read from the caller's scope
     } finally {
-        if ($owned) { $mutex.ReleaseMutex() }
-        $mutex.Dispose()
+        if ($held) { $held.Dispose() }
     }
 }
 
