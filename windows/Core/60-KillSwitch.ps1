@@ -17,9 +17,12 @@ function Get-VeroFilterSpec {
         [string]$Svchost = $script:Svchost,
         [object[]]$Endpoints = $null,          # OpenVPN / WireGuard: @{ Ip; Proto (6|17); Port } - replaces the RAS ports above
         [string]$EndpointApp = '',             # OpenVPN without DCO: only openvpn.exe may reach them; '' = kernel socket (no program)
-        [bool]$CrlWindow = $false              # SSTP only: a dial just failed on the certificate revocation check (see Open-VeroCrlWindow)
+        [bool]$CrlWindow = $false,             # SSTP only: a dial just failed on the certificate revocation check (see Open-VeroCrlWindow)
+        [string]$PermitKind = ''               # 'server': ServerIps on the tunnel type's ports (built-in client) | 'endpoints': Endpoints (OpenVPN, WireGuard)
     )
     Import-VeroNative
+    if (-not $PermitKind) { $PermitKind = if ($null -ne $Endpoints) { 'endpoints' } else { 'server' } }   # older callers and tests
+    if ($PermitKind -notin 'server', 'endpoints') { throw "PermitKind must be 'server' or 'endpoints'" }
     $C4 = [VeroScudo.Layer]::ConnectV4; $C6 = [VeroScudo.Layer]::ConnectV6
     $R4 = [VeroScudo.Layer]::RecvAcceptV4; $R6 = [VeroScudo.Layer]::RecvAcceptV6
     $specs = New-Object 'System.Collections.Generic.List[VeroScudo.FilterSpec]'
@@ -38,7 +41,7 @@ function Get-VeroFilterSpec {
     if ($WslLuid)    { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'WSL switch' $l $true $permit).Interface($WslLuid) } }
 
     # the VPN server: only the protocol/ports of the profile's tunnel type; TCP/UDP only from svchost (SstpSvc, IKEEXT, RasMan)
-    if ($null -ne $Endpoints) { $ServerIps = @() }                          # reserve types: their own endpoints below
+    if ($PermitKind -eq 'endpoints') { $ServerIps = @() }                   # reserve types: their own endpoints below
     $fam = Split-Family $ServerIps
     # IKEv2 data: Windows hands each packet of the tunnel to the firewall as an IP-in-IP flow to the server (protocol 4,
     # protocol 41 for IPv6 inside) before IPsec encrypts it. Without these the tunnel connects and carries nothing (seen live
@@ -65,8 +68,8 @@ function Get-VeroFilterSpec {
     }
 
     # OpenVPN / WireGuard: each server address only on its own protocol and port (one permit per protocol/port pair)
-    if ($null -ne $Endpoints) {
-        $groups = @($Endpoints | Where-Object { $_ -and $_.Ip } | Group-Object { '{0}/{1}' -f $_.Proto, $_.Port } | Sort-Object Name)
+    if ($PermitKind -eq 'endpoints') {
+        $groups = @(@($Endpoints) | Where-Object { $_ -and $_.Ip } | Group-Object { '{0}/{1}' -f $_.Proto, $_.Port } | Sort-Object Name)
         foreach ($g in $groups) {
             $first = $g.Group[0]
             $ips = Split-Family @($g.Group | ForEach-Object { [string]$_.Ip } | Select-Object -Unique | Sort-Object)
@@ -102,7 +105,7 @@ function Get-VeroFilterSpec {
         # SSTP's certificate revocation check (HTTP to the CA's CRL/OCSP servers, anywhere): NOT open by default - BITS,
         # Delivery Optimization and WPAD share svchost.exe, so a standing "svchost may use TCP 80" permit is a side door.
         # Opened only for a short window after a dial failed on exactly that check (Open-VeroCrlWindow), SSTP profiles only.
-        if ($CrlWindow -and $null -eq $Endpoints -and $TunnelType -in 'Sstp', 'Automatic') {
+        if ($CrlWindow -and $PermitKind -eq 'server' -and $TunnelType -in 'Sstp', 'Automatic') {
             foreach ($l in $C4, $C6) { $null = (New-Spec 'CRL (redial window)' $l $true $permit).Protocol(6).RemotePort(80).App($Svchost) }
         }
     }
@@ -451,7 +454,7 @@ function Get-VeroSyncPlan {
     $noDns = (-not $tun) -and @($dns).Count -eq 0
     if ($noDns -and -not $script:NoDnsLogged) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
     $script:NoDnsLogged = $noDns                                              # once per change, not every 15 s
-    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl
+    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind
     @{ Type = $type; Handler = $th; ForceDown = [bool]$ForceDown; Tunnel = $tun; Ips = @($ips); Dns = @($dns); Vm = $vm; Wsl = $wsl; Specs = @($specs) }
 }
 

@@ -5,14 +5,11 @@ the macOS keychain. macOS reports no "user hung up" reason, so every drop is tre
 blocked and redials until `sudo veroscudo off` - strict, never open."""
 from __future__ import annotations
 
-import ipaddress
 import re
-import socket
 import subprocess
 import time
-from pathlib import Path
 
-_IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+from .netutil import IFNAME as _IFNAME, nameservers, resolve  # noqa: F401  (part of this backend's contract)
 
 
 def _status(profile: str) -> str:
@@ -50,33 +47,8 @@ def down(profile: str) -> bool:
     return r.returncode == 0
 
 
-def resolve(server: str) -> list[str]:
-    try:
-        return sorted({ai[4][0] for ai in socket.getaddrinfo(server, None, socket.AF_UNSPEC)
-                       if not ipaddress.ip_address(ai[4][0].split("%")[0]).is_link_local})
-    except OSError:
-        return []
-
-
 def resolver_uid() -> int | None:
     return None                               # pf matches users only on local sockets; DNS is scoped by destination instead
-
-
-def nameservers(path: Path = Path("/etc/resolv.conf")) -> list[str]:
-    out = []
-    try:
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] == "nameserver":
-                try:
-                    a = ipaddress.ip_address(parts[1].split("%")[0])
-                except ValueError:
-                    continue
-                if not a.is_loopback:
-                    out.append(str(a))
-    except OSError:
-        pass
-    return sorted(set(out))
 
 
 def nm_dns() -> list[str]:

@@ -114,16 +114,15 @@ function Get-VeroConfig {
         $type = ([string](Get-Prop $p 'type')).ToLowerInvariant()
         if (-not $type) { $type = 'ras' }
         if ($script:Types -notcontains $type) { throw "config.json: type must be 'ras', 'openvpn' or 'wireguard' (profile '$name')" }
-        # WireGuard names its tunnel service after the tunnel: the same rule as the WireGuard app (and safe on a command line)
-        if ($type -eq 'wireguard' -and $name -notmatch '^[A-Za-z0-9_=+.-]{1,32}$') { throw "config.json: a WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . - (profile '$name')" }
+        $th = Get-VeroTypeHandler $type                                     # the type's rules: name shape, server, username, defaults
+        if ($th.NamePattern -and $name -notmatch $th.NamePattern) { throw "config.json: $($th.NameHint) (profile '$name')" }
         $server = [string](Get-Prop $p 'server')
-        if (-not $server -and $type -ne 'openvpn') { throw "config.json: vpn.server is required (profile '$name')" }   # OpenVPN: the 'remote' lines
+        if (-not $server -and $th.ServerRequired) { throw "config.json: vpn.server is required (profile '$name')" }
         if ($server -and -not (Test-VeroHost $server)) { throw "config.json: invalid server '$server' (profile '$name')" }
         $user = [string](Get-Prop $p 'username')
         $authSet = $null -ne (Get-Prop $p 'auth')
-        if (-not $user -and $type -eq 'ras' -and -not ($authSet -and -not [bool]$p.auth)) { throw "config.json: vpn.username is required (profile '$name')" }
+        if (-not $user -and $th.UsernameRequired -and -not ($authSet -and -not [bool]$p.auth)) { throw "config.json: vpn.username is required (profile '$name')" }
         if ($user.Length -gt 256 -or $user -match '[\x00-\x1f"]') { throw "config.json: invalid username (profile '$name')" }
-        $th = Get-VeroTypeHandler $type
         $defPort = $th.DefaultPort
         $port = if ($null -ne (Get-Prop $p 'port')) { [int]$p.port } else { $defPort }
         if ($port -lt 1 -or $port -gt 65535) { throw "config.json: port must be 1-65535 (profile '$name')" }
@@ -198,17 +197,14 @@ function ConvertTo-VeroProfileObject {
     <# One profile entry in its on-disk form (shared by the installer, the tray and Save-VeroConfig). #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Entry)
     $type = if ($Entry.PSObject.Properties['Type'] -and $Entry.Type) { [string]$Entry.Type } else { 'ras' }
+    $th = Get-VeroTypeHandler $type
     $o = [ordered]@{ profile = $Entry.Profile }
-    if ($type -ne 'ras') { $o.type = $type }
+    if ($th.OnDiskType) { $o.type = $type }                                 # the built-in client is the default and stays implicit
     if ($Entry.Server) { $o.server = $Entry.Server }
-    if ($type -ne 'openvpn') { $o.port = $Entry.Port }
+    if ($th.OnDiskPort) { $o.port = $Entry.Port }
     if ($Entry.Username) { $o.username = $Entry.Username }
     if (@($Entry.ServerIps | Where-Object { $_ }).Count -gt 0) { $o.serverIps = @($Entry.ServerIps) }
-    if ($type -eq 'ras' -and $Entry.PSObject.Properties['Auth'] -and -not $Entry.Auth) { $o.auth = $false }     # certificate sign-in
-    if ($type -eq 'openvpn') {
-        $o.auth = if ($Entry.PSObject.Properties['Auth']) { [bool]$Entry.Auth } else { $true }
-        if ($Entry.PSObject.Properties['Dco'] -and $Entry.Dco) { $o.dco = $true }
-    }
+    & $th.OnDiskAuth $Entry $o                                              # the type's own keys (auth, dco)
     $o
 }
 

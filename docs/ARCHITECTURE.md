@@ -52,6 +52,21 @@ platform's VPN subsystem, never from heuristics:
 | Windows, OpenVPN profile | the runner reads `>STATE:...,CONNECTED` on the management interface | `>STATE:...,EXITING` / the process ends | only VeroScudo's own `signal SIGTERM` (Off, switch, Reconnect) - any other end is a failure |
 | Windows, WireGuard profile | watchdog: the tunnel service started (WireGuard app) | service stopped / crashed, or no handshake for 3 min | the service was **removed** (deactivated in the WireGuard app) while VeroScudo was not reconnecting it |
 
+## Timing windows
+
+Both guards remember two things for a short time and consume the note on first use: *you pressed Off* (the next
+down-event is deliberate) and *VeroScudo hung up for Reconnect* (the next down-event is not your Off). The windows differ
+because the platforms report differently, and each value was chosen for its platform, not copied:
+
+| | Windows (`windows/Core`) | Linux / macOS (`daemon.py`) |
+|---|---|---|
+| after Off, nothing re-arms by itself | 30 s (`Test-VeroRecentOff`) | the off marker explains the down-event for 60 s (`OFF_MARKER_SECONDS`) |
+| own hang-up for Reconnect | until 30 s after the hang-up finished, marker at most 5 min old (`Test-VeroRenewHangUp`) | 120 s (`RENEW_MARKER_SECONDS`) |
+
+RAS writes its records with a delay and VeroScudo waits 3 s before reading them, so the Windows rule is tied to the
+recorded hang-up time; NetworkManager delivers the deactivation at once, so the Python guard needs only a margin for a
+slow D-Bus or a laptop that was asleep. Changing either value needs a live test on that platform.
+
 ## Profile types (Windows)
 
 Every profile has a `type`; the guard, the filters, the watchdog and the tray are shared, and each type supplies five

@@ -6,11 +6,16 @@
 # module functions by name (tests mock those) and are invoked as `& $h.Op args`. Built last: every function exists by now.
 # Keys: Label, DefaultPort, PasswordCapable (asks for / stores a password), HasDco (OpenVPN kernel data channel option),
 # OwnLayer (the client's own WFP layer name, expected while its tunnel runs), HangUpOnOffAlways (Off ends the client even
-# mid-connect), SwitchNotice, IsConnected, TunnelLuid, ServerPermit (@{ Ips; Endpoints; App } for the filters),
-# ResolveIps, RasTunnelType, CrlWindow, Dial, HangUp, DialFailure, StatusDetail, ForeignText, ForeignHangUp.
+# mid-connect); config rules NamePattern/NameHint, ServerRequired, UsernameRequired; on-disk form OnDiskType, OnDiskPort,
+# OnDiskAuth (the type's own keys); SwitchNotice, IsConnected, TunnelLuid, ServerPermit (@{ Kind; Ips; Endpoints; App }
+# for the filters), ResolveIps, RasTunnelType, CrlWindow, Dial, HangUp, DialFailure, StatusDetail, ServerText (what the
+# profile names, for status), ForeignText, ForeignHangUp.
 $script:TypeHandler = @{
     ras = @{
         Label = 'Windows VPN'; DefaultPort = 443; PasswordCapable = $true; HasDco = $false; OwnLayer = $null; HangUpOnOffAlways = $false
+        NamePattern = $null; NameHint = ''; ServerRequired = $true; UsernameRequired = $true; OnDiskType = $false; OnDiskPort = $true
+        OnDiskAuth    = { param($Entry, $o) if ($Entry.PSObject.Properties['Auth'] -and -not $Entry.Auth) { $o.auth = $false } }   # certificate sign-in
+        ServerText    = { param($Config) $Config.Server }
         SwitchNotice  = { $null }
         IsConnected   = { param($ProfileName) Test-VeroRasConnected $ProfileName }
         TunnelLuid    = { param($ProfileName) Get-VeroRasTunnelLuid $ProfileName }
@@ -27,6 +32,9 @@ $script:TypeHandler = @{
     }
     openvpn = @{
         Label = 'OpenVPN'; DefaultPort = 1194; PasswordCapable = $true; HasDco = $true; OwnLayer = 'OpenVPN'; HangUpOnOffAlways = $true
+        NamePattern = $null; NameHint = ''; ServerRequired = $false; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $false   # server/port: the .ovpn's remote lines
+        OnDiskAuth    = { param($Entry, $o) $o.auth = if ($Entry.PSObject.Properties['Auth']) { [bool]$Entry.Auth } else { $true }; if ($Entry.PSObject.Properties['Dco'] -and $Entry.Dco) { $o.dco = $true } }
+        ServerText    = { param($Config) (@(try { Get-VeroOpenVpnRemote -ProfileName $Config.Profile } catch { @() }) | ForEach-Object { '{0}:{1}/{2}' -f $_.Host, $_.Port, $_.Proto }) -join ' ' }
         SwitchNotice  = { param($ProfileName) "'$ProfileName' is an OpenVPN profile. VeroScudo controls this connection: don't connect or disconnect it from OpenVPN GUI - use VeroScudo's On, Off and Reconnect." }
         IsConnected   = { param($ProfileName) [bool](Get-VeroOpenVpnNic $ProfileName) }
         # only the adapter that holds the address OpenVPN reported - never a physical NIC
@@ -44,6 +52,11 @@ $script:TypeHandler = @{
     }
     wireguard = @{
         Label = 'WireGuard'; DefaultPort = 51820; PasswordCapable = $false; HasDco = $false; OwnLayer = 'WireGuard'; HangUpOnOffAlways = $false
+        # WireGuard names its tunnel service after the tunnel: the same rule as the WireGuard app (and safe on a command line)
+        NamePattern = '^[A-Za-z0-9_=+.-]{1,32}$'; NameHint = 'a WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -'
+        ServerRequired = $true; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $true
+        OnDiskAuth    = { }                                                   # no password, no DCO: nothing of its own on disk
+        ServerText    = { param($Config) $Config.Server }
         SwitchNotice  = { param($ProfileName) "'$ProfileName' is a WireGuard profile. A dead WireGuard link is noticed after 1-3 minutes, not seconds; you stay blocked until it reconnects. Prefer a Windows VPN profile when you can." }
         IsConnected   = { param($ProfileName) (Get-VeroWgHealthNow $ProfileName) -eq 'up' }
         # allowed while its service runs, even before the first handshake - app traffic is what starts a handshake when no
@@ -76,7 +89,7 @@ function Get-VeroRasServerPermit {
     $ips = @(Resolve-VeroServerIp -Config $Config -CacheOnly)
     if ($ips.Count -eq 0) { $ips = @(Resolve-VeroServerIp -Config $Config) }                   # first run: nothing cached yet
     if ($ips.Count -eq 0) { Write-VeroLog "WARNING: cannot resolve $($Config.Server) and no cached IP - redial cannot reach it" $Action }
-    @{ Ips = $ips; Endpoints = $null; App = '' }
+    @{ Kind = 'server'; Ips = $ips; Endpoints = $null; App = '' }
 }
 function Get-VeroEndpointPermit {
     <# OpenVPN / WireGuard: the endpoints @{ Ip; Proto; Port } the filters may let the client reach. -Program: only from the
@@ -91,5 +104,5 @@ function Get-VeroEndpointPermit {
         $app = Get-VeroOpenVpnExe
         if (-not $app) { $eps = @() }
     }
-    @{ Ips = $ips; Endpoints = $eps; App = [string]$app }
+    @{ Kind = 'endpoints'; Ips = $ips; Endpoints = $eps; App = [string]$app }
 }

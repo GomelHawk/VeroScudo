@@ -5,14 +5,13 @@ a drop here is final whatever other tables (ufw, docker, firewalld) accept."""
 from __future__ import annotations
 
 import ipaddress
-import re
 import subprocess
 from dataclasses import dataclass, field
 
 from .config import Config, server_rules
+from .netutil import IFNAME  # noqa: F401  (re-exported for the pf backend)
 
 TABLE = "inet veroscudo"
-IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")        # shared with the pf backend
 
 
 @dataclass(frozen=True)

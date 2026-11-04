@@ -1,10 +1,13 @@
 """The state machine shared with the other platforms. Pure except for the flag files."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
 import sys
+import threading
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 
@@ -64,6 +67,30 @@ class StateStore:
         self.active_file = self.state / "active-profile"
         self.lock = self.home / "reconnect.lock"
         self.server_ip = self.state / "server.ip"           # 1.0 single-profile cache, read as a fallback
+        self.fw_lock_file = self.home / "firewall.lock"     # see firewall_lock()
+        self._fw_rlock = threading.RLock()
+        self._fw_depth = 0
+        self._fw_fd: int | None = None
+
+    @contextmanager
+    def firewall_lock(self):
+        """Around every 'read the armed flag, then change the firewall': an flock in /run/veroscudo (every root process of
+        VeroScudo - the daemon's watchdog, `veroscudo on` in another shell, the boot unit) plus a re-entrant thread lock.
+        Without it the watchdog could read 'disarmed', a concurrent `on` arm and apply its table, and the watchdog then
+        remove that table: armed but open until the next pass."""
+        with self._fw_rlock:
+            if self._fw_depth == 0:
+                self._fw_fd = os.open(self.fw_lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+                fcntl.flock(self._fw_fd, fcntl.LOCK_EX)
+            self._fw_depth += 1
+            try:
+                yield
+            finally:
+                self._fw_depth -= 1
+                if self._fw_depth == 0 and self._fw_fd is not None:
+                    fcntl.flock(self._fw_fd, fcntl.LOCK_UN)
+                    os.close(self._fw_fd)
+                    self._fw_fd = None
 
     def server_cache(self, profile: str) -> Path:
         return self.state / f"server-{safe_name(profile)}.ip"

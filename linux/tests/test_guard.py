@@ -225,3 +225,48 @@ def test_bridges_are_in_the_ruleset_when_vm_is_wanted(env, monkeypatch):
     monkeypatch.setattr(g, "vm_wanted", lambda: False)                 # "vm": false - containers get nothing
     g.enable_killswitch(True)
     assert "docker0" not in calls["apply"][-1]
+
+
+def test_watchdog_never_removes_a_table_another_process_just_armed(env, monkeypatch):
+    """Issue #5 (4): the watchdog read 'disarmed', then cleared the table; a `veroscudo on` in another process that armed in
+    between lost its filters - armed but open for up to 15 s. The clear now re-checks the flag under the cross-process lock."""
+    import contextlib
+    g, calls, connected = env
+    calls["apply"].append("a table left behind")                 # is_active() -> True while disarmed: the watchdog wants to tidy up
+    real_lock = g.store.firewall_lock
+
+    @contextlib.contextmanager
+    def other_process_armed_first():
+        with real_lock():
+            g.store.set_armed(True)                              # the other process held the lock before us and armed
+            yield
+    monkeypatch.setattr(g.store, "firewall_lock", other_process_armed_first)
+    g.watchdog()
+    assert calls["clear"] == 0 and g.store.armed
+
+
+def test_firewall_lock_is_exclusive_across_processes_and_reentrant_within(env):
+    import fcntl
+    import os
+    g, calls, connected = env
+    with g.store.firewall_lock():
+        with g.store.firewall_lock():                            # re-entrant: arm() holds it and enable_killswitch() takes it again
+            fd = os.open(g.store.fw_lock_file, os.O_RDWR)        # a second open file description, as another process would have
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+    fd = os.open(g.store.fw_lock_file, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)           # released once the outermost block ends
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def test_user_off_still_clears_even_if_a_stale_table_exists(env):
+    g, calls, connected = env
+    g.arm()
+    g.disarm()
+    assert calls["clear"] == 1 and not g.store.armed

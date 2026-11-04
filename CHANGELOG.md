@@ -28,6 +28,20 @@ All notable changes to VeroScudo are recorded here. The format follows
 - macOS: `pfctl -d` was not noticed - the anchor's rules stayed listed, status said *active*, nothing was enforced until
   reboot. `is_active` now requires pf to be enabled, and the watchdog enables it again within 15 s.
 
+### Security (issue #5, second review of 1.3.0)
+- Linux, macOS: **a `veroscudo on` racing the daemon's watchdog could lose its filters.** The watchdog read "disarmed",
+  then cleared the table; an `on` in another process that armed in between was undone - armed but open until the next
+  pass (15 s). Every "read the armed flag, then apply or clear" now runs under one cross-process `flock` in
+  `/run/veroscudo`, and the watchdog's tidy-up re-checks the flag under it.
+- Windows: the installer refuses to continue when the account that elevated is not the signed-in one (over-the-shoulder
+  UAC): the tasks, the tray and the DPAPI credential would belong to two accounts, and the real user would get no redial
+  and no tray. The signed-in user must be an administrator; README says so.
+- Linux: the installer checks for pip up front, puts the command pip actually installed (`/usr/local/bin` on Debian,
+  `/usr/bin` on Arch) into the units and the sudoers rule, and refuses a command or interpreter that is not root's and
+  closed to others.
+- Release: the tag name reaches the workflows only as environment data and must look like a version; CI installs
+  Pester and PSScriptAnalyzer at exact versions.
+
 ### Fixed
 - Linux: **Docker and libvirt networking broke while armed, even with the tunnel up** (B5 of the review). The forward
   chain let containers out through the tunnel, but policy drop in all three chains cut everything that stays on the
@@ -63,6 +77,14 @@ All notable changes to VeroScudo are recorded here. The format follows
   (6 groups). `VeroScudoTray.ps1` calls them with its globals and only draws.
 - CI: PSScriptAnalyzer now fails on parse errors too (the settings listed Error and Warning only, so a script that no
   test imports - installer, tray - could have shipped unparseable).
+- Windows: the anti-forgery rule for a "you hung up" record is one pure function, `Resolve-VeroTerminationCode`
+  (conflicting records, VeroScudo's own hang-up, a connection id never seen connecting), tested on its own; the filter
+  spec takes the permit kind explicitly (`server` / `endpoints`) instead of reading it from `$null` vs `@()`; the
+  type's config rules (name shape, server, username) and its on-disk keys live in the handler table, used by config.json
+  validation and the tray's profile editor alike; the status line's server text is its own function.
+- Linux, macOS: the DNS and resolver helpers both VPN backends copied are one module (`netutil.py`); the daemon's two
+  marker readers and two cache readers are one each; the timing windows are named constants, documented next to the
+  Windows ones (docs/ARCHITECTURE.md, "Timing windows").
 - Linux, macOS: the backend contract (the VPN-control and firewall functions the shared code may call) is declared in
   `backend.py` and checked at startup on both platforms, and a test keeps the shared code inside it; the pf backend
   reuses the nftables backend's address helpers (one copy); the tray takes its VPN backend from `backend.py` like the

@@ -96,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         # fail closed: an armed machine must not boot open because config.json is missing or broken. The daemon exits too
         # (launchd/systemd restart it), so the lockdown stays until the file is fixed and `veroscudo on` is run again.
         if a.action in ("boot", "daemon") and store.armed:
-            firewall.apply(firewall.render_lockdown())
+            with store.firewall_lock():
+                firewall.apply(firewall.render_lockdown())
             logging.getLogger("veroscudo").error("config.json unusable (%s) - armed: everything but DHCP is blocked until it is fixed", e)
             return 2
         print(f"veroscudo: {e}", file=sys.stderr)

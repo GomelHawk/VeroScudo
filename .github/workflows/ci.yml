@@ -21,8 +21,8 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser          # exact: a new major must be a deliberate change
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
       - name: Lint
         shell: pwsh
         run: |
@@ -32,7 +32,7 @@ jobs:
       - name: Unit tests (Windows PowerShell 5.1, the runtime the guard uses)
         shell: powershell
         run: |
-          Import-Module Pester -MinimumVersion 5.5
+          Import-Module Pester -RequiredVersion 5.7.1
           $cfg = New-PesterConfiguration
           $cfg.Run.Path = 'windows/tests'
           $cfg.Run.Exit = $true

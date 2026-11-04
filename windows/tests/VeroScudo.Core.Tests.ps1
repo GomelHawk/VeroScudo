@@ -400,6 +400,38 @@ Describe 'on-event (mocked RAS)' {
     }
 }
 
+Describe 'on-event during a Reconnect (mocked RAS)' {
+    BeforeAll {
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }
+        $script:cfgE2 = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+    }
+    AfterEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).Renew }
+    It 'treats the 631 of our own hang-up as a failure: stays armed and redials' {
+        Set-VeroArmed $true 'test'
+        Set-VeroRenewMarker -ProfileName 'Work'; Set-VeroRenewMarker -ProfileName 'Work' -HungUp
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'R'; Code = 631; Conflict = $false; Time = (Get-Date) } }
+        Invoke-VeroAction -Action on-event -Config $script:cfgE2
+        Test-VeroArmed | Should -BeTrue
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroReconnect -Times 1 -Exactly
+    }
+}
+
+Describe 'on-event ignores RAS events for other profile types' {
+    BeforeAll {
+        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }; Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }; Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }; Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false } }
+    AfterEach { Set-VeroArmed $false 'test' }
+    It 'a (forged) 631 naming a WireGuard profile does not disarm' {
+        Set-VeroArmed $true 'test'
+        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'wg'; CoId = 'F'; Code = 631; Conflict = $false; Time = (Get-Date) } }
+        Invoke-VeroAction -Action on-event -Config (Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com"}]}')
+        Test-VeroArmed | Should -BeTrue
+        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
+    }
+}
+
 Describe 'Invoke-VeroSwitch (mocked)' {
     BeforeAll {
         Set-Content (Get-VeroPath).Config $script:multiJson
@@ -755,25 +787,6 @@ Describe 'Test-VeroRenewHangUp (our own hang-up is not "you hung up")' {
     It 'ignores no marker' { Test-VeroRenewHangUp -Marker $null -ProfileName 'Work' -EventTime $script:now | Should -BeFalse }
 }
 
-Describe 'on-event during a Reconnect (mocked RAS)' {
-    BeforeAll {
-        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }
-        $script:cfgE2 = Get-VeroConfig -Raw '{"vpn":{"profile":"Work","server":"s","username":"u"}}'
-        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
-        Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }
-        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
-    }
-    AfterEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).Renew }
-    It 'treats the 631 of our own hang-up as a failure: stays armed and redials' {
-        Set-VeroArmed $true 'test'
-        Set-VeroRenewMarker -ProfileName 'Work'; Set-VeroRenewMarker -ProfileName 'Work' -HungUp
-        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'Work'; CoId = 'R'; Code = 631; Conflict = $false; Time = (Get-Date) } }
-        Invoke-VeroAction -Action on-event -Config $script:cfgE2
-        Test-VeroArmed | Should -BeTrue
-        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroReconnect -Times 1 -Exactly
-    }
-}
-
 Describe 'rejected password pauses the redial' {
     BeforeAll {
         Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
@@ -865,19 +878,6 @@ Describe 'rejected password pause regressions' {
         Set-Content $p.KeyPass 'kp'; (Get-Item $p.KeyPass).LastWriteTimeUtc = (Get-Item $p.AuthFail).LastWriteTimeUtc.AddSeconds(5)
         Test-VeroAuthBlocked 'Work' | Should -BeFalse
         Remove-TestFile $p.AuthFail, $p.Cred, $p.KeyPass
-    }
-}
-
-Describe 'on-event ignores RAS events for other profile types' {
-    BeforeAll {
-        InModuleScope VeroScudo.Core { $script:EventSettleSeconds = 0 }; Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }; Mock -ModuleName VeroScudo.Core Invoke-VeroReconnect { }; Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false } }
-    AfterEach { Set-VeroArmed $false 'test' }
-    It 'a (forged) 631 naming a WireGuard profile does not disarm' {
-        Set-VeroArmed $true 'test'
-        Mock -ModuleName VeroScudo.Core Get-VeroRasTermination { [pscustomobject]@{ Profile = 'wg'; CoId = 'F'; Code = 631; Conflict = $false; Time = (Get-Date) } }
-        Invoke-VeroAction -Action on-event -Config (Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com"}]}')
-        Test-VeroArmed | Should -BeTrue
-        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 0 -Exactly
     }
 }
 
@@ -1100,8 +1100,8 @@ Describe 'On while already on, and vendor tunnels' {
     }
 }
 
-
-Describe 'security review 2026-11-02' {
+# review of 2026-11-02
+Describe 'executables by full System32 path, and the CRL window' {
     It 'resolves rasdial, schtasks and svchost to System32, not by name' {
         InModuleScope VeroScudo.Core { $script:Rasdial } | Should -Match 'System32\\rasdial\.exe$'
         InModuleScope VeroScudo.Core { $script:Schtasks } | Should -Match 'System32\\schtasks\.exe$'
@@ -1118,8 +1118,8 @@ Describe 'security review 2026-11-02' {
     }
 }
 
-
-Describe 'security review 2026-11-02, second pass' {
+# review of 2026-11-02, second pass
+Describe 'CRL window from the RasDial result only; a 631 by connection id; no Hyper-V cmdlets without Hyper-V' {
     It 'a forged 20227 in the Application log cannot open the CRL window (only the RasDial result decides)' {
         Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
         Remove-TestFile (Get-VeroPath).CrlWindow
@@ -1219,7 +1219,8 @@ Describe 'Update-VeroRasWatch: any Windows VPN type arms, whatever Windows logge
     }
 }
 
-Describe 'a VPN server that moved (live 2026-11-03: vpn.corp.example.com changed address)' {
+# seen live 2026-11-03: the server changed address, the cache kept the old one
+Describe 'a VPN server that moved: fresh lookup before arming and after a failed redial' {
     BeforeAll { $script:cfgM = Get-VeroConfig -Raw '{"profiles":[{"profile":"CorporateVPN","server":"vpn.corp.example.com","username":"u"}]}' }
     AfterEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).Lock }
     It 'looks the server up before arming (no filters yet), not only from the cache' {
@@ -1249,7 +1250,8 @@ Describe 'a VPN server that moved (live 2026-11-03: vpn.corp.example.com changed
     }
 }
 
-Describe 'switching and Off (live 2026-11-03)' {
+# seen live 2026-11-03
+Describe 'switching hangs up the old tunnel first; nothing re-arms right after Off' {
     BeforeAll {
         Set-Content (Get-VeroPath).Config '{"profiles":[{"profile":"CorporateVPN","server":"a.example.com","username":"u"},{"profile":"PrivateVPN","server":"b.example.com","username":"u"}],"activeProfile":"CorporateVPN"}'
         Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { }
@@ -1292,7 +1294,8 @@ Describe 'Off during a redial' {
     }
 }
 
-Describe 'Get-VeroRasConnected after a switch (live 2026-11-03)' {
+# seen live 2026-11-03
+Describe 'Get-VeroRasConnected takes the newest connect record' {
     It 'takes the newer connect record: IKEv2 PrivateVPN (RasClient only) over the older SSTP CorporateVPN (RasMan)' {
         Mock -ModuleName VeroScudo.Core Get-WinEvent { [pscustomobject]@{ TimeCreated = (Get-Date).AddSeconds(-25); Properties = @([pscustomobject]@{ Value = '{A}' }, [pscustomobject]@{ Value = 'u' }, [pscustomobject]@{ Value = 'CorporateVPN' }) } }
         Mock -ModuleName VeroScudo.Core Get-VeroRasClientConnect { [pscustomobject]@{ Profile = 'PrivateVPN'; CoId = '{B}'; Time = (Get-Date).AddSeconds(-2) } }
@@ -1302,7 +1305,8 @@ Describe 'Get-VeroRasConnected after a switch (live 2026-11-03)' {
     }
 }
 
-Describe 'Resolve-VeroServerIp cache (live 2026-11-03: status showed "server -> , , ,")' {
+# seen live 2026-11-03: status showed "server -> , , ,"
+Describe 'Resolve-VeroServerIp cache returns plain strings' {
     It 'returns plain strings, so wfp.json and the status list the addresses themselves' {
         $f = Join-Path $TestDrive 'server.ip'
         Set-Content -Path $f -Value '203.0.113.10', '203.0.113.20'
@@ -1355,7 +1359,8 @@ Describe "VeroScudo's own OpenVPN adapter" {
     }
 }
 
-Describe 'a profile you choose wins over a running redial (live 2026-11-04)' {
+# seen live 2026-11-04
+Describe 'a profile you choose wins over a running redial' {
     BeforeAll {
         Set-Content (Get-VeroPath).Config $script:multiJson
         $script:cfgW = Get-VeroConfig
@@ -1434,11 +1439,12 @@ Describe 'install folder: no ancestor a user can rename or replace (B8)' {
 Describe 'profile types: one handler per type (the dispatch table)' {
     It 'every type has every operation, and the values the rest of the module relies on' {
         $keys = 'Label', 'DefaultPort', 'PasswordCapable', 'HasDco', 'OwnLayer', 'HangUpOnOffAlways', 'SwitchNotice', 'IsConnected', 'TunnelLuid',
-                'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp'
+                'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp',
+                'NamePattern', 'NameHint', 'ServerRequired', 'UsernameRequired', 'OnDiskType', 'OnDiskPort', 'OnDiskAuth', 'ServerText'
         foreach ($t in 'ras', 'openvpn', 'wireguard') {
             $h = Get-VeroTypeHandler $t
             foreach ($k in $keys) { $h.ContainsKey($k) | Should -BeTrue -Because "$t.$k" }
-            foreach ($k in 'SwitchNotice', 'IsConnected', 'TunnelLuid', 'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp') {
+            foreach ($k in 'SwitchNotice', 'IsConnected', 'TunnelLuid', 'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp', 'OnDiskAuth', 'ServerText') {
                 $h[$k] | Should -BeOfType [scriptblock] -Because "$t.$k"
             }
         }
@@ -1455,5 +1461,86 @@ Describe 'profile types: one handler per type (the dispatch table)' {
         & (Get-VeroTypeHandler 'openvpn').RasTunnelType 'X' | Should -Be 'Automatic'
         & (Get-VeroTypeHandler 'ras').SwitchNotice 'X' | Should -BeNullOrEmpty
         & (Get-VeroTypeHandler 'wireguard').SwitchNotice 'X' | Should -Match 'WireGuard'
+    }
+}
+
+Describe 'Resolve-VeroTerminationCode (pure: when a 631 is really "you hung up")' {
+    BeforeAll {
+        $script:now = Get-Date
+        function Term([int]$Code, [string]$CoId = 'A', [bool]$Conflict = $false, $Time = $null) {
+            [pscustomobject]@{ Profile = 'Work'; Code = $Code; CoId = $CoId; Conflict = $Conflict; Time = $(if ($Time) { $Time } else { $script:now }) }
+        }
+    }
+    It 'a clean 631 for the connection VeroScudo saw connect stands' {
+        $r = Resolve-VeroTerminationCode -Termination (Term 631) -RenewMarker $null -ExpectedCoIds @('A') -Now $script:now
+        $r.Code | Should -Be 631; $r.Notes | Should -BeNullOrEmpty
+    }
+    It 'conflicting records are a failure' {
+        $r = Resolve-VeroTerminationCode -Termination (Term 631 'A' $true) -RenewMarker $null -ExpectedCoIds @('A') -Now $script:now
+        $r.Code | Should -Be 0; $r.Notes[0] | Should -Match 'conflicting'
+    }
+    It "VeroScudo's own hang-up for Reconnect is not your Off" {
+        $mk = @{ Profile = 'Work'; Start = $script:now.AddSeconds(-5).ToString('o'); HungUp = $script:now.AddSeconds(-2).ToString('o') }
+        $r = Resolve-VeroTerminationCode -Termination (Term 631) -RenewMarker $mk -ExpectedCoIds @('A') -Now $script:now
+        $r.Code | Should -Be 0; $r.Notes[0] | Should -Match 'own hang-up'
+    }
+    It 'a 631 naming a connection VeroScudo never saw connect is forged or stale' {
+        $r = Resolve-VeroTerminationCode -Termination (Term 631 'ZZ') -RenewMarker $null -ExpectedCoIds @('A', 'B') -Now $script:now
+        $r.Code | Should -Be 0; $r.Notes[0] | Should -Match 'names connection ZZ, but VeroScudo saw A / B'
+        (Resolve-VeroTerminationCode -Termination (Term 631 'ZZ') -RenewMarker $null -ExpectedCoIds @() -Now $script:now).Notes[0] | Should -Match 'saw none'
+    }
+    It 'a link failure code passes through untouched, whatever the connection id' {
+        $r = Resolve-VeroTerminationCode -Termination (Term 629 'ZZ' $true) -RenewMarker $null -ExpectedCoIds @() -Now $script:now
+        $r.Code | Should -Be 0                                              # conflict still downgrades, but nothing else applies
+        (Resolve-VeroTerminationCode -Termination (Term 629 'ZZ') -RenewMarker $null -Now $script:now).Code | Should -Be 629
+    }
+}
+
+Describe 'Get-VeroFilterSpec: the permit kind is explicit' {
+    BeforeAll { $script:cfgK = Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard","server":"wg.example.com","port":51820}]}' }
+    It 'endpoints kind: no server-port permits even with addresses given; server kind: no endpoint permits' {
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgK -ServerIps @('203.0.113.5') -Endpoints @() -PermitKind 'endpoints')
+        @($t | Where-Object { $_ -like 'VPN server*' }).Count | Should -Be 0
+        $eps = @([pscustomobject]@{ Ip = '203.0.113.5'; Proto = 17; Port = 51820 })
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgK -Endpoints $eps -PermitKind 'server')
+        @($t | Where-Object { $_ -like 'VPN server proto*' }).Count | Should -Be 0
+    }
+    It 'without the kind, $null endpoints mean server and a list means endpoints (older callers)' {
+        $eps = @([pscustomobject]@{ Ip = '203.0.113.5'; Proto = 17; Port = 51820 })
+        @((Get-SpecText (Get-VeroFilterSpec -Config $script:cfgK -Endpoints $eps)) | Where-Object { $_ -like 'VPN server proto 17*' }).Count | Should -BeGreaterThan 0
+        { Get-VeroFilterSpec -Config $script:cfgK -PermitKind 'both' } | Should -Throw
+    }
+    It 'the permits the handlers build carry their kind' {
+        (Get-VeroTypeHandler 'ras').ServerPermit | Should -Not -BeNullOrEmpty
+        Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { @('203.0.113.5') }
+        Mock -ModuleName VeroScudo.Core Resolve-VeroEndpoint { @([pscustomobject]@{ Ip = '203.0.113.6'; Proto = 17; Port = 51820 }) }
+        (& (Get-Module VeroScudo.Core) { param($c) Get-VeroRasServerPermit -Config $c } (Get-VeroConfig -Raw $script:cfgJson)).Kind | Should -Be 'server'
+        (& (Get-Module VeroScudo.Core) { param($c) Get-VeroEndpointPermit -Config $c } $script:cfgK).Kind | Should -Be 'endpoints'
+    }
+}
+
+Describe 'Get-VeroStatusServer: what the profile names -> what the filters allow' {
+    It 'reads both the 1.2 object form and the 1.3 string form of wfp.json' {
+        $cfg = Get-VeroConfig -Raw $script:cfgJson
+        Get-VeroStatusServer -Config $cfg -Applied ([pscustomobject]@{ Servers = @('203.0.113.5', '203.0.113.6') }) | Should -Be 'vpn.example.com -> 203.0.113.5, 203.0.113.6'
+        Get-VeroStatusServer -Config $cfg -Applied ([pscustomobject]@{ Servers = @([pscustomobject]@{ value = '203.0.113.7' }) }) | Should -Be 'vpn.example.com -> 203.0.113.7'
+    }
+}
+
+Describe 'profile types: validation and on-disk form come from the handler table' {
+    It 'WireGuard names follow the app rule, OpenVPN needs no server, the built-in client needs a username unless auth is off' {
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"bad name!","type":"wireguard","server":"wg.example.com"}]}' } | Should -Throw '*WireGuard tunnel name*'
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"ovpn","type":"openvpn"}]}' } | Should -Not -Throw
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"Work","server":"vpn.example.com"}]}' } | Should -Throw '*username is required*'
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"Work","server":"vpn.example.com","auth":false}]}' } | Should -Not -Throw
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"wg","type":"wireguard"}]}' } | Should -Throw '*server is required*'
+    }
+    It 'on disk: the built-in client stays implicit, OpenVPN carries auth and dco, WireGuard its port' {
+        $ras = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'Work'; Type = 'ras'; Server = 'vpn.example.com'; Port = 443; Username = 'u'; ServerIps = @(); Auth = $false })
+        @($ras.Keys) | Should -Be @('profile', 'server', 'port', 'username', 'auth')
+        $o = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'ovpn'; Type = 'openvpn'; Server = ''; Port = 1194; Username = ''; ServerIps = @(); Auth = $true; Dco = $true })
+        @($o.Keys) | Should -Be @('profile', 'type', 'auth', 'dco')
+        $w = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'wg'; Type = 'wireguard'; Server = 'wg.example.com'; Port = 51820; Username = ''; ServerIps = @('203.0.113.5'); Auth = $false })
+        @($w.Keys) | Should -Be @('profile', 'type', 'server', 'port', 'serverIps')
     }
 }

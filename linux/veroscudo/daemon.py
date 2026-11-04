@@ -12,6 +12,12 @@ from .state import Decision, StateStore, decide
 
 log = logging.getLogger("veroscudo")
 WATCHDOG_SECONDS = 15
+# How long a marker written by our own `off` / `reconnect` explains the down-event that follows it. NetworkManager reports
+# the deactivation within seconds; the margins cover a slow D-Bus or a suspended laptop. The Windows guard keeps the same
+# two ideas with its own windows (30 s after Off; 30 s after its own hang-up, marker at most 5 min old) because RAS logs
+# its records differently - see docs/ARCHITECTURE.md, "Timing windows". Both markers are consumed on first use.
+OFF_MARKER_SECONDS = 60.0
+RENEW_MARKER_SECONDS = 120.0
 
 
 class Guard:
@@ -22,7 +28,6 @@ class Guard:
         self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
-        self._lock = threading.Lock()
 
     @property
     def cfg(self) -> Config:
@@ -42,17 +47,20 @@ class Guard:
         if cfg.server_ips:
             return list(cfg.server_ips)
         cache = self.store.server_cache(cfg.profile)
-        cached: list[str] = []
-        for f in (cache, self.store.server_ip):
-            if f.exists():
-                cached = f.read_text().split()
-                break
+        cached = self.cached_server_ips(cfg)
         merged = list(dict.fromkeys(nm.resolve(cfg.server) + cached))[:8]
         if merged and merged != cached:
             cache.write_text("\n".join(merged))
         if not merged:
             log.warning("cannot resolve %s and no cached IP", cfg.server)
         return merged
+
+    def cached_server_ips(self, cfg: Config) -> list[str]:
+        """The last known addresses of the profile's server: the per-profile cache, else the 1.0 single file, else []."""
+        for f in (self.store.server_cache(cfg.profile), self.store.server_ip):
+            if f.exists():
+                return f.read_text().split()
+        return []
 
     def desired_ruleset(self, tunnel_up: bool) -> tuple[str, str | None]:
         """The ruleset for the current state and the tunnel interface it allows (None: blocked - the tunnel is down, or up
@@ -67,7 +75,7 @@ class Guard:
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
         """Applies the ruleset when it differs from what is in force or when it is no longer in force (a `nft flush ruleset`
         or `pfctl -d` by another tool). Atomic: nft -f replaces the table in one transaction."""
-        with self._lock:
+        with self.store.firewall_lock():
             rs, tun = self.desired_ruleset(tunnel_up)
             if not force and rs == self._applied and firewall.is_active():
                 return
@@ -76,8 +84,13 @@ class Guard:
             self._applied = rs
             log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
 
-    def disable_killswitch(self) -> None:
-        with self._lock:
+    def disable_killswitch(self, unless_armed: bool = False) -> None:
+        """-unless_armed: the watchdog's tidy-up of a leftover table - re-checked under the lock, because another process
+        may have armed since the watchdog looked (then the table is wanted, and it stays)."""
+        with self.store.firewall_lock():
+            if unless_armed and self.store.armed:
+                log.info("kill-switch kept: armed meanwhile by another process")
+                return
             firewall.clear()
             self._applied = None
         log.info("kill-switch OFF (firewall restored)")
@@ -88,24 +101,24 @@ class Guard:
         if not self.store.armed:
             return
         cfg = self.cfg
-        ips = list(cfg.server_ips)
-        for f in (self.store.server_cache(cfg.profile), self.store.server_ip):
-            if not ips and f.exists():
-                ips = f.read_text().split()
-        firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy()))
+        ips = list(cfg.server_ips) or self.cached_server_ips(cfg)
+        with self.store.firewall_lock():
+            firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy()))
         log.info("boot: armed - kill-switch ON before the network starts (server %s)", ", ".join(ips) or "not cached")
 
     # ---- actions -------------------------------------------------------------
     def arm(self) -> None:
         self.off_marker.unlink(missing_ok=True)            # a stale Off must never turn a later real drop into a disarm
-        if self.store.set_armed(True):
-            log.info("ARMED")
-        self.enable_killswitch(nm.is_connected(self.cfg.profile))
+        with self.store.firewall_lock():                   # flag and filters change together, never interleaved with another process
+            if self.store.set_armed(True):
+                log.info("ARMED")
+            self.enable_killswitch(nm.is_connected(self.cfg.profile))
 
     def disarm(self) -> None:
-        if self.store.set_armed(False):
-            log.info("DISARMED")
-        self.disable_killswitch()
+        with self.store.firewall_lock():
+            if self.store.set_armed(False):
+                log.info("DISARMED")
+            self.disable_killswitch()
 
     def on(self) -> None:
         self.arm()
@@ -130,23 +143,23 @@ class Guard:
             nm.down(cfg.profile)
         self.reconnect()
 
-    def _take_off_marker(self, max_age: float = 60.0) -> bool:
-        """True (once) when `veroscudo off` took the connection down within the last `max_age` seconds."""
+    @staticmethod
+    def _take_marker(marker: Path, max_age: float) -> bool:
+        """True (once) when the marker was written within the last `max_age` seconds; the marker is consumed either way."""
         try:
-            started = float(self.off_marker.read_text().strip() or 0)
+            started = float(marker.read_text().strip() or 0)
         except (OSError, ValueError):
             return False
-        self.off_marker.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
         return time.time() - started <= max_age
 
-    def _take_renew_marker(self, max_age: float = 120.0) -> bool:
-        """True (once) when our own Reconnect took the connection down within the last `max_age` seconds."""
-        try:
-            started = float(self.renew_marker.read_text().strip() or 0)
-        except (OSError, ValueError):
-            return False
-        self.renew_marker.unlink(missing_ok=True)
-        return time.time() - started <= max_age
+    def _take_off_marker(self) -> bool:
+        """`veroscudo off` took the connection down just now - the down-event that follows is deliberate."""
+        return self._take_marker(self.off_marker, OFF_MARKER_SECONDS)
+
+    def _take_renew_marker(self) -> bool:
+        """Our own Reconnect took the connection down just now - not the user's Off."""
+        return self._take_marker(self.renew_marker, RENEW_MARKER_SECONDS)
 
     def off(self) -> None:
         self.renew_marker.unlink(missing_ok=True)
@@ -250,7 +263,7 @@ class Guard:
                 self.reconnect_async()
         elif firewall.is_active():
             log.info("disarmed but kill-switch still active - restoring")
-            self.disable_killswitch()
+            self.disable_killswitch(unless_armed=True)
 
     # ---- main loop -----------------------------------------------------------
     def run(self) -> None:

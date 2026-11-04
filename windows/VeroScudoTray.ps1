@@ -390,8 +390,7 @@ function Get-LastEvents([int]$n = 6, [string]$After = '') {
     Get-Content $global:Paths.Log -Tail $n | Where-Object { -not $After -or $_.Substring(0, [Math]::Min(19, $_.Length)) -gt $After } | ForEach-Object { $_ -replace '^\d{4}-\d\d-\d\d ', '' }
 }
 function Get-LastDrop {
-    if ($global:Config -and $global:Config.Type -eq 'openvpn') { $s = Get-VeroOpenVpnStatus $global:Config.Profile; if ($s) { return ('{0}{1}' -f $s.State, $(if ($s.Reason) { ' - ' + $s.Reason })) }; return '-' }
-    if ($global:Config -and $global:Config.Type -eq 'wireguard') { return "handshake $(Get-VeroWgHealthNow $global:Config.Profile)" }
+    if ($global:Config -and $global:Config.Type -ne 'ras') { return (& (Get-VeroTypeHandler $global:Config.Type).StatusDetail $global:Config) }   # the client's own state, as the status line shows it
     try { $e = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='RasClient'; Id=20226 } -MaxEvents 1 -ErrorAction Stop; if ($e.Properties[2].Value -eq $global:Config.Profile) { $c = $e.Properties[3].Value; return ('{0:HH:mm} - {1}' -f $e.TimeCreated, $(if ($c -eq 631) { 'you disconnected' } elseif ($c -eq 829) { 'link failure (829)' } else { "code $c" })) } } catch { Write-Verbose 'no RAS event' }; '-' }
 
 # ---------------------------------------------------------------- UI building blocks
@@ -780,8 +779,8 @@ function New-VpnProfileForm($entry) {
         if (-not $entry) {
             # a NEW profile: nothing of the type shown before may stay (names, servers, users, files)
             $cb.Text = ''; $tServer.Text = ''; $tUser.Text = ''; $tFile.Text = ''; $chkDco.Checked = $false
-            $tPort.Text = $(if ($t -eq 'wireguard') { '51820' } else { '443' })
-            $state.Warnings = @(); $state.AutoServer = ''; $state.Auth = ($t -ne 'wireguard'); $state.PortUsed = $true
+            $tPort.Text = [string](Get-VeroTypeHandler $t).DefaultPort
+            $state.Warnings = @(); $state.AutoServer = ''; $state.Auth = (Get-VeroTypeHandler $t).PasswordCapable; $state.PortUsed = $true
         }
         $keep = if ($entry) { $entry.Profile } else { '' }
         $cb.Items.Clear()
@@ -846,8 +845,9 @@ function New-VpnProfileForm($entry) {
         } else {
             $port = 0
             if (-not $tServer.Text.Trim() -or -not [int]::TryParse($tPort.Text, [ref]$port)) { [VeroMsg]::Show('Server and port are required.', 'VeroScudo') | Out-Null; return }
-            if ($t -eq 'ras' -and $state.Auth -and -not $user) { [VeroMsg]::Show('A username is required (the one you sign in to this VPN with).', 'VeroScudo') | Out-Null; return }
-            if ($t -eq 'wireguard' -and $name -notmatch '^[A-Za-z0-9_=+.-]{1,32}$') { [VeroMsg]::Show('A WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -', 'VeroScudo') | Out-Null; return }
+            $th = Get-VeroTypeHandler $t                                   # the same rules config.json is checked against
+            if ($th.UsernameRequired -and $state.Auth -and -not $user) { [VeroMsg]::Show('A username is required (the one you sign in to this VPN with).', 'VeroScudo') | Out-Null; return }
+            if ($th.NamePattern -and $name -notmatch $th.NamePattern) { [VeroMsg]::Show(($th.NameHint.Substring(0, 1).ToUpper() + $th.NameHint.Substring(1)), 'VeroScudo') | Out-Null; return }
             if ($t -eq 'wireguard' -and -not (Show-Check "WireGuard tunnel '$name':" $state.Warnings)) { return }
             $res.Value = [pscustomobject]@{ Profile = $name; Type = $t; Server = $tServer.Text.Trim(); Port = $port; Username = $(if ($t -eq 'ras' -and $state.Auth) { $user } else { '' }); ServerIps = $pins; Auth = ($t -eq 'ras' -and $state.Auth); Dco = $false; ImportFrom = $null }
         }

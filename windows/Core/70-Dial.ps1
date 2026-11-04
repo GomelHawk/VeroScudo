@@ -131,6 +131,25 @@ function Get-VeroRenewMarker {
     if (Test-Path $p.Renew) { try { return (Get-Content $p.Renew -Raw | ConvertFrom-Json) } catch { Write-Verbose 'renew marker unreadable' } }
     $null
 }
+function Resolve-VeroTerminationCode {
+    <# Pure: the RAS reason code a termination record is taken at, after the anti-forgery checks. 631 ("you hung up") stands
+       only when the records for that connection do not conflict, it is not VeroScudo's own hang-up for Reconnect, and it
+       names a connection VeroScudo saw connect. Anything else is a link failure (0 here). @{ Code; Notes }: Notes are the
+       log lines that explain each downgrade. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Termination, $RenewMarker, [string[]]$ExpectedCoIds = @(), [datetime]$Now = (Get-Date))
+    $t = $Termination; $code = $t.Code
+    $notes = New-Object System.Collections.Generic.List[string]
+    if ($t.Conflict) { $notes.Add('conflicting termination records for one connection (forged?) - treated as a failure'); $code = 0 }
+    $when = if ($t.PSObject.Properties['Time']) { $t.Time } else { $null }
+    if ($code -eq 631 -and $when -and (Test-VeroRenewHangUp -Marker $RenewMarker -ProfileName $t.Profile -EventTime $when -Now $Now)) {
+        $notes.Add("631 comes from VeroScudo's own hang-up for Reconnect - not your Off; stays armed"); $code = 0
+    }
+    if ($code -eq 631 -and $ExpectedCoIds -notcontains [string]$t.CoId) {
+        $notes.Add(("'you hung up' record names connection {0}, but VeroScudo saw {1} connect - forged or stale, treated as a failure" -f $t.CoId, $(if ($ExpectedCoIds) { $ExpectedCoIds -join ' / ' } else { 'none' })))
+        $code = 0
+    }
+    @{ Code = $code; Notes = @($notes) }
+}
 
 function Test-VeroLockAlive {
     $p = Get-VeroPath

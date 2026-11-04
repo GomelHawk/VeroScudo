@@ -2,6 +2,16 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
 # ---------------------------------------------------------------- actions & status
+function Get-VeroStatusServer {
+    <# "<what the profile names> -> <what the filters allow>" for the status line. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, $Applied)
+    $named = & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ServerText $Config
+    $allowed = if ($Applied -and $Applied.PSObject.Properties['Servers']) {
+        # wfp.json of 1.2 held objects with a .value here; since 1.3 plain strings - both are read (seen live 2026-11-03)
+        @($Applied.Servers | ForEach-Object { if ($_ -is [string]) { $_ } else { [string]$_.value } }) -join ', '
+    } else { @(Resolve-VeroServerIp -Config $Config -CacheOnly) -join ', ' }
+    "$named -> $allowed"
+}
 function Get-VeroStatus {
     [CmdletBinding()] param($Config)
     if (-not $Config) { $Config = Get-VeroConfig }
@@ -27,7 +37,7 @@ function Get-VeroStatus {
         Helper     = $(if ($nb = Get-VeroNativeBlocked) { "BLOCKED by Windows since $($nb.First) ($($nb.Count) failures), next try $($nb.Next)" } else { 'ok' })
         Filters    = $filters
         Applied    = if ($applied) { $applied.Time } else { '-' }
-        Server     = "$(if ($type -eq 'openvpn') { (@(try { Get-VeroOpenVpnRemote -ProfileName $Config.Profile } catch { @() }) | ForEach-Object { '{0}:{1}/{2}' -f $_.Host, $_.Port, $_.Proto }) -join ' ' } else { $Config.Server }) -> $(if ($applied -and $applied.PSObject.Properties['Servers']) { @($applied.Servers | ForEach-Object { if ($_ -is [string]) { $_ } else { [string]$_.value } }) -join ', ' } else { (@(Resolve-VeroServerIp -Config $Config -CacheOnly) -join ', ') })"
+        Server     = Get-VeroStatusServer -Config $Config -Applied $applied
         Emergency  = Test-Path $p.Emergency
         Vm         = if (-not $r) { 'not managed' } elseif ([string]$r.Enabled -eq 'True') { 'allowed' } else { 'blocked' }
         Reconnect  = Test-VeroLockAlive
@@ -116,18 +126,11 @@ function Invoke-VeroActionOnEvent {
     if ($t.Profile -ne $Config.Profile) { Write-VeroLog "not the active profile '$($Config.Profile)' - ignored" $Action; return }
     if ((Get-VeroConfigType $Config) -ne 'ras') { Write-VeroLog "'$($Config.Profile)' is not a Windows VPN profile - RAS events do not apply, ignored" $Action; return }
     if (Test-VeroVpnConnected $Config.Profile) { Write-VeroLog "'$($Config.Profile)' is still connected - stale or forged event, ignored" $Action; return }
-    $code = $t.Code
-    if ($t.Conflict) { Write-VeroLog 'conflicting termination records for one connection (forged?) - treated as a failure' $Action; $code = 0 }
-    $when = if ($t.PSObject.Properties['Time']) { $t.Time } else { $null }
-    $own = ($code -eq 631 -and $when -and (Test-VeroRenewHangUp -Marker (Get-VeroRenewMarker) -ProfileName $t.Profile -EventTime $when))
-    if ($own) { Write-VeroLog "631 comes from VeroScudo's own hang-up for Reconnect - not your Off; stays armed" $Action; $code = 0 }
-    if ($code -eq 631) {
-        $want = @(Get-VeroExpectedCoId -ProfileName $t.Profile)
-        if ($want -notcontains [string]$t.CoId) {
-            Write-VeroLog ("'you hung up' record names connection {0}, but VeroScudo saw {1} connect - forged or stale, treated as a failure" -f $t.CoId, $(if ($want) { $want -join ' / ' } else { 'none' })) $Action
-            $code = 0
-        }
-    }
+    # the expected connection ids are read (file + System log) only when a 631 is on the table
+    $want = @(if ($t.Code -eq 631) { Get-VeroExpectedCoId -ProfileName $t.Profile })
+    $r = Resolve-VeroTerminationCode -Termination $t -RenewMarker (Get-VeroRenewMarker) -ExpectedCoIds $want
+    foreach ($n in $r.Notes) { Write-VeroLog $n $Action }
+    $code = $r.Code
     Write-VeroLog ("decision source: RAS reason code {0} -> {1}" -f $code, $(if ($code -eq 631) { 'you hung up' } else { 'link failure' })) $Action
     switch (Get-VeroDecision -ReasonCode $code -Armed (Test-VeroArmed)) {
         'disarm'    { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }

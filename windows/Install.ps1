@@ -213,8 +213,15 @@ if (Test-VeroArmed) {
 }
 Remove-VeroLegacyFirewall -Action install
 
-# --- scheduled tasks
+# --- scheduled tasks: for the signed-in user, who must be the account that elevated. With over-the-shoulder UAC (a standard
+# user typing an administrator's password) this session runs as that administrator: the tasks, the tray, the shortcuts and
+# the DPAPI credential would belong to two different accounts, and the real user would get no redial and no tray. The guard
+# tasks run elevated, so the signed-in user has to be an administrator in the first place.
 $user      = "$env:USERDOMAIN\$env:USERNAME"
+$console   = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+if ($console -and $console -ne $user) {
+    throw "signed in as '$console', but this elevated session runs as '$user'. VeroScudo's tasks and tray must belong to the signed-in user, and the guard tasks need an administrator account: sign in as an administrator (or make '$console' one) and run Install.ps1 again."
+}
 $guard     = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 $limited   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited      # the tray needs no admin rights
 $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `

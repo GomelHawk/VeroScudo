@@ -4,12 +4,11 @@ from __future__ import annotations
 import ipaddress
 import pwd
 import re
-import socket
 import subprocess
 import time
 from pathlib import Path
 
-_IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+from .netutil import IFNAME as _IFNAME, nameservers, resolve  # noqa: F401  (part of this backend's contract)
 SYS_NET = Path("/sys/class/net")
 
 
@@ -213,14 +212,6 @@ def down(profile: str) -> bool:
     return r.returncode == 0
 
 
-def resolve(server: str) -> list[str]:
-    try:
-        return sorted({ai[4][0] for ai in socket.getaddrinfo(server, None, socket.AF_UNSPEC)
-                       if not ipaddress.ip_address(ai[4][0].split("%")[0]).is_link_local})
-    except OSError:
-        return []
-
-
 def resolver_uid() -> int | None:
     """uid of systemd-resolved when it is the system resolver: then only it may send DNS while blocked."""
     if not Path("/run/systemd/resolve/io.systemd.Resolve").exists():
@@ -229,24 +220,6 @@ def resolver_uid() -> int | None:
         return pwd.getpwnam("systemd-resolve").pw_uid
     except KeyError:
         return None
-
-
-def nameservers(path: Path = Path("/etc/resolv.conf")) -> list[str]:
-    """Upstream resolvers (no loopback stubs) - the only DNS destinations while blocked when systemd-resolved is absent."""
-    out = []
-    try:
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] == "nameserver":
-                try:
-                    a = ipaddress.ip_address(parts[1].split("%")[0])
-                except ValueError:
-                    continue
-                if not a.is_loopback:
-                    out.append(str(a))
-    except OSError:
-        pass
-    return sorted(set(out))
 
 
 def nm_dns() -> list[str]:
