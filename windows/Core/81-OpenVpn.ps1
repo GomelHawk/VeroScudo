@@ -129,13 +129,19 @@ function Import-VeroOpenVpnProfile {
     $text = [IO.File]::ReadAllText($Source)                                # read once: what is checked is what is stored
     $r = Test-VeroOpenVpnConf -Text $text -BaseDir (Split-Path -Parent $Source)
     if ($r.Errors.Count -gt 0) { throw ("OpenVPN config '{0}' refused: {1}" -f $Source, ($r.Errors -join '; ')) }
-    # what is stored is checked once more as a whole (inlined key files included)
-    $again = Test-VeroOpenVpnConf -Text $r.Text -ReadFile { param($x) throw "unexpected file reference $x" }
-    if ($again.Errors.Count -gt 0) { throw ("OpenVPN config '{0}' refused after inlining: {1}" -f $Source, ($again.Errors -join '; ')) }
+    Import-VeroOpenVpnText -ProfileName $ProfileName -Text $r.Text -Origin $Source
+}
+function Import-VeroOpenVpnText {
+    <# Elevated: stores an .ovpn that is already complete (key files inlined) as the administrators-only copy openvpn.exe will
+       run, after checking it once more as a whole. The tray hands over TEXT, never a path: an elevated process must not
+       open files a non-elevated one chose. Throws on any error - nothing is written then. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName, [Parameter(Mandatory)][AllowEmptyString()][string]$Text, [string]$Origin = 'the tray')
+    $r = Test-VeroOpenVpnConf -Text $Text -ReadFile { param($x) throw "unexpected file reference $x" }
+    if ($r.Errors.Count -gt 0) { throw ("OpenVPN config from {0} refused: {1}" -f $Origin, ($r.Errors -join '; ')) }
     $null = Protect-VeroOpenVpnDir
     $dst = (Get-VeroPath -VpnProfile $ProfileName).OvpnConfig
     [IO.File]::WriteAllText($dst, $r.Text, (New-Object Text.UTF8Encoding($false)))
-    Write-VeroLog "OpenVPN profile '$ProfileName' imported from $Source ($($r.Remotes.Count) server(s); password: $($r.Auth))" 'import'
+    Write-VeroLog "OpenVPN profile '$ProfileName' imported from $Origin ($($r.Remotes.Count) server(s); password: $($r.Auth))" 'import'
     $r
 }
 
@@ -280,9 +286,8 @@ function Get-VeroOpenVpnNic([string]$ProfileName) {
 }
 
 function Test-VeroOpenVpnRunnerAlive {
-    $m = $null
-    try { if ([System.Threading.Mutex]::TryOpenExisting('Local\VeroScudo-OpenVPN', [ref]$m)) { $m.Dispose(); return $true } } catch { Write-Verbose 'mutex check failed' }
-    $false
+    <# Elevated callers only: the tray cannot see the guard's locks (and never could). #>
+    Test-VeroSingletonHeld -Name 'openvpn-runner'
 }
 
 function Invoke-VeroOpenVpnDial {
@@ -518,10 +523,8 @@ function Invoke-VeroOpenVpnRunner {
        profile while VeroScudo is on; an OpenVPN that ends on its own is a failure: restarted every retrySeconds. Ends when
        VeroScudo is turned off, another profile type becomes active, a password is rejected or VeroScudo asks it to stop. #>
     [CmdletBinding()] param([string]$Action = 'openvpn')
-    $mutex = New-Object System.Threading.Mutex($false, 'Local\VeroScudo-OpenVPN')
-    $mine = $false
-    try { $mine = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $mine = $true }
-    if (-not $mine) { $mutex.Dispose(); return }
+    $held = Enter-VeroSingleton -Name 'openvpn-runner'
+    if (-not $held) { return }
     try {
         $cfg = Get-VeroConfig
         foreach ($pr in @($cfg.Profiles | Where-Object Type -eq 'openvpn')) { Stop-VeroOpenVpnOrphan -ProfileName $pr.Profile }
@@ -535,5 +538,5 @@ function Invoke-VeroOpenVpnRunner {
             if ($r -ne 'exited') { Remove-Item $p.OvpnStop -Force -ErrorAction SilentlyContinue; break }
             Start-Sleep -Seconds $cfg.RetrySeconds
         }
-    } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+    } finally { $held.Dispose() }
 }
