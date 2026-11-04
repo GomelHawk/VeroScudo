@@ -102,8 +102,13 @@ class StateStore:
             pid = int(self.lock.read_text().strip() or 0)
             os.kill(pid, 0)
             return True
-        except (ValueError, ProcessLookupError, PermissionError):
-            self.lock.unlink(missing_ok=True)
+        except PermissionError:
+            return True             # the process exists but belongs to root: a non-root `status` may not signal it (nor unlink)
+        except (ValueError, ProcessLookupError):
+            try:
+                self.lock.unlink(missing_ok=True)
+            except OSError:
+                pass                # read-only caller (tray, status): the daemon cleans it up
             return False
 
     def take_lock(self) -> bool:

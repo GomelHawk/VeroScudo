@@ -1051,7 +1051,7 @@ Describe 'native helper blocked by Windows (Smart App Control)' {
     }
 }
 
-Describe 'review of 9052eef: regressions' {
+Describe 'Windows'' own tunnel adapters, OS-resolved system folders, native record' {
     It 'does not count Windows'' own tunnels (Teredo, IP-HTTPS, 6to4, ISATAP) as a VPN' {
         foreach ($d in 'Teredo Tunneling Pseudo-Interface', 'Microsoft IP-HTTPS Platform Adapter', 'Microsoft 6to4 Adapter', 'Microsoft ISATAP Adapter') {
             Test-VeroTunnelAdapter ([pscustomobject]@{ Description = $d; NetworkInterfaceType = 'Tunnel' }) | Should -BeFalse -Because $d
@@ -1076,7 +1076,7 @@ Describe 'review of 9052eef: regressions' {
     }
 }
 
-Describe 'review of 9052eef: On while already on, and vendor tunnels' {
+Describe 'On while already on, and vendor tunnels' {
     BeforeAll {
         $script:cfgR2 = Get-VeroConfig -Raw '{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}]}'
         Mock -ModuleName VeroScudo.Core Get-VeroForeignVpn { [pscustomobject]@{ Name = 'PrivateVPN'; Kind = 'ras'; Configured = $false; CanDisconnect = $true; Id = 'PrivateVPN' } }
@@ -1391,5 +1391,69 @@ Describe 'a profile you choose wins over a running redial (live 2026-11-04)' {
         Invoke-VeroReconnect -Config $script:cfgW -Action test
         @($script:dialed) | Should -Be @('Work')
         $script:req | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'install folder: no ancestor a user can rename or replace (B8)' {
+    BeforeAll {
+        function Rule([string]$Who, $Rights, [string]$Type = 'Allow', [string]$Prop = 'None') {
+            # named rights as the enum, raw numbers (generic bits, as Get-Acl shows them) as plain ints - the function takes both
+            $fr = if ($Rights -is [string] -and $Rights -notmatch '^-?\d+$') { [Security.AccessControl.FileSystemRights]$Rights } else { [int]$Rights }   # a negative number arrives as text
+            [pscustomobject]@{ IdentityReference = $Who; FileSystemRights = $fr; AccessControlType = $Type; PropagationFlags = [Security.AccessControl.PropagationFlags]$Prop }
+        }
+    }
+    It 'Program Files style rules are administrators-only' {
+        $rules = @((Rule 'NT SERVICE\TrustedInstaller' 'FullControl'), (Rule 'NT AUTHORITY\SYSTEM' 'FullControl'), (Rule 'BUILTIN\Administrators' 'FullControl'),
+                   (Rule 'BUILTIN\Users' 'ReadAndExecute, Synchronize'), (Rule 'CREATOR OWNER' 'FullControl' 'Allow' 'InheritOnly'))
+        Test-VeroAdminOnlyRules $rules | Should -BeTrue
+    }
+    It 'the C:\ root is fine: users may create folders there but not rename Program Files (rules as seen live; a localized name is trusted by its SID)' {
+        $rules = @((Rule 'NT AUTHORITY\Authenticated Users' 4), (Rule 'NT AUTHORITY\Authenticated Users' -536805376 'Allow' 'InheritOnly'), (Rule 'BUILTIN\Users' 1179817),
+                   (Rule 'S-1-5-18' 2032127), (Rule 'S-1-5-32-544' 2032127), (Rule 'S-1-15-3-65536-1888954469-739942743-1668119174-2468466756-4239452838-1296943325-355587736-700089176' 1048737))
+        Test-VeroAdminOnlyRules $rules | Should -BeTrue
+    }
+    It 'a data drive or a profile folder is weak: Modify (Delete) for users, or DeleteSubdirectoriesAndFiles, or generic all' {
+        Test-VeroAdminOnlyRules @((Rule 'NT AUTHORITY\Authenticated Users' 'Modify, Synchronize')) | Should -BeFalse
+        Test-VeroAdminOnlyRules @((Rule 'BUILTIN\Users' 'DeleteSubdirectoriesAndFiles')) | Should -BeFalse
+        Test-VeroAdminOnlyRules @((Rule 'DESKTOP\someone' 'FullControl')) | Should -BeFalse
+        Test-VeroAdminOnlyRules @((Rule 'Everyone' 268435456)) | Should -BeFalse          # GENERIC_ALL as Get-Acl shows it
+        Test-VeroAdminOnlyRules @((Rule 'BUILTIN\Users' 'ChangePermissions')) | Should -BeFalse
+    }
+    It 'a real rule collection is enumerated, not taken as one item' -Skip:($env:OS -ne 'Windows_NT') {
+        Test-VeroAdminOnlyRules (Get-Acl -LiteralPath $env:LOCALAPPDATA).Access | Should -BeFalse       # the user has full control there
+    }
+    It 'a deny rule never makes a folder weak' {
+        Test-VeroAdminOnlyRules @((Rule 'Everyone' 'FullControl' 'Deny'), (Rule 'BUILTIN\Administrators' 'FullControl')) | Should -BeTrue
+    }
+    It 'on this machine: Program Files passes, the user profile does not' -Skip:($env:OS -ne 'Windows_NT') {
+        Test-VeroAdminOnlyPath (Join-Path (Get-VeroSystemDir ProgramFiles) 'VeroScudo') | Should -BeNullOrEmpty
+        Test-VeroAdminOnlyPath (Join-Path $env:LOCALAPPDATA 'VeroScudo-weak\x') | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'profile types: one handler per type (the dispatch table)' {
+    It 'every type has every operation, and the values the rest of the module relies on' {
+        $keys = 'Label', 'DefaultPort', 'PasswordCapable', 'HasDco', 'OwnLayer', 'HangUpOnOffAlways', 'SwitchNotice', 'IsConnected', 'TunnelLuid',
+                'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp'
+        foreach ($t in 'ras', 'openvpn', 'wireguard') {
+            $h = Get-VeroTypeHandler $t
+            foreach ($k in $keys) { $h.ContainsKey($k) | Should -BeTrue -Because "$t.$k" }
+            foreach ($k in 'SwitchNotice', 'IsConnected', 'TunnelLuid', 'ServerPermit', 'ResolveIps', 'RasTunnelType', 'CrlWindow', 'Dial', 'HangUp', 'DialFailure', 'StatusDetail', 'ForeignText', 'ForeignHangUp') {
+                $h[$k] | Should -BeOfType [scriptblock] -Because "$t.$k"
+            }
+        }
+        (Get-VeroTypeHandler 'ras').Label | Should -Be 'Windows VPN'
+        (Get-VeroTypeHandler '').DefaultPort | Should -Be 443                   # '' = the built-in client, like Get-VeroConfigType
+        (Get-VeroTypeHandler 'openvpn').DefaultPort | Should -Be 1194
+        (Get-VeroTypeHandler 'wireguard').DefaultPort | Should -Be 51820
+        (Get-VeroTypeHandler 'wireguard').PasswordCapable | Should -BeFalse
+        (Get-VeroTypeHandler 'openvpn').HangUpOnOffAlways | Should -BeTrue
+        { Get-VeroTypeHandler 'pptp' } | Should -Throw
+    }
+    It 'the built-in client never opens a CRL window for the others, and only it has a RAS tunnel type' {
+        & (Get-VeroTypeHandler 'wireguard').CrlWindow | Should -BeFalse
+        & (Get-VeroTypeHandler 'openvpn').RasTunnelType 'X' | Should -Be 'Automatic'
+        & (Get-VeroTypeHandler 'ras').SwitchNotice 'X' | Should -BeNullOrEmpty
+        & (Get-VeroTypeHandler 'wireguard').SwitchNotice 'X' | Should -Match 'WireGuard'
     }
 }

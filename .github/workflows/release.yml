@@ -40,6 +40,7 @@ jobs:
           $d = 'dist/VeroScudo-windows'
           New-Item -ItemType Directory -Path "$d/icons" -Force | Out-Null
           Copy-Item windows/*.ps1, windows/*.psm1, windows/*.cs, windows/run.vbs, windows/config.example.json $d
+          Copy-Item windows/Core $d -Recurse
           Copy-Item windows/tests-local $d -Recurse
           Copy-Item assets/icons/png, assets/icons/badge, assets/icons/app "$d/icons" -Recurse
           Copy-Item README.md, LICENSE, docs/ARCHITECTURE.md, docs/TESTING.md, docs/SECURITY.md $d

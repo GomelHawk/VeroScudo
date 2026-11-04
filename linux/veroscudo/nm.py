@@ -24,6 +24,23 @@ def is_virtual(name: str) -> bool:
     return _IFNAME.match(name) is not None and not (SYS_NET / name / "device").exists()
 
 
+def vm_bridges() -> list[str]:
+    """Bridges that only connect containers/VMs to this host: every port is virtual (veth, tap, vnet - no backing device).
+    docker0, br-<id>, virbr0, lxdbr0, podman0 qualify; a bridge with a physical NIC enslaved (br0 + eth0) never does -
+    allowing it would open the kill-switch to the LAN. A bridge without ports qualifies (nothing is attached yet)."""
+    out = []
+    try:
+        for d in sorted(SYS_NET.iterdir()):
+            if not (d / "bridge").is_dir() or not _IFNAME.match(d.name):
+                continue
+            ports = (d / "brif").iterdir() if (d / "brif").is_dir() else ()
+            if all(not (SYS_NET / port.name / "device").exists() for port in ports):
+                out.append(d.name)
+    except OSError:
+        return []
+    return out
+
+
 def iface(profile: str) -> str | None:
     """The tunnel interface of an active VPN connection (tun0, wg0, ppp0 ...). Only GENERAL.IP-IFACE: for a 'vpn'
     connection GENERAL.DEVICES is the *underlying* card, and allowing that would open the kill-switch completely.

@@ -26,7 +26,8 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 | A hostile network spoofing the VPN server's address | server permit limited to the VPN's protocol/port and (Windows) to `svchost.exe`; the server's certificate is still validated by the VPN |
 | Something resets the firewall (GPO refresh, `nft flush ruleset`) | Windows filters are independent of the firewall policy; the watchdog re-checks every 15 s |
 | A forged "user disconnected" event | acted on only for the active profile, only if the tunnel is really down, never when two records conflict, only for the connection id seen connecting (SSTP/L2TP/PPTP: System log; IKEv2 logs its connect only in the user-writable Application log, so for IKEv2 this last check is weaker) |
-| Non-admin code redirecting the elevated guard | no environment overrides - system folders (Program Files, ProgramData, System32) come from the OS and HKLM, never from `%ProgramFiles%`-style variables a user can plant in `HKCU\Environment`; state folder writable by administrators only; config validated |
+| Non-admin code redirecting the elevated guard | no environment overrides - system folders (Program Files, ProgramData, System32) come from the OS and HKLM, never from `%ProgramFiles%`-style variables a user can plant in `HKCU\Environment`; executables by full System32 path (never the user's App Paths key); `PSModulePath` pinned to the system module folders in every script that runs elevated (a module planted in `Documents\WindowsPowerShell\Modules` would otherwise auto-load as administrator); state folder and program folder (also a custom `-InstallDir`) writable by administrators only; config validated. macOS: the program is under root-owned `/opt`, never Homebrew's user-writable `/usr/local` |
+| The config file is missing or broken when an armed Linux/macOS machine boots | the boot step and the daemon fail closed: a lockdown ruleset (loopback, DHCP, neighbour discovery) until the file is fixed |
 | The VPN password leaking via process lists / EDR logs | `RasDial` API, never on a command line; DPAPI-encrypted per user |
 | A tampered update link | only this project's GitHub release pages are opened; nothing is installed automatically |
 | An imported OpenVPN config running code as administrator | only an allow-list of client options is accepted (no scripts, plugins, PKCS#11/OpenSSL modules, management, includes, logs, proxies; no quoted or escaped option names); key files inlined only when they hold no tag lines; checked again by the elevated import, the stored text once more as a whole; administrators-only; `--script-security 1` on the command line |
@@ -45,8 +46,9 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   forwarded packets do not pass the ALE layers VeroScudo filters; only WSL is covered (Hyper-V firewall). Where that
   firewall is missing, VeroScudo now logs that VM traffic is not covered. An IPFORWARD-layer block is planned but needs a
   live test first.
-- **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/libvirt bridged mode) - their
-  frames bypass the host's IP stack. NAT-mode VMs, WSL and Docker are covered (with a ~1–2 s window after a drop).
+- **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/libvirt bridged mode) and **Docker
+  macvlan/ipvlan networks** - their frames bypass the host's IP stack. NAT-mode VMs, WSL and bridge-mode Docker/libvirt
+  are covered (with a ~1–2 s window after a drop).
 - **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, Hiddify, NordVPN ...) -
   VeroScudo cannot tell their "you hung up" from a failure. It detects their tunnels and filter layers and shows
   *Attention*. OpenVPN (run by VeroScudo itself) and the WireGuard app's tunnels are supported profile types (beta).

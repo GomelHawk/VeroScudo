@@ -7,6 +7,10 @@
   WireGuard profiles need nothing here (their keys live in the WireGuard app).
 #>
 param([string]$VpnProfile, [string]$UserName, [switch]$KeyPassphrase)
+# Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
+# module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
+# System folders only, before anything else is loaded (-NoProfile does not cover this).
+$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
 Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Force
 $cfg = Get-VeroConfig
 if ($VpnProfile) { $cfg = Get-VeroConfig -Active $VpnProfile }

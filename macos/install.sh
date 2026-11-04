@@ -6,13 +6,33 @@ set -euo pipefail
 [ "$(uname -s)" = "Darwin" ] || { echo "this installer is for macOS"; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="${SUDO_USER:-$(stat -f %Su /dev/console)}"
-PREFIX=/usr/local/lib/veroscudo
-command -v python3 >/dev/null || { echo "missing: python3 (xcode-select --install)"; exit 1; }
+# /opt is root-owned on every Mac. /usr/local is Homebrew's: on Intel Macs the user owns /usr/local/lib and /usr/local/bin,
+# so a program there could be swapped by any user-level process - and this one runs as root (launchd, sudoers).
+PREFIX=/opt/veroscudo
+BIN="$PREFIX/bin/veroscudo"
+# Apple's python3 only (root-owned): the venv's interpreter is what the root daemon runs. `command -v python3` could find
+# Homebrew's, which the user owns on Intel Macs - the same swap problem as /usr/local, one level down.
+PYTHON=/usr/bin/python3
+[ -x "$PYTHON" ] && "$PYTHON" -c 'import venv' 2>/dev/null || { echo "missing: Apple's python3 - run: xcode-select --install"; exit 1; }
 
-install -d -m 755 -o root -g wheel "$PREFIX" /etc/veroscudo /var/lib/veroscudo /usr/local/bin
-python3 -m venv "$PREFIX/venv"
+install -d -m 755 -o root -g wheel /opt "$PREFIX" "$PREFIX/bin" /etc/veroscudo /var/lib/veroscudo
+# every folder the daemon and the sudo rule run from must be root's and not writable by others - refuse otherwise
+for d in /opt "$PREFIX" "$PREFIX/bin"; do
+  [ "$(stat -f %u "$d")" = "0" ] && [ -z "$(find "$d" -maxdepth 0 -perm +022)" ] || { echo "$d is not root-owned and closed to others - refusing (an owner could swap the program the root daemon runs)"; exit 1; }
+done
+"$PYTHON" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade "$HERE/../linux"
-ln -sf "$PREFIX/venv/bin/veroscudo" /usr/local/bin/veroscudo
+ln -sfh "$PREFIX/venv/bin/veroscudo" "$BIN"
+chown -R root:wheel "$PREFIX"
+# 1.3.0 alpha installed under /usr/local: remove that copy (nothing of yours lives there)
+rm -rf /usr/local/lib/veroscudo
+[ -L /usr/local/bin/veroscudo ] && rm -f /usr/local/bin/veroscudo
+# a convenience link only where /usr/local/bin already exists and is root's: the installer never creates or chowns it
+RULE_PATHS="$BIN"
+if [ -d /usr/local/bin ] && [ "$(stat -f %u /usr/local/bin)" = "0" ]; then
+  ln -sfh "$BIN" /usr/local/bin/veroscudo
+  RULE_PATHS="$BIN /usr/local/bin/veroscudo"
+fi
 
 if [ ! -f /etc/veroscudo/config.json ]; then
   echo "macOS VPN services:"; scutil --nc list | sed 's/^/  /'
@@ -38,12 +58,19 @@ install -m 644 -o root -g wheel "$HERE/com.gomelhawk.veroscudo.plist" /Library/L
 launchctl bootout system/com.gomelhawk.veroscudo 2>/dev/null || true
 launchctl bootstrap system /Library/LaunchDaemons/com.gomelhawk.veroscudo.plist
 
+# passwordless only for the four user actions, only by root-owned paths
+RULE=""
+for b in $RULE_PATHS; do
+  for a in on off reconnect "use *"; do RULE="$RULE${RULE:+, }$b $a"; done
+done
 cat > /etc/sudoers.d/veroscudo.tmp <<EOF
-$USER_NAME ALL=(root) NOPASSWD: /usr/local/bin/veroscudo on, /usr/local/bin/veroscudo off, /usr/local/bin/veroscudo reconnect, /usr/local/bin/veroscudo use *
+$USER_NAME ALL=(root) NOPASSWD: $RULE
 EOF
 visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null && mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
 chmod 440 /etc/sudoers.d/veroscudo
 echo
-echo "INSTALL OK (alpha). Turn on: sudo veroscudo on   Off: sudo veroscudo off   Status: veroscudo status"
+echo "INSTALL OK (alpha). The program is $BIN - put $PREFIX/bin on your PATH (new shell afterwards):"
+echo "    echo 'export PATH=\"$PREFIX/bin:\$PATH\"' >> ~/.zprofile"
+echo "Turn on: sudo veroscudo on   Off: sudo veroscudo off   Status: veroscudo status"
 echo "Profiles: veroscudo profiles   Switch: sudo veroscudo use <profile>"
 echo "macOS reports no 'you hung up' reason: after disconnecting in System Settings, run 'sudo veroscudo off'."

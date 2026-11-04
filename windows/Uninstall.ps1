@@ -2,6 +2,10 @@
 <# Removes tasks, the WFP filters (and any 1.0.x firewall changes), the Wi-Fi fix, shortcuts and the program.
    Keeps config + credentials unless -Purge. #>
 param([string]$InstallDir = '', [switch]$Purge)
+# Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
+# module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
+# System folders only, before anything else is loaded (-NoProfile does not cover this).
+$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
 # system folders from the OS and HKLM, never from environment variables (this runs elevated with your environment)
 function Get-SysFolder([string]$Name, [string]$Key) {
     $drive = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\')

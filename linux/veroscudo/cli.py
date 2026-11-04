@@ -90,7 +90,17 @@ def main(argv: list[str] | None = None) -> int:
         return do_import(a.name)
     a.name = a.name[0] if a.name else None
     store = StateStore()
-    cfg = Config.load(active=store.active)
+    try:
+        cfg = Config.load(active=store.active)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # fail closed: an armed machine must not boot open because config.json is missing or broken. The daemon exits too
+        # (launchd/systemd restart it), so the lockdown stays until the file is fixed and `veroscudo on` is run again.
+        if a.action in ("boot", "daemon") and store.armed:
+            firewall.apply(firewall.render_lockdown())
+            logging.getLogger("veroscudo").error("config.json unusable (%s) - armed: everything but DHCP is blocked until it is fixed", e)
+            return 2
+        print(f"veroscudo: {e}", file=sys.stderr)
+        return 2
     if a.action == "status":
         return status(cfg, store)
     if a.action == "profiles":

@@ -10,6 +10,10 @@ param(
     [switch]$DisconnectOthers,       # with -Action on: end every other connected VPN first (your choice)
     [switch]$Force                   # with -Action on: turn on even though another VPN is connected (its traffic is blocked)
 )
+# Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
+# module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
+# System folders only, before anything else is loaded (-NoProfile does not cover this).
+$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
 if ($Action -eq 'on' -and $DisconnectOthers) { $Action = 'on-disconnect' } elseif ($Action -eq 'on' -and $Force) { $Action = 'on-force' }
 Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Force
 try {

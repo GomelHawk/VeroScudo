@@ -3,6 +3,74 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
+## [Unreleased]
+
+### Security (review 2026-11-05 of 1.3.0, read-only; the install surface this time)
+- Windows: **`PSModulePath` pinned to the system module folders** in every script that runs elevated (`VeroScudo.ps1`,
+  `Install.ps1`, `Uninstall.ps1`, `Set-VpnCredential.ps1`, the tray's elevated save). The guard tasks run elevated as
+  the signed-in user, and PowerShell auto-loads modules such as VpnClient from the user's writable
+  `Documents\WindowsPowerShell\Modules` first: a module planted there by any program running as that user ran as
+  administrator the moment `schtasks /run \VeroScudo\Off` fired. `-NoProfile` never covered this.
+- Windows: a custom `-InstallDir` gets the same administrators-only ACL as the state folder, and the installer refuses a
+  folder with a weak ancestor - one that lets a non-administrator rename or replace folders (a data drive's root, the
+  user profile): the folder itself could be renamed away and a planted one put in its place, and the elevated tasks
+  run the scripts from there. Program Files gave all of that by default.
+- macOS: the daemon's venv is built from Apple's `/usr/bin/python3` only (Homebrew's is user-owned on Intel Macs), and
+  the installer refuses to continue when `/opt` or the program folder is not root's and closed to others.
+- macOS: the program moved from `/usr/local/lib/veroscudo` to **`/opt/veroscudo`**. On Intel Macs Homebrew makes
+  `/usr/local/lib` and `/usr/local/bin` writable by the user, so the folder the root daemon and the passwordless sudo
+  rule ran from could be swapped by a user-level process; the installer also chowned `/usr/local/bin` to root, which
+  broke Homebrew. The sudo rule names root-owned paths only; `/usr/local/bin` is never created or chowned.
+- Linux, macOS: **boot fails closed without a usable `config.json`**. The CLI read the config before the boot step, so a
+  missing or broken file aborted `veroscudo boot` (and the daemon) before any filter was applied: an armed machine
+  started open. Now a lockdown ruleset (loopback, DHCP, neighbour discovery only) is applied and stays until the file
+  is fixed.
+- macOS: `pfctl -d` was not noticed - the anchor's rules stayed listed, status said *active*, nothing was enforced until
+  reboot. `is_active` now requires pf to be enabled, and the watchdog enables it again within 15 s.
+
+### Fixed
+- Linux: **Docker and libvirt networking broke while armed, even with the tunnel up** (B5 of the review). The forward
+  chain let containers out through the tunnel, but policy drop in all three chains cut everything that stays on the
+  machine: host <-> container (a published port on localhost), container <-> container on one Docker bridge
+  (br_netfilter sends those frames through the forward hook), a VM's DHCP and DNS from libvirt's dnsmasq. Host-only
+  bridges (every port virtual: docker0, br-*, virbr0, lxdbr0, podman0) are now allowed in input, output and
+  bridge-to-bridge forward in every state; their way out is still the tunnel only, and a bridge with a physical card
+  enslaved is never allowed. `"vm": "auto"` also detects such bridges.
+- Linux, macOS: `veroscudo status` (and the tray) crashed while the daemon's reconnect was running: the user may not
+  signal root's process, that was read as "dead", and deleting the root-owned lock then threw. A process that cannot
+  be signalled is alive.
+- Linux: the tray icons were never installed from the release archive (the installer looked one folder up, which is
+  right for a git checkout only); a missing icon folder is reported instead of silently skipped.
+- macOS: the log said `tunnel=DOWN` for every change (the up/down word was derived from an nftables-only pattern);
+  the daemon now logs the interface it actually allowed.
+
+### Changed
+- Windows: **one handler per profile type.** Everything that differs between the built-in client, OpenVPN and WireGuard
+  (label, defaults, connected check, tunnel adapter, server permits, dial, hang-up, status and failure text, foreign
+  tunnels) lives in one table at the end of the core module; the dispatching `if type -eq ...` chains at 14 call sites
+  are gone (45 type comparisons -> 27, the rest are type-specific code, not dispatch). No behaviour change: the full unit
+  suite passes unchanged.
+- Windows: `Invoke-VeroAction` is a 25-line dispatcher; each action (arm, on, off, on-event, watchdog, switch, status) is
+  its own function with the body it had. `Sync-VeroKillSwitchCore` is split into `Get-VeroSyncPlan` (what the filters
+  must look like now) and the apply/log/refresh step. No behaviour change.
+- Windows: the core module is split by topic into `windows/Core/NN-<topic>.ps1` (13 files, 40-540 lines each);
+  `VeroScudo.Core.psm1` is the loader that dot-sources them in a fixed order and exports the public functions. One
+  module, one scope: callers, tests and the installed layout see the same module name as before. The installer copies
+  the parts; the release archive and the signing step include them.
+- Windows: **the tray has unit tests.** What the tray decides - state, title and text from the guard's facts, the exit
+  location line, "a state file changed", the per-user preferences, the update-notice rule - moved from the WinForms
+  script into `VeroScudo.Tray.psm1` as functions with explicit inputs, tested in `tests/VeroScudo.Tray.Tests.ps1`
+  (6 groups). `VeroScudoTray.ps1` calls them with its globals and only draws.
+- CI: PSScriptAnalyzer now fails on parse errors too (the settings listed Error and Warning only, so a script that no
+  test imports - installer, tray - could have shipped unparseable).
+- Linux, macOS: the backend contract (the VPN-control and firewall functions the shared code may call) is declared in
+  `backend.py` and checked at startup on both platforms, and a test keeps the shared code inside it; the pf backend
+  reuses the nftables backend's address helpers (one copy); the tray takes its VPN backend from `backend.py` like the
+  daemon; the guard is now tested with the pf backend swapped in; two Windows test
+  groups named after a commit are named after what they check.
+- Windows: the watchdog's single-instance mutex is named per home folder, so the unit tests (temp home) no longer meet
+  the installed watchdog's mutex - one test failed on a machine with VeroScudo running, passed on a clean CI runner.
+
 ## [1.3.0] - 2026-11-04
 
 Reserve VPN types (OpenVPN, WireGuard - beta), every Windows VPN type armed, Reconnect, import from Windows, a working

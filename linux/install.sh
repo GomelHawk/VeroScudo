@@ -31,9 +31,12 @@ PY
 else
   python3 -c 'from veroscudo.config import Config; Config.load()' || { echo "config.json is not valid - fix it first"; exit 1; }
 fi
+# icons: next to this script in the release archive (VeroScudo-linux/assets), one level up in a git checkout
+ICONS=""
+for d in "$HERE/assets/icons/png" "$HERE/../assets/icons/png"; do [ -f "$d/protected-48.png" ] && { ICONS="$d"; break; }; done
+[ -n "$ICONS" ] || echo "WARNING: tray icons not found (assets/icons/png) - the tray will use a generic icon"
 for s in protected blocked off attention; do
-  src="$HERE/../assets/icons/png/$s-48.png"
-  [ -f "$src" ] && install -m 644 "$src" "/usr/share/veroscudo/icons/$s.png"
+  [ -n "$ICONS" ] && install -m 644 "$ICONS/$s-48.png" "/usr/share/veroscudo/icons/$s.png"
 done
 install -m 644 "$HERE/systemd/veroscudo.service" /etc/systemd/system/veroscudo.service
 install -m 644 "$HERE/systemd/veroscudo-boot.service" /etc/systemd/system/veroscudo-boot.service

@@ -106,3 +106,40 @@ def test_ipsec_esp_from_the_server_is_let_in():
     c = Config.from_text('{"profiles":[{"profile":"L","server":"s.example.com","vpnType":"l2tp"}]}')
     inp = render_ruleset(c, ["203.0.113.5"], None, vm_allowed=False).split("chain input")[1]
     assert "ip saddr { 203.0.113.5 } meta l4proto esp accept" in inp
+
+
+def test_lockdown_ruleset_has_no_permit_beyond_loopback_dhcp_and_nd():
+    from veroscudo.firewall import render_lockdown
+    rs = render_lockdown()
+    assert rs.count("policy drop") == 3 and "ct mark" not in rs
+    for line in rs.splitlines():
+        if "accept" in line:
+            assert " lo " in line + " " or "dport 67" in line or "dport 68" in line or "dport 547" in line or "dport 546" in line or "icmpv6" in line, line
+
+
+def test_bridge_local_traffic_is_allowed_in_every_state_but_never_out_of_the_machine():
+    """B5 (review 2026-11-05): with policy drop in all three chains, host <-> container, container <-> container on a
+    Docker bridge (br_netfilter) and a VM's DHCP/DNS from dnsmasq were dropped - even with the tunnel up. Bridge-local
+    traffic stays on the machine, so it is allowed like loopback; the bridges' way out is still the tunnel only."""
+    for tun, vm in (("tun0", True), (None, False)):
+        rs = render_ruleset(CFG, ["203.0.113.5"], tun, vm_allowed=vm, bridges=("docker0", "virbr0"))
+        out, inp, fwd = rs.split("chain input")[0], rs.split("chain input")[1].split("chain forward")[0], rs.split("chain forward")[1]
+        assert 'oifname { "docker0", "virbr0" } accept' in out
+        assert 'iifname { "docker0", "virbr0" } accept' in inp
+        assert 'iifname { "docker0", "virbr0" } oifname { "docker0", "virbr0" } accept' in fwd
+        assert "wlp2s0" not in rs and "eth0" not in rs
+        if tun:
+            assert 'oifname "tun0" accept' in fwd
+        else:
+            assert "oifname" not in fwd.replace('oifname { "docker0", "virbr0" }', "")   # no way out while blocked
+
+
+def test_no_bridge_rules_without_bridges():
+    rs = render_ruleset(CFG, ["203.0.113.5"], "tun0", vm_allowed=True)
+    assert "docker0" not in rs and "{ \"" not in rs
+
+
+@pytest.mark.parametrize("bad", ["br0; accept", "x" * 16])
+def test_refuses_a_strange_bridge_name(bad):
+    with pytest.raises(ValueError):
+        render_ruleset(CFG, ["203.0.113.5"], "tun0", vm_allowed=True, bridges=(bad,))

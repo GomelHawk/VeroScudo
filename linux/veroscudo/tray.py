@@ -9,7 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, keepawake, nm, update
+from . import __version__, keepawake, update
+from .backend import nm
 from .config import Config
 from .state import StateStore, kind_label, switch_notice
 

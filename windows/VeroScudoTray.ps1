@@ -178,6 +178,7 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Tray.psm1') -Force      # the tray's decisions (what to show), unit-tested; this file only draws
 
 # ---------------------------------------------------------------- state
 $global:Paths   = Get-VeroPath
@@ -342,19 +343,11 @@ function Update-ExitFetch {
         $j.PS.Dispose(); $global:ExitJob = $null; $global:ExitError = 'no answer within 20 s'
     }
 }
+
 function Get-ExitView($st) {
-    <# What the location line shows: Fresh = looked up through the tunnel that is up now; otherwise grey, with its time. #>
     $c = if ($global:PreviewExit) { $global:PreviewExit } else { (Get-TrayPref).exitInfo }
-    if (-not $c -or -not $c.Ip) {
-        $msg = if ($global:ExitJob) { 'Checking where your traffic leaves...' } elseif ($global:ExitError) { "Location not available - $($global:ExitError)" } else { 'Location: shown once the VPN is connected' }
-        return @{ Has = $false; Text = $msg; Fresh = $false }
-    }
-    $t = try { [datetime]::Parse([string]$c.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind) } catch { [datetime]::MinValue }
-    $fresh = $st.State -eq 'protected' -and $global:Config -and [string]$c.Profile -eq $global:Config.Profile -and ($global:PreviewExit -or $t -ge $global:ProtectedSince)
-    $country = try { (New-Object System.Globalization.RegionInfo([string]$c.Country)).EnglishName } catch { [string]$c.Country }
-    $right = if ($global:ExitJob) { 'checking...' } elseif ($fresh) { [string]$c.Ip } else { '{0} - {1:HH:mm}' -f $c.Ip, $t }
-    @{ Has = $true; Code = ([string]$c.Country).ToUpper(); Place = ((@($country, [string]$c.City) | Where-Object { $_ }) -join ' / '); Right = $right; Fresh = $fresh
-       Tip = (('{0}  {1}' -f $c.Ip, $c.Org) + "`r`n" + ('from {0}, {1:yyyy-MM-dd HH:mm}, profile {2}' -f $c.Source, $t, $c.Profile)) }
+    ConvertTo-VeroExitView -Info $c -State $st.State -ProfileName $(if ($global:Config) { [string]$global:Config.Profile } else { '' }) -ProtectedSince $global:ProtectedSince `
+        -Checking:([bool]$global:ExitJob) -Failure ([string]$global:ExitError) -Preview:([bool]$global:PreviewExit)
 }
 
 $global:Expect = $null
@@ -369,7 +362,7 @@ function Get-TrayExpect {
     $null
 }
 function Get-StateFacts {
-    <# What the guard reports right now; ConvertTo-StateView turns it into the tray's state, title and text. #>
+    <# What the guard reports right now; ConvertTo-VeroTrayState turns it into the tray's state, title and text. #>
     if (-not $global:Config) { return @{ Configured = $false } }
     $name = $global:Config.Profile; $type = $global:Config.Type
     $armed = Test-VeroArmed
@@ -386,37 +379,9 @@ function Get-StateFacts {
         NativeNext  = $(if ($nb) { try { '{0:HH:mm}' -f [datetime]::Parse([string]$nb.Next, $null, [Globalization.DateTimeStyles]::RoundtripKind) } catch { 'soon' } } else { $null })
     }
 }
-function ConvertTo-StateView($f) {
-    if (-not $f.Configured) { return [pscustomobject]@{ State = 'attention'; Title = 'Not configured'; Text = 'Run Install.ps1 to create config.json.'; Armed = $false; Connected = $false } }
-    $name = $f.Name; $why = $null; $head = 'Attention'
-    $conf = @($f.Conflicts | Where-Object { $_ })
-    if ($f.NativeNext) { $head = 'Helper blocked'; $why = "Windows blocked VeroScudo's helper (Smart App Control). The kill-switch stays on, but self-repair and automatic redial are paused - next try at $($f.NativeNext)." }
-    elseif (-not $f.Cred) { $head = 'Password missing'; $why = "No password stored for '$name', so VeroScudo cannot redial it by itself. Add it in Settings: select the profile, Set password..." }
-    elseif ($f.AuthBlocked) { $head = 'Password rejected'; $why = "The VPN server rejected the password for '$name'. Store the right one in Settings, then Reconnect - traffic stays blocked meanwhile." }
-    elseif ($f.Otp) { $head = 'Code needed'; $why = "'$name' asks for a one-time code: $($f.Otp)" }
-    elseif ($f.Armed -and $f.Up -and $conf.Count -gt 0) {
-        $head = 'Protected'                                               # you ARE protected - the note is about something else
-        $why = "Note: $($conf[0])$(if ($conf.Count -gt 1) { " (+$($conf.Count - 1) more - Copy report lists them)" })."
-    }
-    $state = if ($why) { 'attention' } elseif (-not $f.Armed) { 'off' } elseif ($f.Up) { 'protected' } else { 'blocked' }
-    $title, $text = switch ($state) {
-        'protected' { 'Protected', "$name ($(Get-VeroTypeLabel $f.Type)) is connected and the kill-switch is on." }
-        'blocked'   {
-            switch ([string]$f.Expect) {
-                'connect'   { 'Connecting', "Kill-switch on: traffic is blocked until $name is connected." }
-                'switch'    { 'Switching', "Switching to $name. Traffic stays blocked until it is connected." }
-                'reconnect' { 'Reconnecting', "Reconnecting $name. Traffic stays blocked until the tunnel is back." }
-                default     { 'Blocked - reconnecting', "$name is not connected. Nothing leaves this PC until it is back." }
-            }
-        }
-        'off'       { 'Off', 'The VPN is turned off: normal network, not protected.' }
-        default     { $head, $why }
-    }
-    [pscustomobject]@{ State = $state; Title = $title; Text = $text; Armed = [bool]$f.Armed; Connected = [bool]$f.Up; Expected = ($state -eq 'blocked' -and [bool]$f.Expect) }
-}
 function Get-State {
-    if ($global:PreviewFacts) { return ConvertTo-StateView $global:PreviewFacts }
-    ConvertTo-StateView (Get-StateFacts)
+    if ($global:PreviewFacts) { return ConvertTo-VeroTrayState $global:PreviewFacts }
+    ConvertTo-VeroTrayState (Get-StateFacts)
 }
 function Invoke-GuardTask([string]$name) { Start-Process (Join-Path (Get-VeroSystemDir System) 'schtasks.exe') -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
 function Get-LastEvents([int]$n = 6, [string]$After = '') {
@@ -906,7 +871,9 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     $imp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($imports | ForEach-Object { @{ Profile = $_.Profile; Source = $_.Source } }) -Depth 3 -Compress)))
     $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
-    $script = "try { Import-Module '$mod' -Force; `$list = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$imp')) | ConvertFrom-Json; foreach (`$i in @(`$list | ForEach-Object { `$_ })) { if (`$i) { `$null = Import-VeroOpenVpnProfile -ProfileName `$i.Profile -Source `$i.Source } }; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
+    # the elevated child pins its module path first (a planted module in the user's Documents would otherwise run as admin)
+    $sysMods = "`$env:PSModulePath = `"`$PSHOME\Modules;`" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'); "
+    $script = $sysMods + "try { Import-Module '$mod' -Force; `$list = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$imp')) | ConvertFrom-Json; foreach (`$i in @(`$list | ForEach-Object { `$_ })) { if (`$i) { `$null = Import-VeroOpenVpnProfile -ProfileName `$i.Profile -Source `$i.Source } }; Save-VeroConfig -Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))) | Out-Null; exit 0 } catch { exit 1 }"
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
     $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
@@ -1053,15 +1020,8 @@ $mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:T
 $mProf.DropDown.Padding = Pad 0 6 0 6
 $mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
 $global:TrayFile = Join-Path $global:Paths.UserDir 'tray.json'              # per-user tray choices (the state folder is read-only for the tray)
-function Get-TrayPref {
-    $o = @{ keepAwake = $false; lastProfile = ''; eventsClearedAt = ''; showExit = $true; exitInfo = $null }
-    try { if (Test-Path $global:TrayFile) { $j = Get-Content $global:TrayFile -Raw | ConvertFrom-Json; foreach ($k in @($o.Keys)) { if ($j.PSObject.Properties[$k]) { $o[$k] = $j.$k } } } } catch { Write-Verbose 'tray.json unreadable' }
-    $o
-}
-function Set-TrayPref([string]$key, $value) {
-    $o = Get-TrayPref; $o[$key] = $value
-    try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; $o | ConvertTo-Json | Set-Content $global:TrayFile -Encoding UTF8 } catch { Write-Verbose 'tray.json not writable' }
-}
+function Get-TrayPref { Get-VeroTrayPref -Path $global:TrayFile }
+function Set-TrayPref([string]$key, $value) { Set-VeroTrayPref -Path $global:TrayFile -Key $key -Value $value }
 function Test-KeepAwakeSaved { [bool](Get-TrayPref).keepAwake }
 function Save-KeepAwake([bool]$on) { Set-TrayPref 'keepAwake' $on }
 $global:ForeignCache = @{ Time = [datetime]::MinValue; Items = @() }
@@ -1126,14 +1086,7 @@ function Request-TurnOn {
 }
 
 $global:Stamps = @{}
-function Test-FileChanged([string]$path) {
-    # true once per new write of a state file (the guard writes them; the tray only reads)
-    $t = if (Test-Path $path) { (Get-Item $path).LastWriteTimeUtc.Ticks } else { 0 }
-    $first = -not $global:Stamps.ContainsKey($path)
-    $changed = (-not $first) -and $t -ne 0 -and $global:Stamps[$path] -ne $t
-    $global:Stamps[$path] = $t
-    $changed
-}
+function Test-FileChanged([string]$path) { Test-VeroTrayFileChanged -Path $path -Stamps $global:Stamps }
 $global:ShownConflicts = @()
 function Show-ForeignNotice {
     <# The guard refused On (shortcut, script), or a VPN that is not a VeroScudo profile connected while armed. #>
@@ -1225,16 +1178,9 @@ function Invoke-UpdateCheck([switch]$Force) {
     $st = Get-State; if ($st.State -eq 'blocked') { return }
     $info = @{ checked = '1970-01-01'; notified = '' }
     if (Test-Path $global:UpdateFile) { try { $j = Get-Content $global:UpdateFile -Raw | ConvertFrom-Json; $info.checked = $j.checked; $info.notified = $j.notified } catch { Write-Verbose 'update.json unreadable' } }
-    $rel = Get-VeroLatestRelease
-    $info.checked = (Get-Date).ToString('o')
-    if ($rel -and (Test-VeroNewerVersion -Tag $rel.Tag)) {
-        $global:Update = $rel
-        $mUpd.Text = "Update available: $($rel.Tag)"
-        if ($info.notified -ne $rel.Tag) {
-            $notify.ShowBalloonTip(8000, "VeroScudo $($rel.Tag) is available", "You run $(Get-VeroVersion). Open the tray menu to see the release.", [System.Windows.Forms.ToolTipIcon]::Info)
-            $info.notified = $rel.Tag
-        }
-    } else { $global:Update = $null; $mUpd.Text = 'Check for updates' }
+    $r = Resolve-VeroUpdateNotice -Info $info -Release (Get-VeroLatestRelease)
+    $global:Update = $r.Update; $mUpd.Text = $r.MenuText; $info = $r.Info
+    if ($r.Balloon) { $notify.ShowBalloonTip(8000, "VeroScudo $($r.Update.Tag) is available", "You run $(Get-VeroVersion). Open the tray menu to see the release.", [System.Windows.Forms.ToolTipIcon]::Info) }
     try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; $info | ConvertTo-Json | Set-Content $global:UpdateFile } catch { Write-Verbose 'update.json not writable' }
 }
 

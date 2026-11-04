@@ -9,6 +9,7 @@ pfctl -a com.apple/250.VeroScudo -F all 2>/dev/null
 rm -rf /var/run/veroscudo
 rm -f /var/lib/veroscudo/armed.flag      # a later reinstall must not start armed
 [ "${1:-}" = "--purge" ] && rm -rf /etc/veroscudo /var/lib/veroscudo
-rm -f /usr/local/bin/veroscudo
-rm -rf /usr/local/lib/veroscudo
+# the program: /opt/veroscudo (1.3.1+), /usr/local/lib/veroscudo (1.3.0 alpha); the /usr/local/bin link only if it is ours
+case "$(readlink /usr/local/bin/veroscudo 2>/dev/null)" in */veroscudo/*) rm -f /usr/local/bin/veroscudo ;; esac
+rm -rf /opt/veroscudo /usr/local/lib/veroscudo
 echo "UNINSTALL OK"

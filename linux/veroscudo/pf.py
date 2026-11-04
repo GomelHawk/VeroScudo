@@ -6,50 +6,45 @@ does not match an allow rule stops here, whatever later rules would say. pf is e
 (pfctl -E) that is released on clear, so a pf the user or another app enabled stays enabled."""
 from __future__ import annotations
 
-import ipaddress
 import re
 import subprocess
 from pathlib import Path
 
 from .config import Config, server_rules
-from .firewall import DnsPolicy
+from .firewall import IFNAME, DnsPolicy, split_families
 
 ANCHOR = "com.apple/250.VeroScudo"
 TOKEN = Path("/var/run/veroscudo-pf.token")
-_IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
 
-
-def _split(addrs) -> tuple[list[str], list[str]]:
-    v4, v6 = [], []
-    for a in addrs:
-        net = ipaddress.ip_network(str(a), strict=False)
-        (v4 if net.version == 4 else v6).append(str(a))
-    return v4, v6
+# the one rule every VeroScudo anchor ends with; is_active() looks for it
+_FINAL = "block drop quick all"
+_BASE = [
+    "pass quick on lo0 all",
+    "pass out quick inet proto udp from any port 68 to any port 67 keep state (if-bound)",
+    "pass in quick inet proto udp from any port 67 to any port 68",
+    "pass out quick inet6 proto udp from any port 546 to any port 547 keep state (if-bound)",
+    "pass quick inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv, routersol, routeradv }",
+]
 
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
-                   dns: DnsPolicy | None = None) -> str:
-    if tun_iface is not None and not _IFNAME.match(tun_iface):
+                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = ()) -> str:
+    if tun_iface is not None and not IFNAME.match(tun_iface):
         raise ValueError(f"refusing interface name {tun_iface!r}")
     dns = dns or DnsPolicy()
-    srv4, srv6 = _split(server_ips)
-    lan4, lan6 = _split(cfg.lan_allow)
+    srv4, srv6 = split_families(server_ips)
+    lan4, lan6 = split_families(cfg.lan_allow)
     # states bound to the interface they were created on (if-bound): a flow that used the tunnel cannot continue over the
     # physical NIC once the tunnel is gone (pf's default floating states would let it)
     kb = "keep state (if-bound)"
-    lines = ["pass quick on lo0 all"]
+    lines = _BASE[:1]
     if tun_iface:
         lines.append(f"pass quick on {tun_iface} all {kb}")
-    lines += [
-        f"pass out quick inet proto udp from any port 68 to any port 67 {kb}",
-        "pass in quick inet proto udp from any port 67 to any port 68",
-        f"pass out quick inet6 proto udp from any port 546 to any port 547 {kb}",
-        "pass quick inet6 proto icmp6 icmp6-type { neighbrsol, neighbradv, routersol, routeradv }",
-    ]
+    lines += _BASE[1:]
     if not tun_iface:
         # macOS resolves through mDNSResponder; DNS only while blocked (redial), only to the network's resolvers
         # none known: no DNS permit at all (never "port 53 to anywhere")
-        d4, d6 = _split(dns.servers)
+        d4, d6 = split_families(dns.servers)
         for fam, lst in (("inet", d4), ("inet6", d6)):
             if lst:
                 lines.append(f"pass out quick {fam} proto {{ udp tcp }} to {{ {', '.join(lst)} }} port 53 {kb}")
@@ -66,26 +61,50 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         for cidr in lst:
             lines.append(f"pass quick {fam} to {cidr} {kb}")
             lines.append(f"pass in quick {fam} from {cidr} {kb}")
-    lines += ["block drop quick all", ""]
+    lines += [_FINAL, ""]
     return "\n".join(lines)
 
 
+def render_lockdown() -> str:
+    """Fail closed without a usable config.json: loopback, DHCP and neighbour discovery only."""
+    return "\n".join(_BASE + [_FINAL, ""])
+
+
+def _run(args: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(["pfctl", *args], check=False, capture_output=True, text=True, **kw)
+
+
+def enabled() -> bool:
+    """pf itself is on. `pfctl -d` (by anyone as root, or another tool) turns it off with the anchor still listed."""
+    r = _run(["-s", "info"])
+    return r.returncode == 0 and re.search(r"^Status:\s*Enabled", r.stdout, re.M) is not None
+
+
+def _enable() -> None:
+    r = _run(["-E"])
+    m = re.search(r"Token\s*:\s*(\d+)", r.stdout + r.stderr)
+    if m:
+        TOKEN.write_text(m.group(1))
+
+
 def apply(ruleset: str) -> None:
-    if not TOKEN.exists():
-        r = subprocess.run(["pfctl", "-E"], check=False, capture_output=True, text=True)
-        m = re.search(r"Token\s*:\s*(\d+)", r.stdout + r.stderr)
-        if m:
-            TOKEN.write_text(m.group(1))
-    subprocess.run(["pfctl", "-a", ANCHOR, "-f", "-"], input=ruleset, text=True, check=True, capture_output=True)
+    # a token alone is not proof: pf may have been disabled since (pfctl -d) - then enable it again (a fresh token)
+    if not TOKEN.exists() or not enabled():
+        _enable()
+    r = _run(["-a", ANCHOR, "-f", "-"], input=ruleset)
+    if r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, "pfctl", r.stdout, r.stderr)
 
 
 def clear() -> None:
-    subprocess.run(["pfctl", "-a", ANCHOR, "-F", "all"], check=False, capture_output=True)
+    _run(["-a", ANCHOR, "-F", "all"])
     if TOKEN.exists():
-        subprocess.run(["pfctl", "-X", TOKEN.read_text().strip()], check=False, capture_output=True)
+        _run(["-X", TOKEN.read_text().strip()])
         TOKEN.unlink(missing_ok=True)
 
 
 def is_active() -> bool:
-    r = subprocess.run(["pfctl", "-a", ANCHOR, "-s", "rules"], check=False, capture_output=True, text=True)
-    return r.returncode == 0 and "block drop quick all" in r.stdout.replace("  ", " ")
+    """The anchor ends with the final block AND pf is enabled - listed rules in a disabled pf protect nothing. The daemon's
+    watchdog re-applies (and re-enables) within 15 s when this turns false, as the Linux backend does after `nft flush`."""
+    r = _run(["-a", ANCHOR, "-s", "rules"])
+    return r.returncode == 0 and _FINAL in r.stdout.replace("  ", " ") and enabled()

@@ -28,7 +28,7 @@ firewalls, so a careless merge can lock someone out of their own laptop.
 
 A release is what users install over the version they already have, so test exactly that:
 
-1. Bump the version in `windows/VeroScudo.Core.psm1` and `linux/veroscudo/__init__.py` (the Linux
+1. Bump the version in `windows/Core/10-Settings.ps1` (`$script:Version`) and `linux/veroscudo/__init__.py` (the Linux
    package reads it from there); move
    `[Unreleased]` in `CHANGELOG.md` to the new version and date.
 2. Unit tests and lint pass (see Development).

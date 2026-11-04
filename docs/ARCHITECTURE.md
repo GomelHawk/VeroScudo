@@ -55,7 +55,10 @@ platform's VPN subsystem, never from heuristics:
 ## Profile types (Windows)
 
 Every profile has a `type`; the guard, the filters, the watchdog and the tray are shared, and each type supplies five
-things: how to tell the tunnel is up, its adapter, its server endpoints, how to dial and how to hang up.
+things: how to tell the tunnel is up, its adapter, its server endpoints, how to dial and how to hang up. In the code
+that is one table, `$script:TypeHandler` in `windows/Core/95-TypeHandlers.ps1` (`Get-VeroTypeHandler <type>`), with one
+entry per type and one scriptblock per operation; the shared code calls `& $h.Op args` and never asks "which type is
+this" itself. A new type is a new entry in that table plus its own functions.
 
 | | `ras` (default, stable) | `openvpn` (beta) | `wireguard` (beta) |
 |---|---|---|---|
@@ -216,7 +219,7 @@ connecting a VPN that is not configured is ignored.
 
 | | Windows | Linux | macOS (alpha) |
 |---|---|---|---|
-| program | `C:\Program Files\VeroScudo\` (+ `VeroScudo.Native.dll`, compiled at install) | python package (pip) | venv in `/usr/local/lib/veroscudo` |
+| program | `C:\Program Files\VeroScudo\` (+ `VeroScudo.Native.dll`, compiled at install) | python package (pip) | venv in `/opt/veroscudo` (root-owned; never Homebrew's `/usr/local`) |
 | config | `%ProgramData%\VeroScudo\config.json` | `/etc/veroscudo/config.json` | `/etc/veroscudo/config.json` |
 | state + log | `%ProgramData%\VeroScudo\state\` - Administrators/SYSTEM full, Users read only | `/var/lib/veroscudo/` (armed flag, active profile, server cache - survive reboot), `/run/veroscudo/` (lock), `/var/log/veroscudo.log` | `/var/lib/veroscudo/`, `/var/run/veroscudo/`, `/var/log/veroscudo.log` |
 | per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `keypass-<profile>.xml` (OpenVPN key), `otp-<profile>.txt` (one-time code, read once), `switch.request`, `update.json`, `tray.json` (keep awake, last profile for the switch notice) | `~/.config/veroscudo/tray.json` | – |
@@ -262,7 +265,9 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
   kernel data channel. `wireguard` needs `server` + `port` (its endpoint) and no username.
 - `protocol` (Linux/macOS): `tcp` or `udp` - the VPN control channel. On Windows it follows the profile's tunnel type.
 - `serverIps`: pin the server addresses (nothing is resolved for that profile).
-- `vm`: `"auto"` (detect WSL/Docker), `true`, `false`.
+- `vm`: `"auto"` (detect WSL / Docker / libvirt / host-only bridges), `true`, `false`. Linux: containers and VMs go out
+  through the tunnel only; bridge-local traffic (host <-> container, container <-> container, a VM's DHCP/DNS from
+  dnsmasq) is allowed in every state - it never leaves the machine. Bridges with a physical NIC enslaved are never allowed.
 - `wifiRecoveryFix` (Windows only): sets `HKLM\SOFTWARE\Microsoft\WcmSvc\EnableBadStateTracking=0`.
   Without it Windows resets the Wi-Fi adapter ~15 s after a tunnel is dialed under the
   kill-switch (WLAN AutoConfig event 4003) and kills the fresh tunnel. Reverted on uninstall.

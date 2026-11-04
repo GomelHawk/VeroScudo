@@ -1,5 +1,5 @@
 @{
-    Severity     = @('Error', 'Warning')
+    Severity     = @('ParseError', 'Error', 'Warning')     # ParseError: a script that no test imports must still parse
     ExcludeRules = @(
         'PSAvoidUsingWriteHost',          # the scripts are CLI tools; Write-Host is the intended output channel
         'PSUseShouldProcessForStateChangingFunctions',

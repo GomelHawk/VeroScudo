@@ -114,6 +114,10 @@ def other_tunnels(own: str | None) -> list[str]:
     return []
 
 
+def vm_bridges() -> list[str]:
+    return []                             # VMs/containers are not filtered on macOS (alpha)
+
+
 def check(cfg) -> list[str]:
     return [f"{p.name}: no VPN service with this name (System Settings > VPN)" for p in cfg.profiles if not _status(p.name)]
 

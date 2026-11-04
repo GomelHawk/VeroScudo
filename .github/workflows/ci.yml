@@ -28,7 +28,7 @@ jobs:
         run: |
           $r = Invoke-ScriptAnalyzer -Path windows -Recurse -Settings windows/PSScriptAnalyzerSettings.psd1
           $r | Format-Table -AutoSize
-          if ($r | Where-Object Severity -in 'Error','Warning') { throw "PSScriptAnalyzer found $($r.Count) issue(s)" }
+          if ($r | Where-Object Severity -in 'ParseError','Error','Warning') { throw "PSScriptAnalyzer found $($r.Count) issue(s)" }
       - name: Unit tests (Windows PowerShell 5.1, the runtime the guard uses)
         shell: powershell
         run: |

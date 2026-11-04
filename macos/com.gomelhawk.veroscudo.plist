@@ -5,7 +5,7 @@
     <key>Label</key><string>com.gomelhawk.veroscudo</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/veroscudo</string>
+        <string>/opt/veroscudo/bin/veroscudo</string>
         <string>daemon</string>
     </array>
     <!-- at boot: re-applies the kill-switch when armed (pf anchors do not survive a reboot), then watches and redials -->

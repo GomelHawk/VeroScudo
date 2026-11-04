@@ -23,6 +23,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not [Environment]::Is64BitProcess) { throw 'Run Install.ps1 from 64-bit PowerShell (C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe).' }
+# Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
+# module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
+# System folders only, before anything else is loaded (-NoProfile does not cover this).
+$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
 $Src = $PSScriptRoot
 Import-Module (Join-Path $Src 'VeroScudo.Core.psm1') -Force
 # system folders from the OS: this runs elevated with YOUR environment, where any program you run can plant %ProgramFiles%
@@ -32,9 +36,17 @@ if (-not $InstallDir) { $InstallDir = Join-Path (Get-VeroSystemDir ProgramFiles)
 # --- self-test before touching anything: the kill-switch is built from these WFP layer/field ids
 Test-VeroNative | Out-Null
 Write-Host 'WFP self-test OK'
+# a custom -InstallDir: the elevated tasks run VeroScudo from it, so no folder above it may let a user rename or replace it
+$weak = Test-VeroAdminOnlyPath $InstallDir
+if ($weak) { throw "refusing -InstallDir '$InstallDir': '$weak' lets non-administrators rename or replace folders in it, and the elevated tasks run VeroScudo from there. Use a folder under $(Get-VeroSystemDir ProgramFiles)." }
 
 $p = Get-VeroPath
 New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-Null
+
+# --- program folder: administrators and SYSTEM write, everyone else reads. Program Files gives that by default; a custom
+# -InstallDir inherits whatever its parent allows - and the elevated tasks run run.vbs / VeroScudo.ps1 from here.
+& icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+& icacls.exe $InstallDir /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
 
 # --- state folder: administrators and SYSTEM only; users may read (the tray shows state and log)
 # Without this, ProgramData's default ACL lets any user create files in it (and own them).
@@ -161,8 +173,13 @@ if (Test-Path -LiteralPath $oldDll) {
 }
 
 # --- program files
-foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1', 'config.example.json') {
+foreach ($f in 'VeroScudo.Core.psm1', 'VeroScudo.Tray.psm1', 'VeroScudo.Native.cs', 'VeroScudo.ps1', 'VeroScudoTray.ps1', 'run.vbs', 'Set-VpnCredential.ps1', 'Uninstall.ps1', 'config.example.json') {
     Copy-Item (Join-Path $Src $f) (Join-Path $InstallDir $f) -Force
+}
+# the module's parts (Core\*.ps1): the module lists the files it loads, so copy exactly those
+New-Item -ItemType Directory -Path (Join-Path $InstallDir 'Core') -Force | Out-Null
+foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $Src 'Core') -Filter '*.ps1' | ForEach-Object Name)) {
+    Copy-Item (Join-Path $Src "Core\$f") (Join-Path $InstallDir "Core\$f") -Force
 }
 # compile the native helper once (a child process: this session already loaded the same types from source)
 $dll = Join-Path $InstallDir 'VeroScudo.Native.dll'

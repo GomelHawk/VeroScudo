@@ -4,7 +4,7 @@
 
 | Layer | Where | Runs in CI | What it pins |
 |---|---|---|---|
-| Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | config defaults/validation (per profile type), the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports, OpenVPN/WireGuard endpoints), struct layout of the native helper, sync/fail-closed, profile switching, Reconnect order and our own 631, the password pause, OpenVPN config checks / command line / management parser, WireGuard health and transitions, lock, update URLs |
+| Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | the tray's decisions (state/title/text, location line, update notice - `VeroScudo.Tray.Tests.ps1`), config defaults/validation (per profile type), the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports, OpenVPN/WireGuard endpoints), struct layout of the native helper, sync/fail-closed, profile switching, Reconnect order and our own 631, the password pause, OpenVPN config checks / command line / management parser, WireGuard health and transitions, lock, update URLs |
 | Unit (Linux/macOS) | `linux/tests/` (pytest) | yes | same, plus the rendered nftables and pf rulesets, tunnel-interface checks, the guard's event handling and switching with fakes |
 | Lint | PSScriptAnalyzer, ruff, shellcheck | yes | |
 | Real machine | `windows/tests-local/` | **no** | the actual firewall, VPN and scheduled tasks |

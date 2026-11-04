@@ -23,6 +23,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "nameservers", list)
     monkeypatch.setattr(nm, "kind", lambda p: "vpn")
     monkeypatch.setattr(nm, "nm_dns", list)
+    monkeypatch.setattr(nm, "vm_bridges", list)
 
     def up(p):
         calls["up"].append(p)
@@ -211,3 +212,16 @@ def test_a_stale_off_marker_is_ignored(env):
     g.reconnect_async = lambda: None
     g.on_event_down("Work", user_requested=False)
     assert g.store.armed and calls["clear"] == 0
+
+
+def test_bridges_are_in_the_ruleset_when_vm_is_wanted(env, monkeypatch):
+    g, calls, connected = env
+    monkeypatch.setattr(nm, "vm_bridges", lambda: ["docker0"])
+    monkeypatch.setattr(g, "vm_wanted", lambda: True)
+    connected.add("Work")
+    g.arm()
+    assert 'iifname { "docker0" } oifname { "docker0" } accept' in calls["apply"][-1]
+    assert 'oifname "tun0" accept' in calls["apply"][-1].split("chain forward")[1]
+    monkeypatch.setattr(g, "vm_wanted", lambda: False)                 # "vm": false - containers get nothing
+    g.enable_killswitch(True)
+    assert "docker0" not in calls["apply"][-1]
