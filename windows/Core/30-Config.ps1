@@ -244,6 +244,7 @@ function Import-VeroSavePayload {
     $imports = @(if ($payload.PSObject.Properties['Imports']) { $payload.Imports } else { @() }) | Where-Object { $_ }
     foreach ($i in $imports) { $null = Import-VeroOpenVpnText -ProfileName ([string]$i.Profile) -Text ([string]$i.Text) }
     Save-VeroConfig -Json ([string]$payload.Config) | Out-Null
+    Remove-VeroStaleOpenVpnFile -Config (Get-VeroConfig -Raw ([string]$payload.Config)) -Action 'save'   # a deleted profile's keys go too
 }
 
 function Test-VeroElevated {

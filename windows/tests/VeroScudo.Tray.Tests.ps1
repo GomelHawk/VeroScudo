@@ -121,11 +121,32 @@ Describe 'Resolve-VeroUpdateNotice: the update check decision' {
     }
 }
 
+Describe 'Test-VeroUacCancelled: No on the UAC prompt, recognised by its code (the text is in the system language)' {
+    It 'is true for ERROR_CANCELLED, also when wrapped (a .NET method call wraps it)' {
+        $w = New-Object System.ComponentModel.Win32Exception 1223
+        Test-VeroUacCancelled $w | Should -BeTrue
+        Test-VeroUacCancelled (New-Object System.Management.Automation.MethodInvocationException 'x', $w) | Should -BeTrue
+    }
+    It 'is false for any other failure, and for nothing' {
+        Test-VeroUacCancelled (New-Object System.ComponentModel.Win32Exception 2) | Should -BeFalse
+        Test-VeroUacCancelled (New-Object System.InvalidOperationException 'Operation canceled by the user') | Should -BeFalse
+        Test-VeroUacCancelled $null | Should -BeFalse
+    }
+    It 'the elevated save starts PowerShell through Process.Start, so the code survives' {
+        $src = Get-Content (Join-Path $PSScriptRoot '..\VeroScudoTray.ps1') -Raw
+        $src | Should -Match '\[System\.Diagnostics\.Process\]::Start\(\$si\)'
+        $src | Should -Not -Match 'Start-Process \$psExe -Verb RunAs'
+    }
+}
+
 Describe 'the tray native helpers (VeroScudo.Tray.cs) compile' {
     It 'compiles with the references the tray uses and defines every class the tray calls' -Skip:($env:OS -ne 'Windows_NT') {
         $src = Get-Content (Join-Path $PSScriptRoot '..\VeroScudo.Tray.cs') -Raw
         { Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $src -ErrorAction Stop } | Should -Not -Throw
-        foreach ($t in 'VeroNative', 'VeroKeepAwake', 'VeroTrayIcon', 'VeroTheme', 'VeroMenuRenderer', 'VeroMsg') { ($t -as [type]) | Should -Not -BeNullOrEmpty -Because $t }
+        foreach ($t in 'VeroNative', 'VeroKeepAwake', 'VeroTrayIcon', 'VeroTheme', 'VeroMenuRenderer', 'VeroMsg', 'VeroCombo', 'VeroCheck') { ($t -as [type]) | Should -Not -BeNullOrEmpty -Because $t }
         [VeroMsg]::Show.OverloadDefinitions.Count | Should -Be 4
+        ([VeroCombo] -as [type]).IsSubclassOf([System.Windows.Forms.ComboBox]) | Should -BeTrue
+        ([VeroCheck] -as [type]).IsSubclassOf([System.Windows.Forms.CheckBox]) | Should -BeTrue
+        [VeroTheme]::Dark().Frame.IsEmpty | Should -BeFalse; [VeroTheme]::Light().Frame.IsEmpty | Should -BeFalse
     }
 }

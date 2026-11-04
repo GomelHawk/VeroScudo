@@ -145,6 +145,29 @@ function Import-VeroOpenVpnText {
     $r
 }
 
+function Select-VeroStaleOpenVpnFile {
+    <# Pure: which of these file names in the OpenVPN folder belong to no profile any more. Only the names VeroScudo writes
+       there count (<safe name>.ovpn, .log, .prev.log); $Keep holds the safe names of every configured profile. #>
+    [CmdletBinding()] param([string[]]$Names = @(), [string[]]$Keep = @())
+    foreach ($n in @($Names | Where-Object { $_ })) {
+        if ($n -notmatch '^(.+?)(\.prev\.log|\.log|\.ovpn)$') { continue }
+        if ($Keep -notcontains $Matches[1]) { $n }
+    }
+}
+function Remove-VeroStaleOpenVpnFile {
+    <# Elevated, after a save: removes the stored config (keys inlined) and logs of every OpenVPN profile that is no longer
+       configured. Deleting a profile in Settings left them behind. Files only, in the OpenVPN folder only, never a link. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'save')
+    $d = (Get-VeroPath).OpenVpnDir
+    if (-not (Test-Path -LiteralPath $d)) { return }
+    $keep = @($Config.Profiles | ForEach-Object { Get-VeroSafeName $_.Profile })      # every profile, whatever its type
+    $files = @(Get-ChildItem -LiteralPath $d -File -Force | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+    foreach ($n in @(Select-VeroStaleOpenVpnFile -Names @($files | ForEach-Object Name) -Keep $keep)) {
+        try { Remove-Item -LiteralPath (Join-Path $d $n) -Force -ErrorAction Stop; Write-VeroLog "removed '$n' (its OpenVPN profile was deleted)" $Action }
+        catch { Write-VeroLog "WARNING: could not remove '$n': $($_.Exception.Message)" $Action }
+    }
+}
+
 function Get-VeroOpenVpnRemote {
     <# The 'remote' servers of an imported profile (admin copy). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
@@ -368,6 +391,38 @@ function Read-VeroMgmt($M, [int]$TimeoutMs = 1000) {
     , @($text.Substring(0, $i) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ })
 }
 
+function New-VeroMgmtQueue {
+    <# One command at a time on the management connection: the next goes out only once OpenVPN answered the previous one
+       (a SUCCESS: or ERROR: line). OpenVPN 2.7.8 on Windows was seen (2026-11-05) running the first of two commands that
+       arrived together twice and dropping the second - 'password' was lost that way and the start sat waiting until the 45 s
+       guard killed it. The queue starts with the management password in flight (sent by Connect-VeroMgmt, never re-sent). #>
+    [pscustomobject]@{
+        Pending  = New-Object System.Collections.Generic.Queue[string]
+        InFlight = '(management password)'; SentAt = (Get-Date); Resend = $false
+    }
+}
+function Add-VeroMgmtCommand {
+    <# Queues a command. -First (a SIGTERM): drops what is still queued and does not re-send the command in flight, so the
+       stop goes out within one answer timeout and well inside the 10 s the session waits for OpenVPN to end. Pure. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Queue, [Parameter(Mandatory)][string]$Command, [switch]$First)
+    if ($First) { $Queue.Pending.Clear(); $Queue.Resend = $false }
+    $Queue.Pending.Enqueue($Command)
+}
+function Update-VeroMgmtQueue {
+    <# Pure: takes OpenVPN's lines (a SUCCESS:/ERROR: line answers the command in flight) and returns the command to send now,
+       or $null. No answer within $TimeoutSec: the command is sent once more (OpenVPN may have dropped it), then given up. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Queue, [string[]]$Lines = @(), [datetime]$Now = (Get-Date), [int]$TimeoutSec = 5)
+    if ($null -ne $Queue.InFlight -and @($Lines | Where-Object { $_ -match '^(SUCCESS|ERROR):' }).Count -gt 0) { $Queue.InFlight = $null }
+    if ($null -ne $Queue.InFlight) {
+        if (($Now - $Queue.SentAt).TotalSeconds -lt $TimeoutSec) { return $null }
+        if ($Queue.Resend) { $Queue.Resend = $false; $Queue.SentAt = $Now; return $Queue.InFlight }
+        $Queue.InFlight = $null                                             # answered by nobody twice: go on with the next
+    }
+    if ($Queue.Pending.Count -eq 0) { return $null }
+    $Queue.InFlight = $Queue.Pending.Dequeue(); $Queue.SentAt = $Now; $Queue.Resend = $true
+    $Queue.InFlight
+}
+
 function Connect-VeroMgmt([int]$Port, [string]$Password, $Process) {
     <# Connects to the management port (OpenVPN opens it a moment after start) and logs in with the one-time password. #>
     $t = Get-Date
@@ -417,16 +472,17 @@ function Invoke-VeroOpenVpnSession {
     $result = 'exited'; $reason = ''; $m = $null; $stopping = $null; $deadline = $null
     # what OpenVPN said last (never what VeroScudo sent - that holds the credentials): logged when a start makes no progress
     $trace = New-Object System.Collections.Generic.Queue[string]
-    $progress = Get-Date; $curState = 'STARTING'; $waitingOtp = $false
+    $progress = Get-Date; $curState = 'STARTING'; $waitingOtp = $false; $restart = $false
     try {
         $m = Connect-VeroMgmt -Port $port -Password $secret -Process $proc
+        $q = New-VeroMgmtQueue                                              # one command at a time (OpenVPN dropped the second of two)
         Remove-Item $p.OvpnPw -Force -ErrorAction SilentlyContinue
         if (-not $m) { $reason = 'management interface did not answer' }
-        else { Send-VeroMgmt $m 'state on'; Send-VeroMgmt $m 'hold release' }
+        else { Add-VeroMgmtCommand $q 'state on'; Add-VeroMgmtCommand $q 'hold release' }
         while ($m) {
             if (-not $stopping) {
                 $stopping = Get-VeroOpenVpnStopReason $name
-                if ($stopping) { Write-VeroLog "stopping OpenVPN '$name' ($stopping)" $Action; Send-VeroMgmt $m 'signal SIGTERM'; $deadline = (Get-Date).AddSeconds(10); $result = 'stopped'; $reason = $stopping }
+                if ($stopping) { Write-VeroLog "stopping OpenVPN '$name' ($stopping)" $Action; Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $deadline = (Get-Date).AddSeconds(10); $result = 'stopped'; $reason = $stopping }
             } elseif ((Get-Date) -gt $deadline) { break }
             $lines = Read-VeroMgmt $m 1000
             if ($null -eq $lines) { break }
@@ -434,14 +490,14 @@ function Invoke-VeroOpenVpnSession {
             # (seen live twice: a start sat in STARTING, OpenVPN never asked for the password; the next start took 7 s)
             if (-not $stopping -and -not $waitingOtp -and $curState -ne 'CONNECTED' -and ((Get-Date) - $progress).TotalSeconds -gt 45) {
                 Write-VeroLog ("OpenVPN '{0}' made no progress for 45 s (state {1}) - restarting it. Last from OpenVPN: {2}" -f $name, $curState, ((@($trace) | Select-Object -Last 8) -join ' | ')) $Action
-                Send-VeroMgmt $m 'signal SIGTERM'; $stopping = 'no progress for 45 s'; $deadline = (Get-Date).AddSeconds(10); $reason = $stopping
+                Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = 'no progress for 45 s'; $deadline = (Get-Date).AddSeconds(10); $reason = $stopping; $restart = $true
             }
             foreach ($line in $lines) {
                 if ($line -notmatch '^>PASSWORD:Verification|^>BYTECOUNT') { $trace.Enqueue($line); while ($trace.Count -gt 30) { $null = $trace.Dequeue() } }
                 $e = ConvertFrom-VeroMgmtLine $line
                 if ($e.Kind -in 'state', 'need', 'hold') { $progress = Get-Date; if ($e.Kind -eq 'state') { $curState = $e.State } }
                 switch ($e.Kind) {
-                    'hold' { Send-VeroMgmt $m 'hold release' }
+                    'hold' { Add-VeroMgmtCommand $q 'hold release' }
                     'state' {
                         Set-VeroOpenVpnStatus $name @{ State = $e.State; Reason = $e.Reason; LocalIp = $(if ($e.State -eq 'CONNECTED') { $e.LocalIp } else { '' }) }
                         if ($e.State -in 'CONNECTED', 'RECONNECTING', 'EXITING') {
@@ -453,36 +509,38 @@ function Invoke-VeroOpenVpnSession {
                     'need' {
                         if ($stopping) { break }                            # never re-send a just-rejected password
                         if ($e.Which -eq 'Auth') {
-                            if (-not $cred) { $result = 'no-password'; $reason = 'the server asks for a password - none stored'; Send-VeroMgmt $m 'signal SIGTERM'; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
+                            if (-not $cred) { $result = 'no-password'; $reason = 'the server asks for a password - none stored'; Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
                             $pw = $cred.GetNetworkCredential().Password
                             if ($e.Challenge) {
                                 $waitingOtp = $true
                                 $otp = Wait-VeroOtp -ProfileName $name -Challenge $e.Challenge -Action $Action
                                 $waitingOtp = $false; $progress = Get-Date
-                                if ($null -eq $otp) { $result = 'otp'; $reason = 'no one-time code entered'; Send-VeroMgmt $m 'signal SIGTERM'; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
+                                if ($null -eq $otp) { $result = 'otp'; $reason = 'no one-time code entered'; Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
                                 $pw = Get-VeroStaticChallengeResponse -Password $pw -Response $otp
                             }
-                            Send-VeroMgmt $m ('username "Auth" ' + (Format-VeroMgmtValue $cred.UserName))
-                            Send-VeroMgmt $m ('password "Auth" ' + (Format-VeroMgmtValue $pw))
+                            Add-VeroMgmtCommand $q ('username "Auth" ' + (Format-VeroMgmtValue $cred.UserName))
+                            Add-VeroMgmtCommand $q ('password "Auth" ' + (Format-VeroMgmtValue $pw))
                             $pw = $null
                         } elseif ($e.Which -eq 'Private Key') {
                             $kp = Get-VeroKeyPassphrase -ProfileName $name
-                            if (-not $kp) { $result = 'no-password'; $reason = 'the private key needs a passphrase - none stored'; Send-VeroMgmt $m 'signal SIGTERM'; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
-                            Send-VeroMgmt $m ('password "Private Key" ' + (Format-VeroMgmtValue $kp.GetNetworkCredential().Password))
+                            if (-not $kp) { $result = 'no-password'; $reason = 'the private key needs a passphrase - none stored'; Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10); break }
+                            Add-VeroMgmtCommand $q ('password "Private Key" ' + (Format-VeroMgmtValue $kp.GetNetworkCredential().Password))
                         } else {
-                            $result = 'setup'; $reason = "OpenVPN asks for '$($e.Which)', which VeroScudo cannot answer"; Send-VeroMgmt $m 'signal SIGTERM'; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10)
+                            $result = 'setup'; $reason = "OpenVPN asks for '$($e.Which)', which VeroScudo cannot answer"; Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10)
                         }
                     }
                     'failed' {
                         $result = 'auth-failed'
                         $reason = if ($e.Dynamic) { 'the server asks for a dynamic challenge (CRV1), which VeroScudo cannot answer' } else { "$($e.Which) rejected by the server" }
                         Set-VeroAuthFailed -ProfileName $name -Reason "OpenVPN: $reason" -Action $Action -Which $(if ($e.Which -eq 'Private Key') { 'Key' } else { 'Auth' })
-                        Send-VeroMgmt $m 'signal SIGTERM'; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10)
+                        Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = $reason; $deadline = (Get-Date).AddSeconds(10)
                     }
-                    'fatal' { Write-VeroLog "OpenVPN '$name' FATAL: $($e.Reason)" $Action; $reason = $e.Reason }
+                    'fatal' { Write-VeroLog "OpenVPN '$name' FATAL: $($e.Reason)" $Action; if (-not $stopping) { $reason = $e.Reason } }
                     'error' { Write-VeroLog "OpenVPN '$name' management: $($e.Reason)" $Action }
                 }
             }
+            $next = Update-VeroMgmtQueue -Queue $q -Lines $lines
+            if ($null -ne $next) { Send-VeroMgmt $m $next }
         }
     } finally {
         if ($m) { try { $m.Client.Close() } catch { Write-Verbose 'close failed' } }
@@ -493,7 +551,9 @@ function Invoke-VeroOpenVpnSession {
         if (Test-VeroArmed) { try { Sync-VeroKillSwitch -Config (Get-VeroConfig) -Action $Action } catch { Write-VeroLog "ERROR: sync after OpenVPN exit: $($_.Exception.Message)" $Action } }
     }
     Write-VeroLog ("OpenVPN '{0}' ended: {1}{2} (decision source: {3})" -f $name, $result, $(if ($reason) { " - $reason" }),
-        $(if ($result -eq 'stopped') { "VeroScudo's own stop" } else { 'OpenVPN exited on its own = failure, stays blocked' })) $Action
+        $(if ($result -eq 'stopped') { "VeroScudo's own stop" }
+          elseif ($restart) { 'VeroScudo stopped it to start it again = failure, stays blocked' }
+          else { 'OpenVPN exited on its own = failure, stays blocked' })) $Action
     $result
 }
 

@@ -5,6 +5,13 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security (manual test on a real machine, 2026-11-05)
+- Windows: **the lock files were open to every program of the account again after a reinstall.** `Install.ps1` resets
+  everything under the state folder to its rules ("Users: read"), `state\locks` included, and the folder was locked down
+  only when it was created. Read is enough to open `watchdog.lock` with no sharing while the watchdog restarts and keep it:
+  every later watchdog start then ends at once and self-repair stops - reproduced live from a non-elevated window. The
+  installer locks the folder down again after the reset, and every elevated caller checks it and repairs it.
+
 ### Security (review 2026-11-05 of 1.3.0, read-only; the install surface this time)
 - Windows: **`PSModulePath` pinned to the system module folders** in every script that runs elevated (`VeroScudo.ps1`,
   `Install.ps1`, `Uninstall.ps1`, `Set-VpnCredential.ps1`, the tray's elevated save). The guard tasks run elevated as
@@ -56,6 +63,24 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Documented: IKEv2's "you hung up" defence is weaker on a PC with several accounts (README, SECURITY.md).
 
 ### Fixed
+- Windows: **an OpenVPN start sometimes hung after the username** until the 45 s guard restarted it. OpenVPN 2.7.8's
+  management interface ran the first of two commands that arrived together twice and dropped the second - once that was
+  the password (its own log: `username` twice, no `password`). VeroScudo now sends one command at a time and waits for
+  OpenVPN's answer; a command nobody answers is sent once more after 5 s. A restart by that guard is logged as VeroScudo's
+  own, no longer as "OpenVPN exited on its own".
+- Windows: deleting an OpenVPN profile in Settings left its stored config (with the keys inlined) and its logs in the
+  administrators-only OpenVPN folder; the save now removes them.
+- Windows (tray): the drop-down buttons were light grey with a tiny arrow and the check boxes white on the dark theme -
+  the boxes did not read as drop-downs. Both are drawn in the theme's colours now, with a clear chevron and outline.
+- Windows (tray): the tray menu is styled like the windows - the window colour behind, the items grouped in rounded cards
+  (one per group, equal margins on every side and between them), the header as a heading, a chevron for the profile
+  submenu, Windows 11's rounded frame. `VeroScudoTray.ps1 -Preview <folder> -PreviewOnly 'menu,editor-*'` renders only the
+  named shots.
+- Windows (tray): No on the UAC prompt of a save said "Not saved:" plus Windows' sentence in the system language; it now
+  says that administrator approval was cancelled and nothing was changed.
+- Windows (`tests-local/Test-Live.ps1`): the profile-switch phase counted traffic through the OLD tunnel, which stays
+  allowed until the new profile's filters are in, as a leak. A leak now needs neither tunnel up, before and after the
+  probe, and is logged with its time and route.
 - Linux: **Docker and libvirt networking broke while armed, even with the tunnel up** (B5 of the review). The forward
   chain let containers out through the tunnel, but policy drop in all three chains cut everything that stays on the
   machine: host <-> container (a published port on localhost), container <-> container on one Docker bridge

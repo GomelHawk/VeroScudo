@@ -93,4 +93,16 @@ function Resolve-VeroUpdateNotice {
     @{ Update = $null; MenuText = 'Check for updates'; Balloon = $false; Info = $Info }
 }
 
-Export-ModuleMember -Function ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice
+function Test-VeroUacCancelled {
+    <# True when this exception (or one it wraps) is Windows' ERROR_CANCELLED (1223): No was pressed on the UAC prompt.
+       By the code, never by the text - that is in the system's language. Pure. #>
+    [CmdletBinding()] param($Exception)
+    $e = $Exception
+    while ($e) {
+        if ($e -is [System.ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1223) { return $true }
+        $e = $e.InnerException
+    }
+    $false
+}
+
+Export-ModuleMember -Function ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled

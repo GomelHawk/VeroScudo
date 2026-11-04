@@ -11,6 +11,7 @@ $PsExe = (Get-Process -Id $PID).Path
 $LanDns = @(Get-VeroDnsServer -ProfileName $cfg.Profile | Where-Object { $_ -notmatch ':' } | Select-Object -First 1)
 function L($m) { $l = '{0:HH:mm:ss} {1}' -f (Get-Date), $m; Add-Content $Out $l; Write-Host $l }
 function Up { Test-VeroVpnConnected (Get-VeroConfig).Profile }
+function TunnelUp([string[]]$Names) { foreach ($n in $Names) { if (Test-VeroVpnConnected $n) { return $true } }; $false }
 function Armed { Test-Path $p.ArmedFlag }
 function Filters { Get-VeroWfpCount }
 function Tcp($ip, $port, $ms = 2500) { try { $c = New-Object Net.Sockets.TcpClient($(if ($ip -match ':') { 'InterNetworkV6' } else { 'InterNetwork' })); $ok = $c.ConnectAsync($ip, $port).Wait($ms) -and $c.Connected; $c.Close(); $ok } catch { $false } }
@@ -75,10 +76,21 @@ try {
         $other = @($cfg.Profiles | Where-Object Profile -ne $cfg.Profile)[0].Profile
         L "=== PHASE 3: PROFILE SWITCH '$($cfg.Profile)' -> '$other' -> back; blocked in between"
         foreach ($target in $other, $cfg.Profile) {
+            $from = (Get-VeroConfig).Profile
             Set-Content (Get-VeroPath).SwitchRequest $target; schtasks /run /tn "$Folder`Switch" | Out-Null
             $sw = Get-Date; $swLeak = $false
             while (((Get-Date) - $sw).TotalSeconds -lt 90 -and -not ((Get-VeroConfig).Profile -eq $target -and (Up))) {
-                if (-not (Up) -and ((Tcp 1.1.1.1 443) -or (Tcp 1.1.1.1 80))) { $swLeak = $true }
+                # a leak = 1.1.1.1 reachable while NEITHER tunnel is up, checked before and after the probe: the old tunnel stays
+                # allowed until the new profile's filters are in (by design), and a tunnel can come up while a probe runs.
+                # `-not (Up)` alone counted traffic through the old tunnel as a leak (2026-11-05, CorporateVPN -> PrivateVPN).
+                if (-not (TunnelUp $from, $target)) {
+                    $at = Get-Date; $hit = (Tcp 1.1.1.1 443) -or (Tcp 1.1.1.1 80)
+                    if ($hit -and -not (TunnelUp $from, $target)) {
+                        $swLeak = $true
+                        $via = try { (Find-NetRoute -RemoteIPAddress 1.1.1.1 -ErrorAction Stop | Where-Object InterfaceAlias | Select-Object -First 1).InterfaceAlias } catch { '?' }
+                        L ("   LEAK at {0:HH:mm:ss.f}: 1.1.1.1 reachable while neither '{1}' nor '{2}' was up (route via '{3}', filters={4})" -f $at, $from, $target, $via, (Filters))
+                    }
+                }
                 Start-Sleep 1
             }
             $ok = ((Get-VeroConfig).Profile -eq $target) -and (Up) -and (Armed)

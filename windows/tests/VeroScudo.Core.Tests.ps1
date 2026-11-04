@@ -658,6 +658,57 @@ Describe 'OpenVPN command line and management protocol' {
     It 'builds the static-challenge answer' { Get-VeroStaticChallengeResponse -Password 'pw' -Response '123456' | Should -Be 'SCRV1:cHc=:MTIzNDU2' }
 }
 
+Describe 'OpenVPN management: one command at a time (2.7.8 dropped the second of two that arrived together - the password)' {
+    BeforeAll { $script:t0 = [datetime]'2026-11-05 01:17:06' }
+    It 'waits for the management password''s answer before the first command' {
+        $q = New-VeroMgmtQueue; $q.SentAt = $script:t0
+        Add-VeroMgmtCommand $q 'state on'; Add-VeroMgmtCommand $q 'hold release'
+        Update-VeroMgmtQueue $q -Lines @('>INFO:OpenVPN Management Interface Version 6') -Now $script:t0.AddSeconds(1) | Should -BeNullOrEmpty
+        Update-VeroMgmtQueue $q -Lines @('SUCCESS: password is correct') -Now $script:t0.AddSeconds(1) | Should -Be 'state on'
+    }
+    It 'sends username and password one after the other, each after the previous answer' {
+        $q = New-VeroMgmtQueue; $q.InFlight = $null
+        Add-VeroMgmtCommand $q 'username "Auth" "u"'; Add-VeroMgmtCommand $q 'password "Auth" "p"'
+        Update-VeroMgmtQueue $q -Now $script:t0 | Should -Be 'username "Auth" "u"'
+        Update-VeroMgmtQueue $q -Lines @(">HOLD:Waiting for hold release:0") -Now $script:t0.AddSeconds(1) | Should -BeNullOrEmpty    # a notification, not an answer
+        Update-VeroMgmtQueue $q -Lines @("SUCCESS: 'Auth' username entered, but not yet verified") -Now $script:t0.AddSeconds(1) | Should -Be 'password "Auth" "p"'
+        Update-VeroMgmtQueue $q -Lines @("SUCCESS: 'Auth' password entered, but not yet verified") -Now $script:t0.AddSeconds(2) | Should -BeNullOrEmpty
+        $q.InFlight | Should -BeNullOrEmpty                                 # the password does not stay in the queue once answered
+    }
+    It 'an ERROR answer also releases the next command' {
+        $q = New-VeroMgmtQueue; $q.InFlight = $null
+        Add-VeroMgmtCommand $q 'hold release'; Add-VeroMgmtCommand $q 'state on'
+        $null = Update-VeroMgmtQueue $q -Now $script:t0
+        Update-VeroMgmtQueue $q -Lines @('ERROR: hold release failed') -Now $script:t0 | Should -Be 'state on'
+    }
+    It 're-sends a command nobody answered once after 5 s, then goes on with the next' {
+        $q = New-VeroMgmtQueue; $q.InFlight = $null
+        Add-VeroMgmtCommand $q 'password "Auth" "p"'; Add-VeroMgmtCommand $q 'state on'
+        $null = Update-VeroMgmtQueue $q -Now $script:t0
+        Update-VeroMgmtQueue $q -Now $script:t0.AddSeconds(4) | Should -BeNullOrEmpty
+        Update-VeroMgmtQueue $q -Now $script:t0.AddSeconds(5) | Should -Be 'password "Auth" "p"'
+        Update-VeroMgmtQueue $q -Now $script:t0.AddSeconds(10) | Should -Be 'state on'
+    }
+    It 'never re-sends the management password' {
+        $q = New-VeroMgmtQueue; $q.SentAt = $script:t0
+        Add-VeroMgmtCommand $q 'state on'
+        Update-VeroMgmtQueue $q -Now $script:t0.AddSeconds(5) | Should -Be 'state on'
+    }
+    It 'a SIGTERM drops what is queued and is not held up by a re-send' {
+        $q = New-VeroMgmtQueue; $q.InFlight = $null
+        Add-VeroMgmtCommand $q 'username "Auth" "u"'; Add-VeroMgmtCommand $q 'password "Auth" "p"'
+        $null = Update-VeroMgmtQueue $q -Now $script:t0
+        Add-VeroMgmtCommand $q 'signal SIGTERM' -First
+        Update-VeroMgmtQueue $q -Now $script:t0.AddSeconds(5) | Should -Be 'signal SIGTERM'
+        $q.Pending.Count | Should -Be 0
+    }
+    It 'the session sends nothing directly except what the queue releases' {
+        $src = (Get-Command Invoke-VeroOpenVpnSession).Definition
+        @([regex]::Matches($src, 'Send-VeroMgmt ')).Count | Should -Be 1
+        $src | Should -Match 'Send-VeroMgmt \$m \$next'
+    }
+}
+
 Describe 'WireGuard health and transitions' {
     It 'is <want> when <what>' -ForEach @(
         @{ what = 'the service is not running';         svc = 'stopped'; hs = @(1000); now = 1010; age = 99; want = 'down' }
@@ -1483,7 +1534,53 @@ Describe 'one holder per lock (files in the administrators-only locks folder, no
         $a.Dispose()
     }
     It 'the lock files live under the state folder of this (test) home' {
-        (& (Get-Module VeroScudo.Core) { Get-VeroLockDir }) | Should -Be (Join-Path (Get-VeroPath).State 'locks')
+        Get-VeroLockDir | Should -Be (Join-Path (Get-VeroPath).State 'locks')
+    }
+}
+
+Describe 'the locks folder stays administrators-only (the installer''s reset once gave it "Users: read")' {
+    BeforeAll {
+        function New-Rule([string]$Sid, [string]$Type = 'Allow', [bool]$Inherited = $false) {
+            [pscustomobject]@{ IdentityReference = $Sid; AccessControlType = $Type; IsInherited = $Inherited }
+        }
+    }
+    It 'accepts SYSTEM and Administrators set on the folder itself' {
+        Test-VeroLockDirAcl @((New-Rule 'S-1-5-18'), (New-Rule 'S-1-5-32-544')) | Should -BeTrue
+    }
+    It 'refuses inherited rules - even SYSTEM and Administrators (the parent''s Users: read comes with them)' {
+        Test-VeroLockDirAcl @((New-Rule 'S-1-5-18' -Inherited $true), (New-Rule 'S-1-5-32-544' -Inherited $true)) | Should -BeFalse
+    }
+    It 'refuses any other account allowed in: Users, Authenticated Users, Everyone, the signed-in user' {
+        foreach ($sid in 'S-1-5-32-545', 'S-1-5-11', 'S-1-1-0', 'S-1-5-21-1-2-3-1001') {
+            Test-VeroLockDirAcl @((New-Rule 'S-1-5-32-544'), (New-Rule $sid)) | Should -BeFalse -Because $sid
+        }
+    }
+    It 'ignores deny rules (they take nothing from the guard)' {
+        Test-VeroLockDirAcl @((New-Rule 'S-1-5-32-544'), (New-Rule 'S-1-1-0' -Type 'Deny')) | Should -BeTrue
+    }
+    It 'an elevated caller repairs a folder whose rules are inherited, and logs it' {
+        Mock -ModuleName VeroScudo.Core Test-VeroElevated { $true }
+        Mock -ModuleName VeroScudo.Core Set-VeroLockDirAcl { }            # never re-permission even the temp folder: the test would lock itself out
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { }
+        $d = Get-VeroLockDir                                                # a fresh temp folder: inherited rules only
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroLockDirAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $d }
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like 'locks folder*' }
+    }
+    It 'leaves a correct folder alone, and a non-elevated caller (the tray) never tries' {
+        Mock -ModuleName VeroScudo.Core Set-VeroLockDirAcl { }
+        Mock -ModuleName VeroScudo.Core Test-VeroElevated { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroLockDirAcl { $true }
+        $null = Get-VeroLockDir
+        Mock -ModuleName VeroScudo.Core Test-VeroElevated { $false }
+        Mock -ModuleName VeroScudo.Core Test-VeroLockDirAcl { $false }
+        $null = Get-VeroLockDir
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroLockDirAcl -Times 0 -Exactly
+    }
+    It 'Install.ps1 locks the folder down again after resetting the state folder' {
+        $src = Get-Content (Join-Path $PSScriptRoot '..\Install.ps1') -Raw
+        $reset = $src.IndexOf('/reset /T'); $lock = $src.IndexOf('$null = Get-VeroLockDir')
+        $reset | Should -BeGreaterThan 0
+        $lock | Should -BeGreaterThan $reset
     }
 }
 
@@ -1491,13 +1588,23 @@ Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads on
     BeforeAll {
         Mock -ModuleName VeroScudo.Core Import-VeroOpenVpnText { }
         Mock -ModuleName VeroScudo.Core Save-VeroConfig { }
+        Mock -ModuleName VeroScudo.Core Remove-VeroStaleOpenVpnFile { }
     }
-    It 'imports every OpenVPN text, then saves the config' {
+    It 'imports every OpenVPN text, saves the config, then removes what deleted profiles left' {
         $f = Join-Path (Get-VeroPath).State 'payload.json'
         @{ Config = $script:cfgJson; Imports = @(@{ Profile = 'ovpn'; Text = "client`ndev tun" }) } | ConvertTo-Json -Depth 4 | Set-Content $f
         Import-VeroSavePayload -Path $f
         Should -Invoke -ModuleName VeroScudo.Core Import-VeroOpenVpnText -Times 1 -Exactly -ParameterFilter { $ProfileName -eq 'ovpn' -and $Text -eq "client`ndev tun" }
         Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 1 -Exactly -ParameterFilter { $Json -eq $script:cfgJson }
+        Should -Invoke -ModuleName VeroScudo.Core Remove-VeroStaleOpenVpnFile -Times 1 -Exactly -ParameterFilter { @($Config.Profiles).Count -eq 1 -and $Config.Profiles[0].Profile -eq 'MyVPN' }
+        Remove-TestFile $f
+    }
+    It 'a save that fails removes nothing' {
+        Mock -ModuleName VeroScudo.Core Save-VeroConfig { throw 'invalid config' }
+        $f = Join-Path (Get-VeroPath).State 'payload3.json'
+        @{ Config = $script:cfgJson; Imports = @() } | ConvertTo-Json -Depth 4 | Set-Content $f
+        { Import-VeroSavePayload -Path $f } | Should -Throw '*invalid config*'
+        Should -Invoke -ModuleName VeroScudo.Core Remove-VeroStaleOpenVpnFile -Times 0 -Exactly
         Remove-TestFile $f
     }
     It 'a payload without a config, or no file, is refused before anything is written' {
@@ -1507,6 +1614,37 @@ Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads on
         { Import-VeroSavePayload -Path (Join-Path (Get-VeroPath).State 'missing.json') } | Should -Throw
         Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 0 -Exactly
         Remove-TestFile $f
+    }
+}
+
+Describe 'a deleted OpenVPN profile''s stored config and logs go with it (they stayed behind)' {
+    It 'picks only VeroScudo''s own files of profiles that are gone' {
+        $keep = @('Work-1a2b3c4d', 'ovpn-9f8e7d6c')
+        $names = @('Work-1a2b3c4d.ovpn', 'Work-1a2b3c4d.log', 'Work-1a2b3c4d.prev.log',
+                   'old-0badf00d.ovpn', 'old-0badf00d.log', 'old-0badf00d.prev.log', 'readme.txt', 'ovpn-9f8e7d6c.ovpn')
+        @(Select-VeroStaleOpenVpnFile -Names $names -Keep $keep) | Should -Be @('old-0badf00d.ovpn', 'old-0badf00d.log', 'old-0badf00d.prev.log')
+    }
+    It 'keeps everything when nothing is gone, and handles an empty folder' {
+        @(Select-VeroStaleOpenVpnFile -Names @('Work-1a2b3c4d.ovpn') -Keep @('Work-1a2b3c4d')).Count | Should -Be 0
+        @(Select-VeroStaleOpenVpnFile -Names @() -Keep @('Work-1a2b3c4d')).Count | Should -Be 0
+    }
+    It 'removes the files of a profile that is no longer configured, in the (test) OpenVPN folder only' {
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { }
+        $d = (Get-VeroPath).OpenVpnDir
+        if (-not (Test-IsTestDir $d)) { throw "SAFETY: OpenVPN folder '$d' is not under the test folder" }
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        $kept = (Get-VeroPath -VpnProfile 'Work').OvpnConfig; $gone = (Get-VeroPath -VpnProfile 'Deleted').OvpnConfig
+        $goneLog = (Get-VeroPath -VpnProfile 'Deleted').OvpnLog; $other = Join-Path $d 'notes.txt'
+        foreach ($x in $kept, $gone, $goneLog, $other) { Set-Content -LiteralPath $x -Value 'x' }
+        Remove-VeroStaleOpenVpnFile -Config (Get-VeroConfig -Raw $script:multiJson)
+        Test-Path -LiteralPath $kept | Should -BeTrue
+        Test-Path -LiteralPath $other | Should -BeTrue
+        Test-Path -LiteralPath $gone | Should -BeFalse
+        Test-Path -LiteralPath $goneLog | Should -BeFalse
+        $gn = Split-Path $gone -Leaf; $gl = Split-Path $goneLog -Leaf             # other tests may leave files too: check these two by name
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like "removed '$gn'*" }
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like "removed '$gl'*" }
+        Remove-TestFile $kept, $other
     }
 }
 

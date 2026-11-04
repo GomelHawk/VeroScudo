@@ -17,6 +17,15 @@ public static class VeroNative {
     // dark scroll bars on text and list boxes (the light default looks like a white bar on a dark window)
     public static void DarkScroll(IntPtr hwnd, bool dark) { try { SetWindowTheme(hwnd, dark ? "DarkMode_Explorer" : "Explorer", null); } catch { } }
     public static void DarkCombo(IntPtr hwnd, bool dark) { try { SetWindowTheme(hwnd, dark ? "DarkMode_CFD" : "CFD", null); } catch { } }
+    // the tray menu and its submenu: dark mode, Windows 11's small rounded corners and its own 1 px border in the theme's
+    // colour. True when Windows took the corners (Windows 11) - the renderer then leaves the border to Windows, because a
+    // square line drawn by hand is cut off at the rounded corners. False on Windows 10: the renderer draws the border.
+    public static bool MenuFrame(IntPtr hwnd, bool dark, Color border) {
+        int d = dark ? 1 : 0; DwmSetWindowAttribute(hwnd, 20, ref d, 4);       // DWMWA_USE_IMMERSIVE_DARK_MODE
+        int r = 3; bool rounded = DwmSetWindowAttribute(hwnd, 33, ref r, 4) == 0;   // DWMWA_WINDOW_CORNER_PREFERENCE = round small
+        if (rounded) { int c = border.R | (border.G << 8) | (border.B << 16); DwmSetWindowAttribute(hwnd, 34, ref c, 4); }   // DWMWA_BORDER_COLOR
+        return rounded;
+    }
     public static void Style(IntPtr hwnd, bool dark) {
         int d = dark ? 1 : 0; DwmSetWindowAttribute(hwnd, 20, ref d, 4);      // DWMWA_USE_IMMERSIVE_DARK_MODE
         int r = 2;            DwmSetWindowAttribute(hwnd, 33, ref r, 4);      // DWMWA_WINDOW_CORNER_PREFERENCE = round
@@ -88,41 +97,180 @@ public static class VeroTrayIcon {
 }
 
 public class VeroTheme {
-    public Color Bg, Card, Border, Text, Sub, Hover, Accent;
-    public static VeroTheme Dark() { return new VeroTheme { Bg = Color.FromArgb(32,32,32), Card = Color.FromArgb(43,43,43), Border = Color.FromArgb(58,58,58), Text = Color.FromArgb(240,240,240), Sub = Color.FromArgb(160,160,160), Hover = Color.FromArgb(56,56,56), Accent = Color.FromArgb(96,205,255) }; }
-    public static VeroTheme Light() { return new VeroTheme { Bg = Color.FromArgb(243,243,243), Card = Color.White, Border = Color.FromArgb(229,229,229), Text = Color.FromArgb(27,27,27), Sub = Color.FromArgb(92,92,92), Hover = Color.FromArgb(233,233,233), Accent = Color.FromArgb(0,103,192) }; }
+    public Color Bg, Card, Border, Text, Sub, Hover, Accent, Frame;    // Frame: the outline of an input (combo box, check box)
+    public static VeroTheme Dark() { return new VeroTheme { Bg = Color.FromArgb(32,32,32), Card = Color.FromArgb(43,43,43), Border = Color.FromArgb(58,58,58), Text = Color.FromArgb(240,240,240), Sub = Color.FromArgb(160,160,160), Hover = Color.FromArgb(56,56,56), Accent = Color.FromArgb(96,205,255), Frame = Color.FromArgb(118,118,118) }; }
+    public static VeroTheme Light() { return new VeroTheme { Bg = Color.FromArgb(243,243,243), Card = Color.White, Border = Color.FromArgb(229,229,229), Text = Color.FromArgb(27,27,27), Sub = Color.FromArgb(92,92,92), Hover = Color.FromArgb(233,233,233), Accent = Color.FromArgb(0,103,192), Frame = Color.FromArgb(138,138,138) }; }
+}
+
+// Combo box in the theme's colours. With FlatStyle.Flat WinForms paints the drop-down button itself, in the light system
+// colour with a tiny arrow - on the dark theme the boxes did not read as drop-downs at all (seen 2026-11-05). This paints
+// over WinForms after every paint: the button in the box's own colour with a clear chevron, and an outline like an input.
+public class VeroCombo : ComboBox {
+    public Color Arrow = SystemColors.ControlText, ArrowDisabled = SystemColors.GrayText, Frame = SystemColors.ControlDark;
+    public VeroCombo() { FlatStyle = FlatStyle.Flat; }
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        if (m.Msg == 0x000F || m.Msg == 0x0085) PaintChrome(IntPtr.Zero);                      // WM_PAINT, WM_NCPAINT
+        else if ((m.Msg == 0x0317 || m.Msg == 0x0318) && m.WParam != IntPtr.Zero) PaintChrome(m.WParam);   // WM_PRINT(CLIENT): DrawToBitmap, -Preview
+    }
+    void PaintChrome(IntPtr hdc) {
+        if (!IsHandleCreated || Width < 8 || Height < 8) return;
+        using (Graphics g = hdc == IntPtr.Zero ? Graphics.FromHwnd(Handle) : Graphics.FromHdc(hdc)) {
+            int bw = Math.Max(SystemInformation.HorizontalScrollBarArrowWidth + 4, Height * 3 / 4);
+            Rectangle btn = new Rectangle(Width - bw - 1, 1, bw, Height - 2);
+            using (SolidBrush b = new SolidBrush(BackColor)) {
+                if (Enabled) g.FillRectangle(b, btn);
+                else {
+                    // disabled (a locked field in Edit): Windows draws its own disabled style - a bright inner frame that stops at
+                    // the button (seen 2026-11-05). Paint the whole box, so a locked field looks like an open one, chevron dimmed.
+                    g.FillRectangle(b, 1, 1, Width - 2, Height - 2);
+                    TextRenderer.DrawText(g, Text, Font, new Rectangle(3, 1, Width - bw - 6, Height - 2), ForeColor, BackColor,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                }
+            }
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float s = Math.Max(3f, Height / 9f), cx = btn.Left + btn.Width / 2f, cy = btn.Top + btn.Height / 2f;
+            using (Pen p = new Pen(Enabled ? Arrow : ArrowDisabled, Math.Max(1.5f, Height / 18f))) {
+                p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+                g.DrawLines(p, new PointF[] { new PointF(cx - s, cy - s / 2), new PointF(cx, cy + s / 2), new PointF(cx + s, cy - s / 2) });
+            }
+            g.SmoothingMode = SmoothingMode.None;
+            using (Pen i = new Pen(BackColor)) g.DrawRectangle(i, 1, 1, Width - 3, Height - 3);   // WinForms' inner outline (it doubled the frame)
+            using (Pen f = new Pen(Frame)) g.DrawRectangle(f, 0, 0, Width - 1, Height - 1);
+        }
+    }
+}
+
+// Check box in the theme's colours: WinForms draws its box white on the dark theme. Box outlined like an input, filled with
+// the accent and a check mark when checked; the text wraps (Size fixed by the caller) and the box sits beside its first line.
+public class VeroCheck : CheckBox {
+    public Color Box = SystemColors.Window, Frame = SystemColors.ControlDark, Accent = SystemColors.Highlight, Mark = SystemColors.HighlightText, TextDisabled = SystemColors.GrayText;
+    public VeroCheck() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics;
+        g.Clear(BackColor);
+        int s = Math.Max(12, (int)Math.Round(Font.Height * 0.85)), gap = Math.Max(6, s / 2);
+        TextFormatFlags tf = TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.NoPrefix;
+        int tw = Math.Max(1, Width - s - gap - 2);
+        Size ts = TextRenderer.MeasureText(g, Text, Font, new Size(tw, int.MaxValue), tf);
+        int top = Math.Max(0, (Height - ts.Height) / 2);
+        Rectangle box = new Rectangle(1, top + Math.Max(0, (Font.Height - s) / 2), s, s);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath path = Round(box, Math.Max(2, s / 5))) {
+            using (SolidBrush b = new SolidBrush(Checked ? Accent : Box)) g.FillPath(b, path);
+            using (Pen p = new Pen(Checked ? Accent : Frame)) g.DrawPath(p, path);
+        }
+        if (Checked) {
+            using (Pen m = new Pen(Mark, Math.Max(1.5f, s / 7f))) {
+                m.StartCap = LineCap.Round; m.EndCap = LineCap.Round; m.LineJoin = LineJoin.Round;
+                g.DrawLines(m, new PointF[] { new PointF(box.Left + s * 0.24f, box.Top + s * 0.52f), new PointF(box.Left + s * 0.42f, box.Top + s * 0.70f), new PointF(box.Left + s * 0.76f, box.Top + s * 0.32f) });
+            }
+        }
+        g.SmoothingMode = SmoothingMode.None;
+        Rectangle tr = new Rectangle(box.Right + gap, top, tw, ts.Height);
+        TextRenderer.DrawText(g, Text, Font, tr, Enabled ? ForeColor : TextDisabled, tf);
+        if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(tr, 2, 1));
+    }
+    static GraphicsPath Round(Rectangle r, int rad) {
+        GraphicsPath p = new GraphicsPath(); int d = rad * 2;
+        p.AddArc(r.Left, r.Top, d, d, 180, 90); p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure(); return p;
+    }
 }
 
 // Windows-11-like menu: flat, padded, rounded hover, vector icons drawn by name from item.Tag
 public class VeroMenuRenderer : ToolStripProfessionalRenderer {
     readonly VeroTheme t; readonly float scale;
     public Image Logo;
+    public bool DwmFrame;
+    const int IconX = 18;                                              // the icon: inside the card (8) plus the card's padding (10)
+    // the menu's own width (the tray sets a minimum that leaves room for the cards' margins and the chevron): an item can be
+    // laid out wider than the menu and is clipped there, so nothing is measured from the item's width
+    static int MenuWidth(ToolStripItem item) { return item.Owner != null ? item.Owner.Width : item.Width; }
+    // the margin around the cards: 8 px, or the space Windows leaves right of the items if that is more (it lays them out
+    // narrower than the menu) - the same on every side; the tray sizes the gaps and the bottom from MenuMargin too
+    int Margin(ToolStripItem item) { return Math.Max(S(8), MenuWidth(item) - item.Bounds.Right); }
+    public int MenuMargin(ToolStrip menu) {
+        foreach (ToolStripItem i in menu.Items) if (i.Available && !(i is ToolStripSeparator)) return Margin(i);
+        return S(8);
+    }
     public VeroMenuRenderer(VeroTheme theme, float dpiScale) { t = theme; scale = dpiScale; RoundedEdges = false; }
-    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) { e.Graphics.Clear(t.Card); }
+    // Styled like the windows: the window colour behind, the items in cards (Card fill, 1 px Border, rounded) - one card per
+    // group between separators, the separators being the gaps between cards - and the hover a rounded block inside its card.
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) { e.Graphics.Clear(t.Bg); }
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+        if (DwmFrame) return;
         using (var p = new Pen(t.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1); }
-    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { using (var b = new SolidBrush(t.Card)) e.Graphics.FillRectangle(b, e.AffectedBounds); }
-    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
-        using (var p = new Pen(t.Border)) e.Graphics.DrawLine(p, S(14), e.Item.Height / 2, e.Item.Width - S(14), e.Item.Height / 2); }
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }        // the background shows; the cards are drawn per item
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { }  // a gap between two cards
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
-        if (!e.Item.Selected || !e.Item.Enabled) return;
-        var r = new Rectangle(S(6), S(2), e.Item.Width - S(12), e.Item.Height - S(4));
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var path = Round(r, S(5))) using (var b = new SolidBrush(t.Hover)) e.Graphics.FillPath(b, path); }
+        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        if ((e.Item.Tag as string) != "logo") {                          // the header sits on the background, like a window title
+            bool first, last; GroupEdges(e.Item, out first, out last);
+            int w = MenuWidth(e.Item), m = Margin(e.Item);
+            var card = new Rectangle(m - e.Item.Bounds.X, 0, w - 1 - 2 * m, e.Item.Height - 1);   // spans pixels m .. w-1-m of the menu
+            int rad = S(7);
+            using (var fill = Segment(card, rad, first, last, true)) using (var b = new SolidBrush(t.Card)) g.FillPath(b, fill);
+            using (var edge = Segment(card, rad, first, last, false)) using (var p = new Pen(t.Border)) g.DrawPath(p, edge);
+            if (e.Item.Selected && e.Item.Enabled) {
+                var r = new Rectangle(m - e.Item.Bounds.X + S(4), first ? S(4) : S(1), w - 2 * m - S(8), e.Item.Height - (first ? S(4) : S(1)) - (last ? S(4) : S(1)));
+                using (var path = Round(r, S(5))) using (var b = new SolidBrush(t.Hover)) g.FillPath(b, path);
+            }
+        }
+        g.SmoothingMode = SmoothingMode.None;
+    }
+    // is this item the first / last of its card (the visible items between two separators)?
+    static void GroupEdges(ToolStripItem item, out bool first, out bool last) {
+        first = true; last = true;
+        var items = item.Owner != null ? item.Owner.Items : null; if (items == null) return;
+        int i = items.IndexOf(item);
+        for (int k = i - 1; k >= 0; k--) { var x = items[k]; if (!x.Available) continue; first = x is ToolStripSeparator || (x.Tag as string) == "logo"; break; }
+        for (int k = i + 1; k < items.Count; k++) { var x = items[k]; if (!x.Available) continue; last = x is ToolStripSeparator; break; }
+    }
+    // the slice of a rounded card that one item covers: rounded on top for the first item, at the bottom for the last; as a
+    // fill (closed) or as the outline (open at the edges shared with the neighbouring items)
+    static GraphicsPath Segment(Rectangle r, int rad, bool first, bool last, bool fill) {
+        var p = new GraphicsPath(); int d = rad * 2;
+        if (fill) {
+            // an edge shared with the next item reaches 3 px past this item: its anti-aliased edge is clipped away, else it
+            // showed as a faint line between the items of one card
+            if (first) { p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90); } else { p.AddLine(r.X, r.Y - 3, r.Right, r.Y - 3); }
+            if (last) { p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); } else { p.AddLine(r.Right, r.Bottom + 3, r.X, r.Bottom + 3); }
+            p.CloseFigure(); return p;
+        }
+        // the outline: both sides, plus the rounded top (first item) and the rounded bottom (last item), each an open figure
+        int top = first ? r.Y + rad : r.Y - 3, bottom = last ? r.Bottom - rad : r.Bottom + 3;
+        p.StartFigure(); p.AddLine(r.X, top, r.X, bottom);
+        p.StartFigure(); p.AddLine(r.Right, top, r.Right, bottom);
+        if (first) { p.StartFigure(); p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90); }
+        if (last) { p.StartFigure(); p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); }
+        return p;
+    }
     protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e) {
         var kind = e.Item.Tag as string; if (string.IsNullOrEmpty(kind)) return;
         var r = e.ImageRectangle; int sz = Math.Min(r.Width, r.Height); r.Y = (e.Item.Height - sz) / 2; r.Height = sz;
         if (kind == "logo") {
-            if (Logo != null) { e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; e.Graphics.DrawImage(Logo, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz)); }
+            if (Logo != null) { e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; e.Graphics.DrawImage(Logo, new Rectangle(S(IconX), r.Y + (r.Height - sz) / 2, sz, sz)); }
             return;
         }
-        DrawIcon(e.Graphics, kind, new Rectangle(r.X + (r.Width - sz) / 2 + S(4), r.Y + (r.Height - sz) / 2, sz, sz), !e.Item.Enabled ? t.Sub : (kind == "awake" && e.Item is ToolStripMenuItem && ((ToolStripMenuItem)e.Item).Checked) ? t.Accent : t.Text); }
+        DrawIcon(e.Graphics, kind, new Rectangle(S(IconX), r.Y + (r.Height - sz) / 2, sz, sz), !e.Item.Enabled ? t.Sub : (kind == "awake" && e.Item is ToolStripMenuItem && ((ToolStripMenuItem)e.Item).Checked) ? t.Accent : t.Text); }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        var r = e.TextRectangle; r.Y = 0; r.Height = e.Item.Height; r.X += S(10); r.Width = e.Item.Width - r.X - S(10);
-        TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, e.Item.Enabled ? t.Text : t.Sub, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding); }
+        var r = e.TextRectangle; r.Y = 0; r.Height = e.Item.Height; r.Width = MenuWidth(e.Item) - r.X - S(30);   // the wide icon column gives the gap; the right end leaves room for the chevron
+        bool head = (e.Item.Tag as string) == "logo";                    // the header is a disabled item, but a heading like the windows' ones
+        TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, (e.Item.Enabled || head) ? t.Text : t.Sub, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis); }
     protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { }   // no stock check box: a ticked item shows its icon in the accent colour
-    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor = e.Item != null && e.Item.Enabled ? t.Text : t.Sub; base.OnRenderArrow(e); }
+    // a submenu's arrow: a chevron like the combo boxes' (the stock one is a tiny triangle)
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+        var g = e.Graphics; var st = g.Save(); g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = S(3.5), cx = e.Item != null ? MenuWidth(e.Item) - S(22) : e.ArrowRectangle.Left + e.ArrowRectangle.Width / 2f, cy = e.Item != null ? e.Item.Height / 2f : e.ArrowRectangle.Top + e.ArrowRectangle.Height / 2f;
+        using (var p = new Pen(e.Item != null && e.Item.Enabled ? t.Text : t.Sub, Math.Max(1.5f, S(1.6)))) {
+            p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+            g.DrawLines(p, new[] { new PointF(cx - s / 2, cy - s), new PointF(cx + s / 2, cy), new PointF(cx - s / 2, cy + s) });
+        }
+        g.Restore(st);
+    }
     int S(double v) { return (int)Math.Round(v * scale); }
     static GraphicsPath Round(Rectangle r, int d) { var p = new GraphicsPath(); p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90); p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90); p.CloseFigure(); return p; }
 

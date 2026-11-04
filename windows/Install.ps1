@@ -55,7 +55,9 @@ New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-N
 foreach ($child in @(Get-ChildItem -LiteralPath $p.Home -Force | Where-Object { $_.FullName -ne $p.OpenVpnDir })) { & icacls.exe $child.FullName /reset /T /C /Q | Out-Null }
 & icacls.exe $p.Home /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
 $null = Protect-VeroOpenVpnDir
-Write-Host "locked down: $($p.Home) (Administrators/SYSTEM full, Users read; openvpn\ Administrators/SYSTEM only)"
+# the reset above gave state\locks the folder's "Users: read" - enough to open a lock file and hold it: administrators only again
+$null = Get-VeroLockDir
+Write-Host "locked down: $($p.Home) (Administrators/SYSTEM full, Users read; openvpn\ and state\locks\ Administrators/SYSTEM only)"
 
 function New-ProfileEntry([string]$Name, [string]$Kind, [string]$Srv, [int]$Prt, [string]$User, [string]$Ovpn, [string]$WgConf, [bool]$KeepDco) {
     <# One new profile from the command line, per type. OpenVPN: imports the .ovpn first (throws on a refused config). #>

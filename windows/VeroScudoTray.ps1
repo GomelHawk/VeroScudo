@@ -4,8 +4,10 @@
   task the Desktop shortcuts use, so the guard logic stays in VeroScudo.Core.psm1.
   Started hidden by the \VeroScudo\Tray task at sign-in (run.vbs tray), or manually:
     powershell -ExecutionPolicy Bypass -File VeroScudoTray.ps1 [-Preview <folder>]   # -Preview: screenshots the windows and exits
+    # -PreviewOnly 'menu,editor-*' (with -Preview): only the shots with these names - quicker when checking one window
 #>
-param([int]$PollSeconds = 3, [string]$Preview, [ValidateSet('auto', 'dark', 'light')][string]$ForceTheme = 'auto')
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'PreviewOnly', Justification = 'used inside nested function')]
+param([int]$PollSeconds = 3, [string]$Preview, [string]$PreviewOnly, [ValidateSet('auto', 'dark', 'light')][string]$ForceTheme = 'auto')
 
 # one tray per sign-in session: a second start (logon task, installer, by hand) exits quietly
 if (-not $Preview) {
@@ -502,16 +504,26 @@ function Request-ProfilePassword($e) {
     New-Object System.Management.Automation.PSCredential($e.Username, $sec) | Export-Clixml $cp.Cred
 }
 
+function New-ThemedCheck {
+    <# A check box in the theme's colours (VeroCheck: WinForms draws the box white on the dark theme). #>
+    $c = New-Object VeroCheck
+    $c.Box = $global:Theme.Card; $c.Frame = $global:Theme.Frame; $c.Accent = $global:Theme.Accent; $c.TextDisabled = $global:Theme.Sub
+    $c.Mark = if ($global:Dark) { [System.Drawing.Color]::FromArgb(20, 20, 20) } else { [System.Drawing.Color]::White }
+    $c
+}
+
 function Set-DarkCombo($c) {
     <# A drop-down list in the theme's colours: the closed box is drawn here (Windows draws a DropDownList white, ignoring
-       BackColor), the arrow and the open list get Windows' own dark combo theme. #>
+       BackColor), the button and its chevron by VeroCombo (WinForms painted it light grey with a tiny arrow), the open list
+       gets Windows' own dark combo theme. #>
+    if ($c -is [VeroCombo]) { $c.Arrow = $global:Theme.Text; $c.ArrowDisabled = $global:Theme.Sub; $c.Frame = $global:Theme.Frame }
     $c.Add_HandleCreated({ [VeroNative]::DarkCombo($this.Handle, $global:Dark) })
     if ($c.DropDownStyle -ne 'DropDownList') { return }
     $c.DrawMode = 'OwnerDrawFixed'; $c.ItemHeight = [int](22 * $global:Scale)
     $c.Add_DrawItem({ param($s, $e)
         if ($e.Index -lt 0) { return }
         $sel = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0) -and (($e.State -band [System.Windows.Forms.DrawItemState]::ComboBoxEdit) -eq 0)
-        $bg = if ($sel) { $global:Theme.Accent } else { $global:Theme.Bg }
+        $bg = if ($sel) { $global:Theme.Accent } else { $global:Theme.Card }   # the inputs' fill, like the text boxes
         $fg = if ($sel) { $(if ($global:Dark) { [System.Drawing.Color]::FromArgb(20,20,20) } else { [System.Drawing.Color]::White }) } else { $global:Theme.Text }
         $e.Graphics.FillRectangle((New-Object System.Drawing.SolidBrush($bg)), $e.Bounds)
         $flags = [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis
@@ -538,11 +550,11 @@ function New-VpnProfileForm($entry) {
     $types = @('ras', 'openvpn', 'wireguard')
     $W = 380                                                              # content width (logical px)
     $lType = New-Label $ef 'Type' 20 16 200 18 $FontSmall $global:Theme.Sub
-    $cbType = New-Object System.Windows.Forms.ComboBox; $cbType.Location = (P 20 36); $cbType.Size = (Z $W 30); $cbType.DropDownStyle = 'DropDownList'; $cbType.FlatStyle = 'Flat'; $cbType.BackColor = $global:Theme.Bg; $cbType.ForeColor = $global:Theme.Text; $cbType.Font = $FontUI; Set-DarkCombo $cbType
+    $cbType = New-Object VeroCombo; $cbType.Location = (P 20 36); $cbType.Size = (Z $W 30); $cbType.DropDownStyle = 'DropDownList'; $cbType.FlatStyle = 'Flat'; $cbType.BackColor = $global:Theme.Card; $cbType.ForeColor = $global:Theme.Text; $cbType.Font = $FontUI; Set-DarkCombo $cbType
     foreach ($t in $types) { [void]$cbType.Items.Add((Get-VeroTypeLabel $t)) }
     $ef.Controls.Add($cbType)
     $lName = New-Label $ef '' 20 0 $W 18 $FontSmall $global:Theme.Sub
-    $cb = New-Object System.Windows.Forms.ComboBox; $cb.Size = (Z $W 30); $cb.DropDownStyle = 'DropDown'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $global:Theme.Bg; $cb.ForeColor = $global:Theme.Text; $cb.Font = $FontUI; Set-DarkCombo $cb
+    $cb = New-Object VeroCombo; $cb.Size = (Z $W 30); $cb.DropDownStyle = 'DropDown'; $cb.FlatStyle = 'Flat'; $cb.BackColor = $global:Theme.Card; $cb.ForeColor = $global:Theme.Text; $cb.Font = $FontUI; Set-DarkCombo $cb
     $ef.Controls.Add($cb)
     $lServer = New-Label $ef 'Server host name' 20 0 200 18 $FontSmall $global:Theme.Sub
     $tServer = New-Input $ef 20 0 290 ''
@@ -553,7 +565,7 @@ function New-VpnProfileForm($entry) {
     $bFile = New-Button $ef 'Browse...' 320 0 80
     $lUser = New-Label $ef 'Username' 20 0 200 18 $FontSmall $global:Theme.Sub
     $tUser = New-Input $ef 20 0 $W ''
-    $chkDco = New-Object System.Windows.Forms.CheckBox; $chkDco.Text = 'Keep DCO (faster; the server permit is then not tied to openvpn.exe)'; $chkDco.AutoSize = $false; $chkDco.Size = (Z $W 40); $chkDco.ForeColor = $global:Theme.Text; $chkDco.Font = $FontSmall; $ef.Controls.Add($chkDco)
+    $chkDco = New-ThemedCheck; $chkDco.Text = 'Keep DCO (faster; the server permit is then not tied to openvpn.exe)'; $chkDco.AutoSize = $false; $chkDco.Size = (Z $W 40); $chkDco.ForeColor = $global:Theme.Text; $chkDco.Font = $FontSmall; $ef.Controls.Add($chkDco)
     $bConf = New-Button $ef 'Read .conf...' 20 0 140
     $hint = New-Label $ef '' 20 0 $W 18 $FontSmall $global:Theme.Sub; $hint.AutoSize = $false
     $bOk = New-Button $ef 'OK' 290 0 110 $true; $bCancel = New-Button $ef 'Cancel' 170 0 110
@@ -715,7 +727,14 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
         # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
         $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
-        $pr = Start-Process $psExe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $enc"
+        # Process.Start, not Start-Process: Start-Process turns Windows' "cancelled" (1223) into localized text, and No on the
+        # UAC prompt then showed as "Not saved: <a sentence in the system language>"
+        $si = New-Object System.Diagnostics.ProcessStartInfo $psExe
+        $si.Verb = 'runas'; $si.UseShellExecute = $true; $si.WindowStyle = 'Hidden'
+        $si.Arguments = "-NoProfile -NonInteractive -EncodedCommand $enc"
+        try { $pr = [System.Diagnostics.Process]::Start($si) }
+        catch { if (Test-VeroUacCancelled $_.Exception) { throw 'administrator approval was cancelled - nothing was changed' }; throw }
+        $pr.WaitForExit()
         if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
     } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }   # the tray's own payload file, nothing else
 }
@@ -782,11 +801,11 @@ function Show-Settings {
     }).GetNewClosure())
     New-Label $f 'Behaviour' 20 356 200 22 $FontBold | Out-Null
     $card2 = New-Card $f 20 382 480 180
-    $chkStrict = New-Object System.Windows.Forms.CheckBox; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
-    $chkVm = New-Object System.Windows.Forms.CheckBox; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
-    $chkWifi = New-Object System.Windows.Forms.CheckBox; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
-    $chkUpd = New-Object System.Windows.Forms.CheckBox; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
-    $chkLoc = New-Object System.Windows.Forms.CheckBox; $chkLoc.Text = 'Show exit location (asks ipinfo.io after each connect)'; $chkLoc.Location = (P 12 132); $chkLoc.Size = (Z 450 24); $chkLoc.ForeColor = $global:Theme.Text; $chkLoc.Checked = (Test-ExitEnabled); $card2.Controls.Add($chkLoc)
+    $chkStrict = New-ThemedCheck; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
+    $chkVm = New-ThemedCheck; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
+    $chkWifi = New-ThemedCheck; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
+    $chkUpd = New-ThemedCheck; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
+    $chkLoc = New-ThemedCheck; $chkLoc.Text = 'Show exit location (asks ipinfo.io after each connect)'; $chkLoc.Location = (P 12 132); $chkLoc.Size = (Z 450 24); $chkLoc.ForeColor = $global:Theme.Text; $chkLoc.Checked = (Test-ExitEnabled); $card2.Controls.Add($chkLoc)
     $chkLoc.Add_CheckedChanged({ Set-TrayPref 'showExit' $this.Checked })   # your own setting: saved at once, no administrator prompt
     New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 574 480 36 $FontSmall $global:Theme.Sub | Out-Null
     $bCancel = New-Button $f 'Close' 270 634 110
@@ -836,9 +855,28 @@ $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.Renderer = New-Object VeroMenuRenderer($global:Theme, [single]$global:Scale); $menu.Font = $FontUI; $menu.ShowImageMargin = $true; $menu.ShowCheckMargin = $false; $menu.ImageScalingSize = Z 18 18
-$iconPx = (Z 18 18).Width; $blankImage = New-Object System.Drawing.Bitmap($iconPx, $iconPx)
-$menu.Padding = Pad 0 6 0 6; $menu.BackColor = $global:Theme.Card; $menu.ForeColor = $global:Theme.Text
-$menu.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
+$iconPx = (Z 18 18).Width
+# the items' (empty) image sets the icon column's width: wider than the icon, so the column holds the card's inset and the
+# menu counts it in its width (the renderer draws the icon itself; item padding is not counted - items were clipped)
+$blankImage = New-Object System.Drawing.Bitmap((Z 42 18).Width, $iconPx)
+$menu.Padding = Pad 0 8 0 8; $menu.BackColor = $global:Theme.Bg; $menu.ForeColor = $global:Theme.Text
+$menu.Add_HandleCreated({ $this.Renderer.DwmFrame = [VeroNative]::MenuFrame($this.Handle, $global:Dark, $global:Theme.Border) })
+# the cards are inset 8 px from both sides and the chevron sits inside the card: Windows sizes the menu without them (it
+# ignores item and side padding there), so every opening adds that room as a minimum width
+# and makes the gaps between the cards and the space under the last one as wide as the cards' side margin (the bottom
+# padding is not counted either). Measured after a layout: the side margin depends on how wide Windows made the items.
+function Set-MenuRoom($m) {
+    $m.MinimumSize = [System.Drawing.Size]::Empty
+    $pref = $m.GetPreferredSize([System.Drawing.Size]::Empty)
+    $m.MinimumSize = New-Object System.Drawing.Size(($pref.Width + (Z 24 0).Width), 0); $m.PerformLayout()
+    $gap = $m.Renderer.MenuMargin($m)
+    foreach ($i in $m.Items) { if ($i -is [System.Windows.Forms.ToolStripSeparator]) { $i.Height = $gap } }
+    $m.PerformLayout()
+    $last = @($m.Items | Where-Object { $_.Available }) | Select-Object -Last 1
+    $h = if ($last) { $last.Bounds.Bottom + $gap } else { $pref.Height }
+    $m.MinimumSize = New-Object System.Drawing.Size($m.MinimumSize.Width, $h)
+}
+$menu.Add_Opening({ Set-MenuRoom $this })
 function Add-MenuItem([string]$text, [string]$glyph, [scriptblock]$onClick) {
     $m = $menu.Items.Add($text); $m.Tag = $glyph; $m.Padding = (Pad 0 7 16 7); $m.Margin = New-Object System.Windows.Forms.Padding(0)
     if ($glyph) { $m.Image = $blankImage; $m.ImageScaling = 'None' }
@@ -846,7 +884,8 @@ function Add-MenuItem([string]$text, [string]$glyph, [scriptblock]$onClick) {
     $m
 }
 function Add-MenuSeparator {
-    $sep = New-Object System.Windows.Forms.ToolStripSeparator; $sep.Margin = Pad 0 3 0 3; $menu.Items.Add($sep) | Out-Null
+    # the gap between two cards: as high as the cards' side margins
+    $sep = New-Object System.Windows.Forms.ToolStripSeparator; $sep.AutoSize = $false; $sep.Height = (Z 0 8).Height; $sep.Margin = Pad 0 0 0 0; $menu.Items.Add($sep) | Out-Null
 }
 $menu.Renderer.Logo = Get-AppImage 64
 $mHead = Add-MenuItem 'VeroScudo' 'logo' $null; $mHead.Enabled = $false; $mHead.Font = $FontBold
@@ -855,9 +894,10 @@ $mOn   = Add-MenuItem 'Turn VPN on'  'play' { Request-TurnOn }
 $mOff  = Add-MenuItem 'Turn VPN off' 'stop' { Invoke-GuardTask 'Off' }  
 $mRedo = Add-MenuItem 'Reconnect VPN' 'redo' { Request-Reconnect }
 $mProf = Add-MenuItem 'VPN profile' 'globe' $null
-$mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Card; $mProf.DropDown.ForeColor = $global:Theme.Text
-$mProf.DropDown.Padding = Pad 0 6 0 6
-$mProf.DropDown.Add_HandleCreated({ [VeroNative]::Style($this.Handle, $global:Dark) })
+$mProf.DropDown.Renderer = $menu.Renderer; $mProf.DropDown.BackColor = $global:Theme.Bg; $mProf.DropDown.ForeColor = $global:Theme.Text
+$mProf.DropDown.Padding = Pad 0 8 0 8
+$mProf.DropDown.Add_HandleCreated({ $this.Renderer.DwmFrame = [VeroNative]::MenuFrame($this.Handle, $global:Dark, $global:Theme.Border) })
+$mProf.DropDown.Add_Opening({ Set-MenuRoom $this })
 $global:TrayFile = Join-Path $global:Paths.UserDir 'tray.json'              # per-user tray choices (the state folder is read-only for the tray)
 function Get-TrayPref { Get-VeroTrayPref -Path $global:TrayFile }
 function Set-TrayPref([string]$key, $value) { Set-VeroTrayPref -Path $global:TrayFile -Key $key -Value $value }
@@ -1076,7 +1116,9 @@ if ($Preview) {
         foreach ($c in $root.Controls) { if ($c -is [System.Windows.Forms.Button] -and $c.Text -eq $text) { return $c }; $r = Find-Button $c $text; if ($r) { return $r } }
         $null
     }
+    function Test-ShotWanted([string]$name) { (-not $PreviewOnly) -or @($PreviewOnly -split ',' | Where-Object { $name -like $_.Trim() }).Count -gt 0 }
     function Invoke-Shot([string]$name, [scriptblock]$what) {
+        if (-not (Test-ShotWanted $name)) { return }
         $global:ShotName = $name
         try { & $what } catch { Add-Content (Join-Path $Preview "errors$($global:PreviewSuffix).txt") "$name : $($_.Exception.Message) $($_.InvocationInfo.PositionMessage)" }
         $global:ShotName = $null
@@ -1130,9 +1172,11 @@ if ($Preview) {
     Invoke-Shot 'msg-name-required' { (Find-Button $x.Form 'OK').PerformClick() }
     $x.Form.Close()
     # tray menu
+    if (Test-ShotWanted 'menu') {
     $menu.Show((New-Object System.Drawing.Point(1200, 200))); foreach ($k in 1..6) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300 }
     $bmp = New-Object System.Drawing.Bitmap($menu.Width, $menu.Height)
     $menu.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $menu.Width, $menu.Height))); $bmp.Save((Join-Path $Preview ('menu' + $global:PreviewSuffix + '.png'))); $bmp.Dispose()
+    }
     # balloon notifications are drawn by Windows: their texts, as written in this file
     $src = Get-Content $PSCommandPath | Select-String 'ShowBalloonTip\(' | ForEach-Object { $_.Line.Trim() }
     Set-Content (Join-Path $Preview 'balloons.txt') $src -Encoding UTF8

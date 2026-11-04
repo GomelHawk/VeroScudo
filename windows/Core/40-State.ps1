@@ -27,13 +27,38 @@ function Set-VeroActiveProfile {
 }
 
 # ---------------------------------------------------------------- one holder per lock, across every process
+function Test-VeroLockDirAcl {
+    <# Pure: $true when these access rules (identities as SIDs) let only SYSTEM and Administrators in, and none is inherited.
+       Inherited rules are the state folder's - Users may read there, and read is enough to open a lock file with no sharing
+       and hold it. Deny rules take nothing away from the guard and are ignored. #>
+    [CmdletBinding()] param($Rules)
+    foreach ($r in @($Rules | ForEach-Object { $_ } | Where-Object { $_ })) {
+        if ($r.IsInherited) { return $false }
+        if ([string]$r.AccessControlType -ne 'Allow') { continue }
+        if ([string]$r.IdentityReference -notmatch '^(S-1-5-18|S-1-5-32-544)$') { return $false }
+    }
+    $true
+}
+function Set-VeroLockDirAcl([string]$Path) {
+    <# Elevated: exactly SYSTEM and Administrators, full control, inherited by the lock files; nothing from the parent. The
+       DACL is written whole, so a rule someone added by hand goes too (icacls /grant:r would keep it). #>
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    [IO.Directory]::SetAccessControl($Path, $acl)
+}
 function Get-VeroLockDir {
     <# The lock files' folder: administrators and SYSTEM only. A named mutex in the session namespace could be created first by
-       any process of the account (a planted "watchdog" would stall the real one for good); a file nobody else may open cannot. #>
+       any process of the account (a planted "watchdog" would stall the real one for good); a file nobody else may open cannot.
+       Checked on every call by an elevated caller, not only when created: the installer's reset of the state folder once gave
+       it back the inherited "Users: read" - enough for any program of the account to open watchdog.lock first and hold it. #>
     $d = Join-Path (Get-VeroPath).State 'locks'
-    if (-not (Test-Path -LiteralPath $d)) {
-        New-Item -ItemType Directory -Path $d -Force | Out-Null
-        if (Test-VeroElevated) { & icacls.exe $d /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null }
+    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    if ((Test-VeroElevated) -and -not (Test-VeroLockDirAcl (Get-Acl -LiteralPath $d).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        Set-VeroLockDirAcl $d
+        Write-VeroLog 'locks folder: access set to Administrators and SYSTEM only' 'lock'
     }
     $d
 }
