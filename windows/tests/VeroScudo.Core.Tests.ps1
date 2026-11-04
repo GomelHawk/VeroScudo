@@ -1562,7 +1562,14 @@ Describe 'the locks folder stays administrators-only (the installer''s reset onc
         Mock -ModuleName VeroScudo.Core Test-VeroElevated { $true }
         Mock -ModuleName VeroScudo.Core Set-VeroLockDirAcl { }            # never re-permission even the temp folder: the test would lock itself out
         Mock -ModuleName VeroScudo.Core Write-VeroLog { }
-        $d = Get-VeroLockDir                                                # a fresh temp folder: inherited rules only
+        # its own new home inside the test folder: the shared one's locks folder may already be locked down by an earlier test
+        # (CI runs elevated, so the real repair ran there) - then there would be nothing to repair
+        $fresh = Join-Path $script:TestHomeDir ('acl-' + [guid]::NewGuid())
+        if (-not (Test-IsTestDir $fresh)) { throw "SAFETY: $fresh is not inside the test folder" }
+        Set-VeroHome $fresh
+        try {
+            $d = Get-VeroLockDir                                            # created just now: inherited rules only
+        } finally { Set-VeroHome $script:TestHomeDir }
         Should -Invoke -ModuleName VeroScudo.Core Set-VeroLockDirAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $d }
         Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like 'locks folder*' }
     }
