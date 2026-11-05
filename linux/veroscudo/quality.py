@@ -90,10 +90,10 @@ def parse(raw: object, is_host) -> CheckConfig:
     if raw is None:
         return CheckConfig()
     if not isinstance(raw, dict):
-        raise ValueError("config.json: connectionCheck must be an object")
+        raise ValueError("config.json: connectionCheck must be an object")  # noqa: TRY004 - a config error is a ValueError everywhere (`veroscudo set` and the loaders catch ValueError)
     enabled = raw.get("enabled", False)
     if not isinstance(enabled, bool):
-        raise ValueError("config.json: connectionCheck.enabled must be true or false")
+        raise ValueError("config.json: connectionCheck.enabled must be true or false")  # noqa: TRY004 - a config error is a ValueError everywhere (`veroscudo set` and the loaders catch ValueError)
     try:
         interval = int(raw.get("intervalSeconds", 10))
         window = int(raw.get("windowMinutes", 1))
@@ -109,7 +109,7 @@ def parse(raw: object, is_host) -> CheckConfig:
     targets = []
     for t in raw_targets:
         if not isinstance(t, dict):
-            raise ValueError("config.json: each connectionCheck target must be an object {host, method, port}")
+            raise ValueError("config.json: each connectionCheck target must be an object {host, method, port}")  # noqa: TRY004 - a config error is a ValueError everywhere (`veroscudo set` and the loaders catch ValueError)
         host = str(t.get("host") or "").strip()
         if not host or not is_host(host):
             raise ValueError(f"config.json: invalid connectionCheck host {host!r}")

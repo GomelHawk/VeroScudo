@@ -1,5 +1,7 @@
 """Connection quality (Settings > Connection): the config key, the form, the rating, the file the tray reads, the guard's
 rounds and what the tray shows. The same rules are tested on Windows (tests/VeroScudo.Core.Tests.ps1, "Connection check")."""
+from __future__ import annotations
+
 import json
 
 import pytest
