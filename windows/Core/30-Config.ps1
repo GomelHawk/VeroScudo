@@ -42,6 +42,7 @@ function Get-VeroPath {
         RasCoId       = Join-Path $state 'ras-coid.json'                   # connection id of the connect VeroScudo saw (System log)
         OnRefused     = Join-Path $state 'on-refused.json'                 # On refused: another VPN is connected (the tray says so)
         Foreign       = Join-Path $state 'foreign.json'                    # a VPN that is not a VeroScudo profile connected while armed
+        Quality       = Join-Path $state 'quality.json'                    # connection check: the watchdog's last rating (read by the tray)
         OpenVpnDir    = Join-Path $home_ 'openvpn'
         UserDir       = $user
         SwitchRequest = Join-Path $user 'switch.request'
@@ -176,6 +177,8 @@ function Get-VeroConfig {
         WifiRecoveryFix = if ($j.PSObject.Properties['wifiRecoveryFix']) { [bool]$j.wifiRecoveryFix } else { $true }
         LanAllow        = @($lan)
         UpdateCheck     = if ($j.PSObject.Properties['updateCheck']) { [bool]$j.updateCheck } else { $true }
+        ConnectionCheck = $(if ($j.PSObject.Properties['connectionCheck'] -and $null -ne $j.connectionCheck -and $j.connectionCheck -isnot [System.Management.Automation.PSCustomObject]) { throw 'config.json: connectionCheck must be an object' }
+                            ConvertFrom-VeroCheckConfig (Get-Prop $j 'connectionCheck'))   # optional quality checks (66-Quality.ps1)
     }
 }
 
@@ -190,6 +193,7 @@ function ConvertTo-VeroConfigJson {
         wifiRecoveryFix = $Config.WifiRecoveryFix
         updateCheck     = $Config.UpdateCheck
         lanAllow        = @($Config.LanAllow)
+        connectionCheck = ConvertTo-VeroCheckObject $Config.ConnectionCheck
     } | ConvertTo-Json -Depth 6
 }
 

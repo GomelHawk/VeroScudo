@@ -189,7 +189,15 @@ Uninstall: menu bar > **About VeroScudo** > *Uninstall…*, or `sudo /opt/verosc
 Tray menu (the same on Windows, Linux and macOS): **Turn VPN on** / **Turn VPN off** / **Reconnect VPN** /
 **VPN profile ▸** / Status / Open log / Settings / Keep awake / Check for updates / About / Exit (the guard keeps running
 without the tray). Windows: left-click shows the status window; Linux: middle-click. The tray runs without administrator
-rights; changing Settings asks for an administrator's password.
+rights; changing Settings asks for an administrator's password. Settings has three tabs: **VPN profiles**, **Behaviour**
+and **Connection**.
+
+**Connection check** (optional, off by default; Settings > *Connection*): while protected, VeroScudo checks up to three
+addresses through the tunnel every 10-100 s - ping, or a TCP connection to a port (default: 1.1.1.1, TCP 443) - and rates
+the last 1-10 minutes: under 10 % lost **good**, 10-50 % **unstable**, over 50 % **bad**. The first rating comes one full
+period after each connect or settings change (*checking…* until then). The rating shows in the tooltip
+(*VeroScudo - Protected, connection good*), the menu header and the status window's **CONNECTION** card, which shows the
+redial instead while the VPN is not connected. It only reports - it never reconnects or switches profiles by itself.
 
 Command line (Windows): `powershell -File "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action status`
 (also `on`, `off`, and elevated `switch -VpnProfile <name>`). Log: `%ProgramData%\VeroScudo\state\veroscudo.log`.

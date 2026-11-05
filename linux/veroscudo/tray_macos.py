@@ -14,6 +14,9 @@ from pathlib import Path
 import objc  # type: ignore
 from AppKit import (  # type: ignore
     NSAlert,
+    NSBackingStoreBuffered,
+    NSButton,
+    NSColor,
     NSAlertFirstButtonReturn,
     NSAlertSecondButtonReturn,
     NSAlertThirdButtonReturn,
@@ -27,17 +30,25 @@ from AppKit import (  # type: ignore
     NSOnState,
     NSPasteboard,
     NSPasteboardTypeString,
+    NSPopUpButton,
     NSScrollView,
     NSStatusBar,
+    NSTabView,
+    NSTabViewItem,
+    NSTextField,
     NSTextView,
+    NSView,
     NSVariableStatusItemLength,
+    NSWindow,
+    NSWindowStyleMaskClosable,
+    NSWindowStyleMaskTitled,
 )
 from Foundation import NSObject, NSTimer  # type: ignore
 from PyObjCTools import AppHelper  # type: ignore
 
-from . import __version__, keepawake, traymodel, update
+from . import __version__, keepawake, quality, traymodel, update
 from .backend import nm
-from .config import Config, config_path
+from .config import Config, config_path, is_host
 from .state import StateStore, kind_label, switch_notice
 
 ICONS = traymodel.env_icons(Path("/opt/veroscudo/icons"))
@@ -75,6 +86,8 @@ class Tray(NSObject):
         self.view = traymodel.tray_state(self.facts)
         self.update_url = ""
         self.shown_profiles = None
+        self.win = None                          # the Settings window (three tabs, as on Windows and Linux)
+        self.win_ui = {}
         self.reload_config()
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
         self.menu = NSMenu.alloc().init()
@@ -92,10 +105,7 @@ class Tray(NSObject):
         self.menu.addItem_(NSMenuItem.separatorItem())
         self.add("Status…", "status:")
         self.add("Open log", "openLog:")
-        self.set_item = self.add("Settings", None)
-        self.set_menu = NSMenu.alloc().init()
-        self.set_menu.setAutoenablesItems_(False)
-        self.set_item.setSubmenu_(self.set_menu)
+        self.add("Settings…", "settings:")
         self.awake_item = self.add("Keep awake", "toggleAwake:")
         self.awake_item.setState_(NSOnState if self.awake.set(keepawake.load_pref()) else NSOffState)
         self.menu.addItem_(NSMenuItem.separatorItem())
@@ -138,6 +148,8 @@ class Tray(NSObject):
             self.cfg, self.cfg_error = None, str(e)
         self.kinds = {}
         self.shown_profiles = None
+        if self.win is not None:
+            self.fill_settings()
         return True
 
     @objc.python_method
@@ -151,7 +163,8 @@ class Tray(NSObject):
         armed = self.store.armed
         up = nm.is_connected(cfg.profile) and (not armed or self.store.allowed_tunnel(cfg.profile) is not None)
         return traymodel.Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up,
-                               guard_running=traymodel.guard_running(), expect=self.expect.kind)
+                               guard_running=traymodel.guard_running(), expect=self.expect.kind, check_enabled=cfg.check.enabled,
+                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None)
 
     # ---- timers
     def tick_(self, _timer):
@@ -190,8 +203,8 @@ class Tray(NSObject):
             self.item.button().setImage_(img)
         else:
             self.item.button().setTitle_("VS")
-        self.item.button().setToolTip_(traymodel.tooltip(v, self.awake.active))
-        self.head.setTitle_(f"VeroScudo - {v.title}")
+        self.item.button().setToolTip_(traymodel.tooltip(v, self.awake.active, self.facts))
+        self.head.setTitle_(traymodel.menu_head(v, self.facts))
         ms = traymodel.menu_state(v)
         self.on_item.setEnabled_(ms.on and self.facts.configured)
         self.off_item.setEnabled_(ms.off)
@@ -211,47 +224,218 @@ class Tray(NSObject):
     @objc.python_method
     def fill_menus(self):
         cfg = self.cfg
-        key = (tuple(cfg.names), cfg.profile, cfg.default_profile, cfg.update_check) if cfg else ()
+        key = (tuple(cfg.names), cfg.profile) if cfg else ()
         if key == self.shown_profiles:
             return
         self.shown_profiles = key
         self.prof_menu.removeAllItems()
-        self.set_menu.removeAllItems()
         self.prof_item.setEnabled_(bool(cfg))
         if cfg:
             for name in cfg.names:
                 it = self.add(f"{name} ({kind_label(self.kind(name))})", "useProfile:", self.prof_menu, name)
                 it.setState_(NSOnState if name == cfg.profile else NSOffState)
             self.prof_item.setTitle_(f"VPN profile: {cfg.profile} ({kind_label(self.kind(cfg.profile))})")
-        # Settings: one submenu per change - each asks for an administrator's password
-        imp = self.add("Import a VPN service", None, self.set_menu)
-        imp_menu = NSMenu.alloc().init()
-        imp_menu.setAutoenablesItems_(False)
-        imp.setSubmenu_(imp_menu)
-        have = set(cfg.names) if cfg else set()
+
+    # ---- the Settings window: VPN profiles, Behaviour, Connection
+    @objc.python_method
+    def label(self, view, text, x, y, w, h=20, dim=False):
+        t = NSTextField.labelWithString_(text)
+        t.setFrame_(NSMakeRect(x, y, w, h))
+        if dim:
+            t.setTextColor_(NSColor.secondaryLabelColor())
+        view.addSubview_(t)
+        return t
+
+    @objc.python_method
+    def field(self, view, x, y, w, text=""):
+        f = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, 24))
+        f.setStringValue_(text)
+        view.addSubview_(f)
+        return f
+
+    @objc.python_method
+    def button(self, view, title, action, x, y, w):
+        b = NSButton.buttonWithTitle_target_action_(title, self, action)
+        b.setFrame_(NSMakeRect(x, y, w, 30))
+        view.addSubview_(b)
+        return b
+
+    @objc.python_method
+    def popup(self, view, x, y, w, titles=(), action=None):
+        p = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(x, y, w, 26), False)
+        p.addItemsWithTitles_(list(titles))
+        if action:
+            p.setTarget_(self)
+            p.setAction_(action)
+        view.addSubview_(p)
+        return p
+
+    @objc.python_method
+    def build_settings(self):
+        W, H = 560, 380
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, W, H), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
+        win.setTitle_("VeroScudo - Settings")
+        win.setReleasedWhenClosed_(False)
+        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(12, 12, W - 24, H - 24))
+        win.contentView().addSubview_(tabs)
+        ui = {"tabs": tabs}
+
+        def tab(title):
+            item = NSTabViewItem.alloc().initWithIdentifier_(title)
+            item.setLabel_(title)
+            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 44, H - 70))
+            item.setView_(view)
+            tabs.addTabViewItem_(item)
+            return view
+
+        top = H - 90                             # the first row inside a tab
+        v = tab("VPN profiles")
+        self.label(v, "Profile", 16, top, 90)
+        ui["prof"] = self.popup(v, 110, top - 3, 300)
+        self.button(v, "Remove", "settingsRemove:", 110, top - 40, 110)
+        self.button(v, "Make default", "settingsDefault:", 226, top - 40, 130)
+        self.label(v, "Import", 16, top - 90, 90)
+        ui["imp"] = self.popup(v, 110, top - 93, 300)
+        ui["imp_btn"] = self.button(v, "Import", "settingsImport:", 416, top - 95, 90)
+        self.label(v, "Profiles are the VPN services of System Settings > VPN; passwords stay in the keychain. Each change "
+                      "asks for an administrator's password.", 16, 16, W - 70, 40, dim=True)
+
+        v = tab("Behaviour")
+        strict = NSButton.checkboxWithTitle_target_action_("Strict kill-switch (always on - cannot be disabled)", None, None)
+        strict.setFrame_(NSMakeRect(16, top, 460, 22))
+        strict.setState_(NSOnState)
+        strict.setEnabled_(False)
+        v.addSubview_(strict)
+        ui["upd"] = NSButton.checkboxWithTitle_target_action_("Check for a new release at login", self, "settingsUpdate:")
+        ui["upd"].setFrame_(NSMakeRect(16, top - 30, 460, 22))
+        v.addSubview_(ui["upd"])
+        self.label(v, "Each change asks for an administrator's password and takes effect within 15 seconds.", 16, 16, W - 70,
+                   40, dim=True)
+
+        v = tab("Connection")
+        ui["en"] = NSButton.checkboxWithTitle_target_action_("Check the connection quality while protected", self,
+                                                             "settingsCheckToggle:")
+        ui["en"].setFrame_(NSMakeRect(16, top, 460, 22))
+        v.addSubview_(ui["en"])
+        more = []
+        more.append(self.label(v, "Check every", 16, top - 34, 110))
+        ui["every"] = self.field(v, 130, top - 37, 60)
+        more += [ui["every"], self.label(v, "seconds (10-100)", 198, top - 34, 200, dim=True)]
+        more.append(self.label(v, "Rate the last", 16, top - 64, 110))
+        ui["over"] = self.field(v, 130, top - 67, 60)
+        more += [ui["over"], self.label(v, "minutes (1-10)", 198, top - 64, 200, dim=True)]
+        more.append(self.label(v, "Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.", 16, top - 92,
+                               W - 70, dim=True))
+        more.append(self.label(v, "Addresses (IP, host name or URL - at least one)", 16, top - 120, W - 70))
+        ui["rows"] = []
+        for i in range(quality.MAX_TARGETS):
+            y = top - 152 - i * 32
+            host = self.field(v, 16, y, 250)
+            host.setPlaceholderString_(quality.DEFAULT_HOST if i == 0 else "optional")
+            m = self.popup(v, 274, y - 1, 120, ("Ping", "TCP port"), "settingsMethod:")
+            port = self.field(v, 402, y, 70)
+            ui["rows"].append((host, m, port))
+            more += [host, m, port]
+        more.append(self.label(v, "The first rating comes one full period after each connect and each change here. The checks "
+                                  "go through the VPN tunnel.", 16, 36, W - 70, 34, dim=True))
+        ui["save"] = self.button(v, "Save", "settingsSave:", W - 150, 2, 110)
+        ui["more"] = more
+        self.win, self.win_ui = win, ui
+        self.fill_settings()
+        win.center()
+
+    @objc.python_method
+    def fill_settings(self):
+        ui, cfg = self.win_ui, self.cfg
+        if not ui:
+            return
+        names = list(cfg.names) if cfg else []
+        ui["prof"].removeAllItems()
+        for n in names:
+            tags = [kind_label(self.kind(n))] + (["default"] if cfg and n == cfg.default_profile else []) + \
+                   (["active"] if cfg and n == cfg.profile else [])
+            ui["prof"].addItemWithTitle_(f"{n}  ({', '.join(tags)})")
+            ui["prof"].lastItem().setRepresentedObject_(n)
+        have = set(names)
         found = [d for d in nm.discover() if d["name"] not in have]
+        ui["imp"].removeAllItems()
         for d in found:
             ok = bool(d["server"]) and not d.get("unsupported")
-            it = self.add(f"{d['name']}  ({d['vpn_type'] or d['protocol']})" if ok else f"{d['name']}  - {d['note']}",
-                          "importProfile:", imp_menu, d["name"])
-            it.setEnabled_(ok)
+            ui["imp"].addItemWithTitle_(f"{d['name']}  ({d['vpn_type'] or d['protocol']})" if ok else f"{d['name']}  - {d['note']}")
+            ui["imp"].lastItem().setRepresentedObject_(d["name"] if ok else "")
         if not found:
-            self.add("No other VPN service (System Settings > VPN)", None, imp_menu).setEnabled_(False)
-        if cfg:
-            for title, action in (("Remove profile", "removeProfile:"), ("Default profile", "defaultProfile:")):
-                sub_item = self.add(title, None, self.set_menu)
-                sub = NSMenu.alloc().init()
-                sub_item.setSubmenu_(sub)
-                for name in cfg.names:
-                    it = self.add(name, action, sub, name)
-                    if action == "defaultProfile:" and name == cfg.default_profile:
-                        it.setState_(NSOnState)
-            self.set_menu.addItem_(NSMenuItem.separatorItem())
-            it = self.add("Check for a new release at login", "toggleUpdateCheck:", self.set_menu)
-            it.setState_(NSOnState if cfg.update_check else NSOffState)
-        it = self.add("Strict kill-switch (always on)", None, self.set_menu)
-        it.setState_(NSOnState)
-        it.setEnabled_(False)
+            ui["imp"].addItemWithTitle_("No other VPN service (System Settings > VPN)")
+            ui["imp"].lastItem().setRepresentedObject_("")
+        ui["upd"].setState_(NSOnState if (cfg is None or cfg.update_check) else NSOffState)
+        chk = cfg.check if cfg else quality.CheckConfig()
+        ui["en"].setState_(NSOnState if chk.enabled else NSOffState)
+        ui["every"].setStringValue_(str(chk.interval_seconds))
+        ui["over"].setStringValue_(str(chk.window_minutes))
+        for i, (host, m, port) in enumerate(ui["rows"]):
+            t = chk.targets[i] if i < len(chk.targets) else None
+            host.setStringValue_(t.host if t else "")
+            m.selectItemAtIndex_(0 if t and t.method == "ping" else 1)
+            port.setStringValue_(str(t.port if t and t.method == "tcp" else 443))
+            port.setEnabled_(not (t and t.method == "ping"))
+        self.show_check_fields()
+
+    @objc.python_method
+    def show_check_fields(self):
+        on = self.win_ui["en"].state() == NSOnState
+        for view in self.win_ui["more"]:
+            view.setHidden_(not on)
+
+    @objc.python_method
+    def selected(self, popup):
+        it = popup.selectedItem()
+        return str(it.representedObject()) if it is not None and it.representedObject() else ""
+
+    def settings_(self, _):
+        if self.win is None:
+            self.build_settings()
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self.win.makeKeyAndOrderFront_(None)
+
+    def settingsRemove_(self, _):
+        name = self.selected(self.win_ui["prof"])
+        if name and self.confirm(f"Remove '{name}' from VeroScudo?", "The VPN service itself stays in System Settings.", "Remove"):
+            self.admin(["remove", name])
+
+    def settingsDefault_(self, _):
+        name = self.selected(self.win_ui["prof"])
+        if name:
+            self.admin(["default", name])
+
+    def settingsImport_(self, _):
+        name = self.selected(self.win_ui["imp"])
+        if name:
+            self.admin(["import", name])
+
+    def settingsUpdate_(self, sender):
+        self.admin(["set", "updateCheck", "true" if sender.state() == NSOnState else "false"])
+
+    def settingsCheckToggle_(self, _):
+        self.show_check_fields()
+
+    def settingsMethod_(self, _):
+        for _host, m, port in self.win_ui["rows"]:
+            port.setEnabled_(m.indexOfSelectedItem() == 1)
+
+    def settingsSave_(self, _):
+        ui = self.win_ui
+        try:
+            rows = [(str(h.stringValue()), "ping" if m.indexOfSelectedItem() == 0 else "tcp", int(str(p.stringValue()) or 443))
+                    for h, m, p in ui["rows"]]
+            chk = quality.from_form(ui["en"].state() == NSOnState, int(str(ui["every"].stringValue()) or 10),
+                                    int(str(ui["over"].stringValue()) or 1), rows, is_host)
+        except ValueError as e:
+            msg = str(e) if "Address" in str(e) else "Seconds, minutes and ports must be whole numbers."
+            self.alert("Not saved", msg)
+            return
+        if not str(ui["rows"][0][0].stringValue()).strip():
+            ui["rows"][0][0].setStringValue_(quality.DEFAULT_HOST)
+        self.admin(["set", "connectionCheck", json.dumps(chk.to_json())])
 
     # ---- actions
     @objc.python_method
@@ -286,21 +470,6 @@ class Tray(NSObject):
         name = str(sender.representedObject())
         if self.cfg and name != self.cfg.profile:
             self.run_action("use", name)
-
-    def importProfile_(self, sender):
-        self.admin(["import", str(sender.representedObject())])
-
-    def removeProfile_(self, sender):
-        name = str(sender.representedObject())
-        if self.confirm(f"Remove '{name}' from VeroScudo?", "The VPN service itself stays in System Settings.", "Remove"):
-            self.admin(["remove", name])
-
-    def defaultProfile_(self, sender):
-        self.admin(["default", str(sender.representedObject())])
-
-    def toggleUpdateCheck_(self, _):
-        if self.cfg:
-            self.admin(["set", "updateCheck", "false" if self.cfg.update_check else "true"])
 
     def toggleAwake_(self, _):
         want = not self.awake.active

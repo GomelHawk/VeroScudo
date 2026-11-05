@@ -217,6 +217,13 @@ function Get-State {
     if ($global:PreviewFacts) { return ConvertTo-VeroTrayState $global:PreviewFacts }
     ConvertTo-VeroTrayState (Get-StateFacts)
 }
+function Get-ConnectionView($st) {
+    <# The CONNECTION card, tooltip word and menu header (ConvertTo-VeroConnectionView decides; this collects). #>
+    $chk = if ($global:PreviewCheck) { $global:PreviewCheck } elseif ($global:Config) { $global:Config.ConnectionCheck } else { $null }
+    $q = if ($global:PreviewFacts) { $global:PreviewQuality } elseif ($chk -and $chk.Enabled -and $global:Config) { Read-VeroQuality -ProfileName $global:Config.Profile } else { $null }
+    $exp = if ($global:PreviewFacts) { [string]$global:PreviewFacts.Expect } else { [string](Get-TrayExpect) }
+    ConvertTo-VeroConnectionView -St $st -Check $chk -Quality $q -Expect $exp
+}
 function Invoke-GuardTask([string]$name) { Start-Process (Join-Path (Get-VeroSystemDir System) 'schtasks.exe') -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
 function Get-LastEvents([int]$n = 6, [string]$After = '') {
     <# The newest log lines without the date; -After 'yyyy-MM-dd HH:mm:ss': only lines written after it (Clear in the status window). #>
@@ -301,7 +308,7 @@ function Show-Status {
     $f.ClientSize = (Z 460 582)
     $cards = @{}; $heads = @{}
     $i = 0
-    foreach ($k in 'VPN profile', 'Firewall', 'Last drop', 'Redial') {
+    foreach ($k in 'VPN profile', 'Firewall', 'Last drop', 'Connection') {
         $cx = 20 + ($i % 2) * 215; $cy = 14 + [math]::Floor($i / 2) * 78
         $c = New-Card $body $cx $cy 205 66
         $heads[$k] = New-Label $c ($k.ToUpper()) 12 8 185 16 $FontSmall $global:Theme.Sub
@@ -360,7 +367,11 @@ function Show-Status {
         $cards['Firewall'].Text = if ($st.Armed) { 'kill-switch ON' } else { 'normal' }
         $cards['Firewall'].ForeColor = if ($st.Expected) { $global:Amber } elseif ($st.Armed -and -not $st.Connected) { [System.Drawing.Color]::FromArgb(248,80,70) } else { $global:Theme.Text }
         $cards['Last drop'].Text = Get-LastDrop
-        $cards['Redial'].Text = if ($st.Expected) { 'connecting' } elseif ($st.Armed -and -not $st.Connected) { 'running' } else { 'idle' }
+        # CONNECTION: the quality while protected (Settings > Connection), else what the guard does about the connection
+        $cv = Get-ConnectionView $st
+        $cards['Connection'].Text = $cv.Text
+        $cards['Connection'].ForeColor = switch ($cv.Tone) { 'good' { [System.Drawing.Color]::FromArgb(48,200,79) } 'warn' { $global:Amber } 'bad' { [System.Drawing.Color]::FromArgb(248,80,70) } default { $global:Theme.Text } }
+        $tip.SetToolTip($cards['Connection'], $cv.Tip)
         # OpenVPN / WireGuard: that card shows the client's own state (not the last drop)
         $heads['Last drop'].Text = switch ($(if ($global:Config) { [string]$global:Config.Type } else { '' })) { 'openvpn' { 'OPENVPN' } 'wireguard' { 'WIREGUARD' } default { 'LAST DROP' } }
         # lines wrap at the window edge: after a comma too, so an address list never breaks in the middle of an address
@@ -742,9 +753,24 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
 $global:SettingsForm = $null
 function Show-Settings {
     if ($global:SettingsForm -and -not $global:SettingsForm.IsDisposed) { $global:SettingsForm.Activate(); return }
-    $f = New-Form 'VeroScudo settings' 520 694
-    New-Label $f 'VPN profiles' 20 16 200 22 $FontBold | Out-Null
-    $card = New-Card $f 20 42 480 300
+    $f = New-Form 'VeroScudo settings' 520 556
+    # three tabs (the same on Linux and macOS): VPN profiles, Behaviour, Connection - drawn here in the theme's colours
+    # (WinForms' TabControl paints its strip light grey on the dark theme)
+    $pages = @(); $tabs = @()
+    foreach ($i in 0..2) {
+        $pg = New-Object System.Windows.Forms.Panel; $pg.Location = (P 0 64); $pg.Size = (Z 520 380); $pg.BackColor = $global:Theme.Bg; $f.Controls.Add($pg); $pages += $pg
+        $t = New-Label $f (@('VPN profiles', 'Behaviour', 'Connection')[$i]) (20 + $i * 130) 14 120 30 $FontBold; $t.TextAlign = 'MiddleCenter'; $t.Cursor = 'Hand'; $tabs += $t
+    }
+    $bar = New-Object System.Windows.Forms.Panel; $bar.Location = (P 20 44); $bar.Size = (Z 120 3); $bar.BackColor = $global:Theme.Accent; $f.Controls.Add($bar)
+    $line = New-Object System.Windows.Forms.Panel; $line.Location = (P 20 47); $line.Size = (Z 480 1); $line.BackColor = $global:Theme.Border; $f.Controls.Add($line)
+    $selectTab = ({ param([int]$n)
+        foreach ($k in 0..2) { $pages[$k].Visible = ($k -eq $n); $tabs[$k].ForeColor = if ($k -eq $n) { $global:Theme.Text } else { $global:Theme.Sub } }
+        $bar.Left = $tabs[$n].Left
+    }).GetNewClosure()
+    foreach ($i in 0..2) { $idx = $i; $tabs[$i].Add_Click(({ & $selectTab $idx }).GetNewClosure()) }
+    & $selectTab 0
+    $global:SettingsTab = $selectTab                                        # -Preview shows every tab
+    $card = New-Card $pages[0] 20 0 480 300
     $work = New-Object System.Collections.ArrayList
     if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } }, @{ n = 'ImportText'; e = { $null } })) } }
     $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }); Use = $null }
@@ -799,25 +825,60 @@ function Show-Settings {
         if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
                     New-Object System.Management.Automation.PSCredential('key', $sec) | Export-Clixml $cp.KeyPass }
     }).GetNewClosure())
-    New-Label $f 'Behaviour' 20 356 200 22 $FontBold | Out-Null
-    $card2 = New-Card $f 20 382 480 180
+    $card2 = New-Card $pages[1] 20 0 480 180
     $chkStrict = New-ThemedCheck; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
     $chkVm = New-ThemedCheck; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
     $chkWifi = New-ThemedCheck; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
     $chkUpd = New-ThemedCheck; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
     $chkLoc = New-ThemedCheck; $chkLoc.Text = 'Show exit location (asks ipinfo.io after each connect)'; $chkLoc.Location = (P 12 132); $chkLoc.Size = (Z 450 24); $chkLoc.ForeColor = $global:Theme.Text; $chkLoc.Checked = (Test-ExitEnabled); $card2.Controls.Add($chkLoc)
     $chkLoc.Add_CheckedChanged({ Set-TrayPref 'showExit' $this.Checked })   # your own setting: saved at once, no administrator prompt
-    New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 574 480 36 $FontSmall $global:Theme.Sub | Out-Null
-    $bCancel = New-Button $f 'Close' 270 634 110
-    $bSave   = New-Button $f 'Save' 390 634 110 $true
+    # Connection: optional quality checks through the tunnel while protected (66-Quality.ps1). The fields show only when ticked.
+    $chk = if ($global:PreviewCheck) { $global:PreviewCheck } elseif ($global:Config) { $global:Config.ConnectionCheck } else { ConvertFrom-VeroCheckConfig $null }
+    $card3 = New-Card $pages[2] 20 0 480 376
+    $chkQ = New-ThemedCheck; $chkQ.Text = 'Check the connection quality while protected'; $chkQ.Location = (P 12 12); $chkQ.Size = (Z 450 24); $chkQ.ForeColor = $global:Theme.Text; $chkQ.Checked = [bool]$chk.Enabled; $card3.Controls.Add($chkQ)
+    $more = New-Object System.Windows.Forms.Panel; $more.Location = (P 1 44); $more.Size = (Z 476 328); $more.BackColor = $global:Theme.Card; $card3.Controls.Add($more)
+    New-Label $more 'Check every' 12 5 112 22 | Out-Null
+    $inEvery = New-Input $more 128 2 60 ([string]$chk.IntervalSeconds)
+    New-Label $more 'seconds (10-100)' 196 6 220 22 $FontSmall $global:Theme.Sub | Out-Null
+    New-Label $more 'Rate the last' 12 41 112 22 | Out-Null
+    $inOver = New-Input $more 128 38 60 ([string]$chk.WindowMinutes)
+    New-Label $more 'minutes (1-10)' 196 42 220 22 $FontSmall $global:Theme.Sub | Out-Null
+    New-Label $more 'Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.' 12 76 452 20 $FontSmall $global:Theme.Sub | Out-Null
+    New-Label $more 'Addresses - IP, host name or URL; at least one' 12 104 452 22 | Out-Null
+    $rows = @()
+    foreach ($i in 0..2) {
+        $t = if ($i -lt @($chk.Targets).Count) { @($chk.Targets)[$i] } else { $null }
+        $y = 132 + $i * 40
+        $inHost = New-Input $more 12 $y 228 $(if ($t) { [string]$t.Host } else { '' })
+        $cbM = New-Object VeroCombo; $cbM.Location = (P 248 $y); $cbM.Size = (Z 116 30); $cbM.DropDownStyle = 'DropDownList'; $cbM.FlatStyle = 'Flat'; $cbM.BackColor = $global:Theme.Card; $cbM.ForeColor = $global:Theme.Text; $cbM.Font = $FontUI; Set-DarkCombo $cbM
+        [void]$cbM.Items.Add('Ping'); [void]$cbM.Items.Add('TCP port'); $more.Controls.Add($cbM)
+        $cbM.SelectedIndex = if ($t -and $t.Method -eq 'ping') { 0 } else { 1 }
+        $inPort = New-Input $more 372 $y 92 $(if ($t -and $t.Method -eq 'tcp') { [string]$t.Port } else { '443' })
+        $syncPort = ({ $tcp = ($cbM.SelectedIndex -eq 1); $inPort.ReadOnly = -not $tcp; $inPort.TabStop = $tcp; $inPort.ForeColor = if ($tcp) { $global:Theme.Text } else { $global:Theme.Sub } }).GetNewClosure()
+        & $syncPort; $cbM.Add_SelectedIndexChanged($syncPort)
+        if ($i -eq 0) { $inHost.Add_Leave({ if (-not $this.Text.Trim()) { $this.Text = '1.1.1.1' } }) }   # never empty: there is always one address
+        $rows += [pscustomobject]@{ Host = $inHost; Method = $cbM; Port = $inPort }
+    }
+    New-WrapLabel $more 'The first rating comes one full period after each connect and each change here. The checks go through the VPN tunnel; an address in your local network is not reachable while the kill-switch is on (unless lanAllow lets it through).' 12 256 452 $FontSmall $global:Theme.Sub | Out-Null
+    $more.Visible = $chkQ.Checked
+    $chkQ.Add_CheckedChanged(({ $more.Visible = $chkQ.Checked }).GetNewClosure())
+    New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 452 480 36 $FontSmall $global:Theme.Sub | Out-Null
+    $bCancel = New-Button $f 'Close' 270 502 110
+    $bSave   = New-Button $f 'Save' 390 502 110 $true
     $bCancel.Add_Click(({ $f.Close() }).GetNewClosure())
     $bSave.Add_Click(({
         if ($work.Count -eq 0) { [VeroMsg]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
+        $num = { param($box, [int]$fallback) $v = 0; if ([int]::TryParse($box.Text.Trim(), [ref]$v)) { $v } elseif (-not $box.Text.Trim()) { $fallback } else { throw "'$($box.Text.Trim())' is not a whole number." } }
+        try {
+            $check = ConvertFrom-VeroCheckForm -Enabled $chkQ.Checked -IntervalSeconds (& $num $inEvery 10) -WindowMinutes (& $num $inOver 1) -Rows @($rows | ForEach-Object {
+                @{ Text = $_.Host.Text; Method = $(if ($_.Method.SelectedIndex -eq 0) { 'ping' } else { 'tcp' }); Port = $(if ($_.Method.SelectedIndex -eq 0) { 443 } else { & $num $_.Port 443 }) } })
+        } catch { & $selectTab 2; [VeroMsg]::Show("Not saved (Connection): $($_.Exception.Message)", 'VeroScudo') | Out-Null; return }
         $json = [ordered]@{
             profiles = @($work | ForEach-Object { ConvertTo-VeroProfileObject $_ })
             activeProfile = $state.Default
             retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
+            connectionCheck = ConvertTo-VeroCheckObject $check
         } | ConvertTo-Json -Depth 6
         $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Text = $_.ImportText } })
         try {
@@ -1080,8 +1141,9 @@ function Refresh {
         }
     }
     $notify.Icon = Get-StateIcon $st.State -Awake:([VeroKeepAwake]::Active)
-    $tip = "VeroScudo - $($st.Title)$(if ([VeroKeepAwake]::Active) { ', keeping PC awake' })"; $notify.Text = $tip.Substring(0, [Math]::Min(63, $tip.Length))
-    $mHead.Text = "VeroScudo - $($st.Title)"
+    $cv = Get-ConnectionView $st
+    $notify.Text = Get-VeroTrayTip -Title $st.Title -Word $cv.Word -Awake:([VeroKeepAwake]::Active)
+    $mHead.Text = "VeroScudo - $($st.Title)$(if ($cv.Word) { " - $($cv.Word)" })"
     $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected; $mRedo.Enabled = $st.Armed
     $noticed = Show-SwitchNotice
     if (-not $noticed) { $noticed = Show-ForeignNotice }
@@ -1141,8 +1203,18 @@ if ($Preview) {
         $global:PreviewFacts = $facts
         Invoke-Shot "status-$k" { $fm = Show-Status; Save-FormShot $fm $global:ShotName; $global:StatusForm = $null }
     }
-    $global:PreviewFacts = $null
-    Invoke-Shot 'settings' { Save-FormShot (Show-Settings) $global:ShotName; $global:SettingsForm = $null }
+    # the CONNECTION card while protected and rated (Settings > Connection on)
+    $global:PreviewCheck = ConvertFrom-VeroCheckConfig ('{"enabled":true,"intervalSeconds":10,"windowMinutes":2,"targets":[{"host":"1.1.1.1","method":"tcp","port":443},{"host":"10.0.0.1","method":"ping"}]}' | ConvertFrom-Json)
+    $quals = [ordered]@{ 'good' = @(0.0, 45, 0); 'unstable' = @(22.2, 310, 4); 'bad' = @(61.1, 900, 11); 'checking' = $null }
+    foreach ($qk in $quals.Keys) {
+        $qv = $quals[$qk]
+        $global:PreviewQuality = if ($qv) { [pscustomobject]@{ State = $qk; LossPct = $qv[0]; RttMs = $qv[1]; Checks = 18; Lost = $qv[2] } } else { $null }
+        $global:PreviewFacts = @{ Configured = $true; Name = $pn; Type = $pt; Armed = $true; Up = $true; Cred = $true; AuthBlocked = $false; Otp = $null; Conflicts = @(); NativeNext = $null; Expect = $null }
+        Invoke-Shot "status-quality-$qk" { $fm = Show-Status; Save-FormShot $fm $global:ShotName; $global:StatusForm = $null }
+    }
+    $global:PreviewFacts = $null; $global:PreviewQuality = $null
+    foreach ($ti in 0..2) { Invoke-Shot "settings-$(@('profiles', 'behaviour', 'connection')[$ti])" { $sf = Show-Settings; & $global:SettingsTab $ti; Save-FormShot $sf $global:ShotName; $global:SettingsForm = $null } }
+    $global:PreviewCheck = $null
     Invoke-Shot 'about' { Save-FormShot (Show-About) $global:ShotName }
     foreach ($i in 0..2) { Invoke-Shot "editor-$(@('ras', 'openvpn', 'wireguard')[$i])" { $x = New-VpnProfileForm $null; $x.TypeBox.SelectedIndex = $i; $x.Form.Show(); Save-FormShot $x.Form $global:ShotName } }
     if ($global:Config) { Invoke-Shot 'editor-edit' { $x = New-VpnProfileForm @($global:Config.Profiles)[0]; $x.Form.Show(); Save-FormShot $x.Form $global:ShotName } }

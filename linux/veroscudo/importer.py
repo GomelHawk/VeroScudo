@@ -84,9 +84,18 @@ OPTIONS = {"updateCheck": {"true": True, "false": False},
 
 
 def set_option(raw: str, key: str, value: str) -> str:
-    """updateCheck true|false, vm auto|true|false - nothing else (the strict rule has no setting). Pure; raises ValueError."""
+    """updateCheck true|false, vm auto|true|false, connectionCheck <JSON object> - nothing else (the strict rule has no
+    setting). Pure; raises ValueError (the whole file is validated again before anything is written)."""
+    if key == "connectionCheck":
+        try:
+            obj = json.loads(value)
+        except ValueError:
+            raise ValueError("connectionCheck must be a JSON object") from None
+        j, profiles = _load(raw)
+        j[key] = obj
+        return _dump(j, profiles)
     if key not in OPTIONS:
-        raise ValueError(f"'{key}' cannot be set here (only: {', '.join(OPTIONS)})")
+        raise ValueError(f"'{key}' cannot be set here (only: {', '.join([*OPTIONS, 'connectionCheck'])})")
     allowed = OPTIONS[key]
     if value not in allowed:
         raise ValueError(f"{key} must be one of {', '.join(allowed)}")

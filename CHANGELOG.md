@@ -5,6 +5,19 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Connection check (Windows, Linux, macOS)
+- **Optional connection quality check** (Settings > *Connection*, off by default): while protected, the guard checks up to
+  three addresses through the tunnel every 10-100 s (ping, or TCP to a port; 1.1.1.1 TCP 443 by default - an emptied
+  first address becomes 1.1.1.1 again) and rates the last 1-10 minutes: under 10 % of the checks lost *good*, 10-50 %
+  *unstable*, over 50 % *bad*. The first rating comes only after one full period - after every connect, profile switch
+  and change of the check settings (*checking…* until then). Shown in the tooltip (*VeroScudo - Protected, connection good*), the menu header
+  (*VeroScudo - Protected - Unstable*), the status window (the *Redial* card is now **CONNECTION**: the quality while
+  protected, the redial while not; Linux/macOS: a *Connection* row) and `status`. Only reports: it never reconnects or
+  switches profiles. Nothing in the kill-switch is opened for it. New key `connectionCheck` (docs/ARCHITECTURE.md,
+  *Connection check*); `veroscudo set connectionCheck '<json>'` on Linux/macOS.
+- **Settings in three tabs** on every platform: VPN profiles, Behaviour, Connection. macOS: Settings is now a window
+  (it was a submenu).
+
 ### Linux and macOS: install and use like on Windows
 - **Tray on Linux, menu-bar app on macOS** with the Windows tray's menu: Turn VPN on / off, Reconnect VPN, VPN profile ▸,
   Status…, Open log, Settings, Keep awake, Check for updates, About (with *Uninstall…*), Exit. Same icons, same state

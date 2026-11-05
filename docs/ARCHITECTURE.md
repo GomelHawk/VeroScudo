@@ -260,7 +260,9 @@ non-admin process can plant in `HKCU\Environment` must not redirect an elevated 
   "vm":              "auto",
   "wifiRecoveryFix": true,
   "updateCheck":     true,
-  "lanAllow":        []
+  "lanAllow":        [],
+  "connectionCheck": { "enabled": false, "intervalSeconds": 10, "windowMinutes": 1,
+                       "targets": [ { "host": "1.1.1.1", "method": "tcp", "port": 443 } ] }
 }
 ```
 
@@ -291,6 +293,33 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
   when it is newer. Only while the state is *protected* or *off* - never while blocked. HTTPS to `api.github.com`,
   nothing sent but the version in the User-Agent. Only links to this project's release pages are opened.
   `false` disables it. No automatic installation.
+- `connectionCheck` (optional, off by default): see *Connection check*. `intervalSeconds` 10-100, `windowMinutes` 1-10,
+  1-3 `targets`, each a host name or IP with `method` `ping` or `tcp` (+ `port` 1-65535). An empty list means 1.1.1.1 TCP 443.
+
+## Connection check
+
+Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how good the connection is while protected.
+
+- **Who checks:** the guard - the Windows watchdog loop (`Core/66-Quality.ps1`), the Linux/macOS daemon's `quality` thread
+  (`linux/veroscudo/quality.py`). Every `intervalSeconds` it checks each address once, in parallel: an ICMP echo (*ping*)
+  or a TCP connection to the port (*TCP*). 3 s per check.
+- **Only while armed and connected:** the checks go through the tunnel like any other traffic; nothing in the
+  kill-switch is opened for them. While blocked, off or redialing there is no rating - the samples are dropped, and a
+  new connection (or another profile) starts a new rating. An address in the local network is blocked like the rest of
+  the LAN unless `lanAllow` covers it.
+- **The rating:** every check counts. Loss = failed checks / all checks of the last `windowMinutes` (never fewer than 3
+  rounds). Under 10 % lost: **good**; 10-50 %: **unstable**; over 50 %: **bad**. The delay shown is the median of the
+  answered checks.
+- **The first rating waits one full period:** *checking* until `windowMinutes` (at least 3 rounds) have passed since the
+  rating started. It starts over on every connect, every profile switch and every change of the check settings (interval,
+  period, addresses) - a connection that has just come up is often shaky for a moment, and an early *bad* or *good* would
+  not be one to trust.
+- **Where it shows:** the guard writes `quality.json` (Windows `state\`, Linux `/run/veroscudo/`, macOS
+  `/var/run/veroscudo/`; readable by the user); the tray reads it. Tooltip: *VeroScudo - Protected, connection good*;
+  menu header: *VeroScudo - Protected - Unstable*; the status window's **CONNECTION** card (Linux/macOS: the *Connection*
+  row): the quality while protected, otherwise what the guard does about the connection (*redialing*, *connecting*,
+  *switching*, *reconnecting*). `status` prints it too. A change of the rating is logged.
+- **Never acts on its own:** a bad rating changes nothing - no reconnect, no other profile. The user decides.
 
 ## Tray app
 

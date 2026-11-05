@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__, importer, keepawake
+from . import __version__, importer, keepawake, quality
 from .backend import firewall, nm
 from .config import Config, config_path
 from .daemon import Guard
@@ -76,6 +76,14 @@ def status(cfg: Config, store: StateStore) -> int:
     print(f"armed      : {armed}")
     print(f"connected  : {up}")
     print(f"state      : {state}")
+    if not cfg.check.enabled:
+        conn = "check off"
+    elif state == "protected":
+        q = quality.read(store.home / "quality.json", cfg.profile)
+        conn = quality.describe(q) if q else "checking…"
+    else:
+        conn = "-"
+    print(f"connection : {conn}")
     # asking the firewall needs root: for a user the answer would always be "inactive", which is wrong and alarming
     ks = ("active" if firewall.is_active() else "inactive") if os.geteuid() == 0 else "unknown (run with sudo to see it)"
     print(f"killswitch : {ks}")

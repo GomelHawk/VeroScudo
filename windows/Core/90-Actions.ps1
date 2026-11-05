@@ -30,6 +30,7 @@ function Get-VeroStatus {
         Armed      = $armed
         Connected  = $up
         State      = if (-not $armed) { 'off' } elseif ($up) { 'protected' } else { 'blocked' }
+        Connection = if (-not $Config.ConnectionCheck.Enabled) { 'check off' } elseif ($armed -and $up) { Format-VeroQuality (Read-VeroQuality -ProfileName $Config.Profile) } else { '-' }
         Client     = $detail
         Credential = if (Test-VeroNeedsPassword $Config) { [bool](Get-VeroCredential -Config $Config) } else { 'not needed' }
         PwRejected = Test-VeroAuthBlocked $Config.Profile
@@ -139,7 +140,8 @@ function Invoke-VeroActionOnEvent {
 }
 
 function Invoke-VeroActionWatchdog {
-    <# The long-running watchdog loop: one per session, a check every 15 s, exits on a blocked native helper. #>
+    <# The long-running watchdog loop: one per session, a check every 15 s, exits on a blocked native helper. The optional
+       connection check (Update-VeroQuality) runs in the same loop on its own interval. #>
     [CmdletBinding()] param([string]$Action = 'watchdog')
     # long-running, exactly one per session: the task re-triggers every minute so a crashed loop is back within a minute,
     # and every extra start exits here at once (the launcher returning early once let one loop pile up per minute)
@@ -148,15 +150,25 @@ function Invoke-VeroActionWatchdog {
     if (-not $single) { return }
     try {
         if (-not (Test-VeroNativeRetryDue (Get-VeroNativeBlocked))) { return }      # helper blocked: not yet time to retry
+        $nextCheck = [datetime]::MinValue; $nextProbe = [datetime]::MinValue
         while ($true) {
-            try {
-                Invoke-VeroCheck -Action $Action
-                Clear-VeroNativeBlocked -Action $Action                    # every good pass (a cheap Test-Path): also clears a short task's record
-            } catch {
-                if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
-                Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
+            if ((Get-Date) -ge $nextCheck) {
+                try {
+                    Invoke-VeroCheck -Action $Action
+                    Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
+                } catch {
+                    if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
+                    Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
+                }
+                $nextCheck = (Get-Date).AddSeconds(15)
             }
-            Start-Sleep -Seconds 15
+            if ((Get-Date) -ge $nextProbe) {
+                $wait = 30
+                try { $wait = Update-VeroQuality -Action $Action } catch { Write-VeroLog "ERROR: connection check: $($_.Exception.Message)" $Action }
+                $nextProbe = (Get-Date).AddSeconds($wait)
+            }
+            $due = if ($nextCheck -lt $nextProbe) { $nextCheck } else { $nextProbe }
+            Start-Sleep -Seconds ([Math]::Max(1, [int][Math]::Ceiling(($due - (Get-Date)).TotalSeconds)))
         }
     } finally { $single.Dispose() }
 }

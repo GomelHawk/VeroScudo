@@ -1749,3 +1749,166 @@ Describe 'profile types: validation and on-disk form come from the handler table
         @($w.Keys) | Should -Be @('profile', 'type', 'server', 'port', 'serverIps')
     }
 }
+Describe 'Connection check: config.json (connectionCheck)' {
+    BeforeAll { $script:one = '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}]' }
+    It 'missing = off, every 10 s over 1 minute, 1.1.1.1 TCP 443' {
+        $c = (Get-VeroConfig -Raw ($script:one + '}')).ConnectionCheck
+        $c.Enabled | Should -BeFalse; $c.IntervalSeconds | Should -Be 10; $c.WindowMinutes | Should -Be 1
+        @($c.Targets).Count | Should -Be 1; $c.Targets[0].Host | Should -Be '1.1.1.1'; $c.Targets[0].Method | Should -Be 'tcp'; $c.Targets[0].Port | Should -Be 443
+    }
+    It 'a full setting is read' {
+        $c = (Get-VeroConfig -Raw ($script:one + ',"connectionCheck":{"enabled":true,"intervalSeconds":30,"windowMinutes":5,"targets":[{"host":"10.0.0.1","method":"ping"},{"host":"intranet.example.com","method":"tcp","port":8443}]}}')).ConnectionCheck
+        $c.Enabled | Should -BeTrue; $c.IntervalSeconds | Should -Be 30; $c.WindowMinutes | Should -Be 5
+        $c.Targets[0].Method | Should -Be 'ping'; $c.Targets[1].Host | Should -Be 'intranet.example.com'; $c.Targets[1].Port | Should -Be 8443
+    }
+    It 'an empty list still checks one address' {
+        (Get-VeroConfig -Raw ($script:one + ',"connectionCheck":{"enabled":true,"targets":[]}}')).ConnectionCheck.Targets[0].Host | Should -Be '1.1.1.1'
+    }
+    It 'refuses <bad>' -ForEach @(
+        @{ bad = '{"intervalSeconds":9}' }, @{ bad = '{"intervalSeconds":101}' }, @{ bad = '{"windowMinutes":0}' }, @{ bad = '{"windowMinutes":11}' },
+        @{ bad = '{"enabled":"yes"}' }, @{ bad = '{"targets":[{"host":"bad host"}]}' }, @{ bad = '{"targets":[{"host":"a.example","method":"udp"}]}' },
+        @{ bad = '{"targets":[{"host":"a.example","method":"tcp","port":0}]}' }, @{ bad = '{"targets":[{"host":"a"},{"host":"b"},{"host":"c"},{"host":"d"}]}' }, @{ bad = '[]' }
+    ) {
+        { Get-VeroConfig -Raw ($script:one + ',"connectionCheck":' + $bad + '}') } | Should -Throw
+    }
+    It 'survives the round trip through the on-disk form' {
+        $c = Get-VeroConfig -Raw ($script:one + ',"connectionCheck":{"enabled":true,"intervalSeconds":20,"windowMinutes":3,"targets":[{"host":"1.1.1.1","method":"tcp","port":443},{"host":"10.1.2.3","method":"ping"}]}}')
+        $c2 = Get-VeroConfig -Raw (ConvertTo-VeroConfigJson $c)
+        $c2.ConnectionCheck.IntervalSeconds | Should -Be 20; $c2.ConnectionCheck.Targets[1].Method | Should -Be 'ping'
+        @((ConvertTo-VeroCheckObject $c.ConnectionCheck).targets[1].Keys) | Should -Not -Contain 'port'
+    }
+}
+
+Describe 'Connection check: the Settings form' {
+    It 'splits <text>' -ForEach @(
+        @{ text = '1.1.1.1'; h = '1.1.1.1'; p = $null }, @{ text = 'example.com:8443'; h = 'example.com'; p = 8443 },
+        @{ text = 'https://example.com/path'; h = 'example.com'; p = 443 }, @{ text = 'http://example.com'; h = 'example.com'; p = 80 },
+        @{ text = 'https://example.com:9443/x'; h = 'example.com'; p = 9443 }, @{ text = '[2001:db8::1]:443'; h = '2001:db8::1'; p = 443 },
+        @{ text = '2001:db8::1'; h = '2001:db8::1'; p = $null }, @{ text = '  '; h = ''; p = $null }
+    ) {
+        $a = Split-VeroCheckAddress $text
+        $a.Host | Should -Be $h; $a.Port | Should -Be $p
+    }
+    It 'the first address is never empty; empty others are dropped' {
+        $c = ConvertFrom-VeroCheckForm -Enabled $true -IntervalSeconds 10 -WindowMinutes 1 -Rows @(@{ Text = ''; Method = 'tcp'; Port = 443 }, @{ Text = ''; Method = 'ping'; Port = 443 }, @{ Text = '10.0.0.1'; Method = 'ping'; Port = 443 })
+        @($c.Targets).Count | Should -Be 2; $c.Targets[0].Host | Should -Be '1.1.1.1'; $c.Targets[1].Method | Should -Be 'ping'
+    }
+    It 'takes the port of a URL and clamps the numbers' {
+        $c = ConvertFrom-VeroCheckForm -Enabled $true -IntervalSeconds 5 -WindowMinutes 99 -Rows @(@{ Text = 'https://intranet.example.com:8443/health'; Method = 'tcp'; Port = 443 })
+        $c.IntervalSeconds | Should -Be 10; $c.WindowMinutes | Should -Be 10; $c.Targets[0].Host | Should -Be 'intranet.example.com'; $c.Targets[0].Port | Should -Be 8443
+        (ConvertFrom-VeroCheckForm -Enabled $true -IntervalSeconds 500 -WindowMinutes 0 -Rows @(@{ Text = 'intranet.example.com:8443'; Method = 'tcp'; Port = 22 })).Targets[0].Port | Should -Be 22
+    }
+    It 'refuses a bad address with its row number' {
+        { ConvertFrom-VeroCheckForm -Enabled $true -IntervalSeconds 10 -WindowMinutes 1 -Rows @(@{ Text = '1.1.1.1'; Method = 'tcp'; Port = 443 }, @{ Text = 'not a host!'; Method = 'ping'; Port = 443 }) } | Should -Throw '*Address 2*'
+    }
+}
+
+Describe 'Connection check: the rating' {
+    BeforeAll {
+        function New-Samples([bool[]]$oks) { $i = 0; foreach ($ok in $oks) { @{ T = 1000.0 + $i * 10; Ok = $ok; Rtt = $(if ($ok) { 40 } else { $null }) }; $i++ } }
+    }
+    It '<name>' -ForEach @(
+        @{ name = 'all answered: good'; oks = @($true) * 10; state = 'good' }
+        @{ name = '10 % is not under 10 %: unstable'; oks = @($true) * 9 + @($false); state = 'unstable' }
+        @{ name = '5 %: good'; oks = @($true) * 19 + @($false); state = 'good' }
+        @{ name = '50 % is not over 50 %: unstable'; oks = @($true) * 5 + @($false) * 5; state = 'unstable' }
+        @{ name = '60 %: bad'; oks = @($true) * 4 + @($false) * 6; state = 'bad' }
+        @{ name = 'nothing answered: bad'; oks = @($false) * 10; state = 'bad' }
+    ) {
+        $s = @(New-Samples $oks)
+        (Measure-VeroQuality -Samples $s -Now $s[-1].T -WindowSeconds 3600).State | Should -Be $state
+    }
+    It 'fewer than three checks: checking' {
+        $s = @(New-Samples @($true, $true))
+        (Measure-VeroQuality -Samples $s -Now $s[-1].T -WindowSeconds 3600).State | Should -Be 'checking'
+    }
+    It 'only the window counts' {
+        $s = @(New-Samples (@($false) * 10 + @($true) * 10))
+        $q = Measure-VeroQuality -Samples $s -Now $s[-1].T -WindowSeconds 95
+        $q.State | Should -Be 'good'; $q.Checks | Should -Be 10; $q.RttMs | Should -Be 40
+    }
+    It 'no rating before one full period, however many checks' {
+        $s = @(New-Samples (@($true) * 18))                              # 18 answered checks in 170 s
+        (Measure-VeroQuality -Samples $s -Now 1170 -WindowSeconds 300 -Since 1000).State | Should -Be 'checking'
+        (Measure-VeroQuality -Samples $s -Now 1300 -WindowSeconds 300 -Since 1000).State | Should -Be 'good'
+    }
+    It 'the window holds at least three rounds' {
+        Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 100; WindowMinutes = 1 }) | Should -BeGreaterThan 300
+        Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 10; WindowMinutes = 2 }) | Should -Be 120
+    }
+    It 'the short texts match Linux and macOS' {
+        $d = [string][char]0x00B7
+        Format-VeroQuality ([pscustomobject]@{ State = 'good'; LossPct = 0; RttMs = 45 }) | Should -Be "good $d 45 ms"
+        Format-VeroQuality ([pscustomobject]@{ State = 'unstable'; LossPct = 22.5; RttMs = 300 }) | Should -Be "unstable $d 22.5% lost"
+        Format-VeroQuality ([pscustomobject]@{ State = 'bad'; LossPct = 60.0; RttMs = $null }) | Should -Be "bad $d 60% lost"
+        Format-VeroQuality $null | Should -Be ('checking' + [char]0x2026)
+    }
+}
+
+Describe 'Connection check: the watchdog (mocked checks)' {
+    BeforeEach {
+        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}],"connectionCheck":{"enabled":true,"intervalSeconds":15}}'
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroProbeRound { [pscustomobject]@{ Ok = $true; RttMs = 20 } }
+        InModuleScope VeroScudo.Core { $script:QualitySamples.Clear(); $script:QualityKey = ''; $script:QualityLast = '' }   # each test starts fresh
+    }
+    AfterEach { Remove-TestFile @((Get-VeroPath).Config, (Get-VeroPath).Quality) }
+    It 'checks while protected, writes the rating for the tray and waits the interval' {
+        Update-VeroQuality | Should -Be 15
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroProbeRound -Times 1 -Exactly
+        Test-Path (Get-VeroPath).Quality | Should -BeTrue
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
+        Read-VeroQuality -ProfileName 'Backup' | Should -BeNullOrEmpty
+    }
+    It 'does not check while blocked, and drops the rating' {
+        Update-VeroQuality | Out-Null
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Update-VeroQuality | Should -Be 5
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroProbeRound -Times 1 -Exactly
+        Test-Path (Get-VeroPath).Quality | Should -BeFalse
+    }
+    It 'does nothing while off or when the check is off' {
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        Update-VeroQuality | Out-Null
+        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}]}'
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Update-VeroQuality | Out-Null
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroProbeRound -Times 0 -Exactly
+    }
+    It 'a change of the check settings starts the rating over' {
+        Update-VeroQuality | Out-Null; Update-VeroQuality | Out-Null
+        InModuleScope VeroScudo.Core { $script:QualityStarted -= 3600 }   # as if the first period had long passed
+        Update-VeroQuality | Out-Null                                    # the third check: a rating
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'good'
+        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}],"connectionCheck":{"enabled":true,"intervalSeconds":15,"windowMinutes":2}}'
+        Update-VeroQuality | Out-Null
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
+    }
+    It 'after a drop the next connection waits a full period again' {
+        Update-VeroQuality | Out-Null; Update-VeroQuality | Out-Null
+        InModuleScope VeroScudo.Core { $script:QualityStarted -= 3600 }
+        Update-VeroQuality | Out-Null
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'good'
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Update-VeroQuality | Out-Null
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Update-VeroQuality | Out-Null
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
+    }
+    It 'an old rating is not shown' {
+        Update-VeroQuality | Out-Null
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        Read-VeroQuality -ProfileName 'Work' -Now ($now + 600) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Connection check: a real TCP check against a local listener' {
+    It 'answered while listening, not after' {
+        $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $l.Start()
+        $port = $l.LocalEndpoint.Port
+        try { $r = @(Invoke-VeroProbeRound -Targets @([pscustomobject]@{ Host = '127.0.0.1'; Method = 'tcp'; Port = $port })); $r[0].Ok | Should -BeTrue }
+        finally { $l.Stop() }
+        @(Invoke-VeroProbeRound -Targets @([pscustomobject]@{ Host = '127.0.0.1'; Method = 'tcp'; Port = $port }))[0].Ok | Should -BeFalse
+    }
+}

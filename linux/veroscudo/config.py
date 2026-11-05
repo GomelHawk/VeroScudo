@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import quality
+
 DEFAULT_CONFIG = Path("/etc/veroscudo/config.json")
 _HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 _BAD_NAME = re.compile(r'[\x00-\x1f"\\]')
@@ -35,6 +37,11 @@ def _is_host(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def is_host(value: str) -> bool:
+    """A host name or an IP address (the trays check typed addresses with it)."""
+    return _is_host(value)
 
 
 # what each VPN type needs to reach its server: (protocol, ports). ESP / GRE are IP protocols without ports.
@@ -79,6 +86,7 @@ class Config:
     vm: object = "auto"            # "auto" | True | False  (Docker / libvirt forward chain)
     lan_allow: tuple[str, ...] = field(default_factory=tuple)
     update_check: bool = True
+    check: quality.CheckConfig = field(default_factory=quality.CheckConfig)   # connectionCheck (optional quality checks)
 
     # the active profile's fields, so most code reads cfg.profile / cfg.server / cfg.port
     @property
@@ -172,7 +180,8 @@ class Config:
         if default not in names:
             raise ValueError(f"config.json: activeProfile '{default}' is not in profiles")
         cfg = Config(profiles=profiles, default_profile=default, active=default, retry_seconds=retry, vm=vm,
-                     lan_allow=lan, update_check=bool(j.get("updateCheck", True)))
+                     lan_allow=lan, update_check=bool(j.get("updateCheck", True)),
+                     check=quality.parse(j.get("connectionCheck"), _is_host))
         if active and active in names:
             cfg = replace(cfg, active=active)
         return cfg

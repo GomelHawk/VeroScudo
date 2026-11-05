@@ -15,9 +15,9 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, keepawake, traymodel, update
+from . import __version__, keepawake, quality, traymodel, update
 from .backend import nm
-from .config import Config, config_path
+from .config import Config, config_path, is_host
 from .state import StateStore, kind_label, switch_notice
 
 ICONS = traymodel.env_icons(Path("/usr/share/veroscudo/icons"))
@@ -185,35 +185,47 @@ class Windows:
 
     # settings
     def show_settings(self) -> None:
+        """Three tabs, as on Windows and macOS: VPN profiles, Behaviour, Connection."""
         if self.settings:
             self.settings.present()
             return
         Gtk = self.Gtk
-        w, box = self._window("VeroScudo - Settings", 520)
-        box.pack_start(self._label("<b>VPN profiles</b>", markup=True), False, False, 0)
+        w, box = self._window("VeroScudo - Settings", 560)
+        nb = Gtk.Notebook()
+        box.pack_start(nb, True, True, 0)
+
+        def page(title: str):
+            p = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            p.set_border_width(14)
+            nb.append_page(p, Gtk.Label(label=title))
+            return p
+
+        # -- VPN profiles
+        pp = page("VPN profiles")
         lb = Gtk.ListBox()
         lb.set_selection_mode(Gtk.SelectionMode.SINGLE)
         frame = Gtk.Frame()
         frame.add(lb)
-        frame.set_size_request(-1, 150)
-        box.pack_start(frame, False, False, 0)
+        frame.set_size_request(-1, 170)
+        pp.pack_start(frame, False, False, 0)
         row = Gtk.Box(spacing=8)
         for text, cb in (("Import…", self.import_dialog), ("Remove", lambda: self._on_selected("remove")),
                          ("Make default", lambda: self._on_selected("default"))):
             b = Gtk.Button(label=text)
             b.connect("clicked", lambda _b, cb=cb: cb())
             row.pack_start(b, False, False, 0)
-        box.pack_start(row, False, False, 0)
-        box.pack_start(self._label("Profiles are the system's own VPN connections (Settings > Network > VPN); passwords "
-                                   "stay with NetworkManager.", dim=True), False, False, 0)
-        box.pack_start(Gtk.Separator(), False, False, 0)
-        box.pack_start(self._label("<b>Options</b>", markup=True), False, False, 0)
+        pp.pack_start(row, False, False, 0)
+        pp.pack_start(self._label("Profiles are the system's own VPN connections (Settings > Network > VPN); passwords "
+                                  "stay with NetworkManager.", dim=True), False, False, 0)
+
+        # -- Behaviour
+        bp = page("Behaviour")
         strict = Gtk.CheckButton(label="Strict kill-switch (always on - cannot be disabled)")
         strict.set_active(True)
         strict.set_sensitive(False)
-        box.pack_start(strict, False, False, 0)
+        bp.pack_start(strict, False, False, 0)
         upd = Gtk.CheckButton(label="Check for a new release when the tray starts")
-        box.pack_start(upd, False, False, 0)
+        bp.pack_start(upd, False, False, 0)
         vmrow = Gtk.Box(spacing=10)
         vmrow.pack_start(self._label("Containers and VMs (Docker, libvirt)", wrap=False), False, False, 0)
         vm = Gtk.ComboBoxText()
@@ -222,17 +234,90 @@ class Windows:
             vm.append(key, text)
         vmrow.pack_start(vm, False, False, 0)
         if sys.platform != "darwin":
-            box.pack_start(vmrow, False, False, 0)
-        box.pack_start(self._label("Changes ask for an administrator's password and take effect within 15 seconds.",
-                                   dim=True), False, False, 0)
+            bp.pack_start(vmrow, False, False, 0)
+        bp.pack_start(self._label("Each change asks for an administrator's password and takes effect within 15 seconds.",
+                                  dim=True), False, False, 0)
+
+        # -- Connection
+        cp = page("Connection")
+        en = Gtk.CheckButton(label="Check the connection quality while protected")
+        cp.pack_start(en, False, False, 0)
+        more = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        cp.pack_start(more, False, False, 0)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        more.pack_start(grid, False, False, 0)
+        lo, hi = quality.INTERVAL_RANGE
+        every = Gtk.SpinButton.new_with_range(lo, hi, 1)
+        lo, hi = quality.WINDOW_RANGE
+        over = Gtk.SpinButton.new_with_range(lo, hi, 1)
+        for r, (a, spin, b) in enumerate((("Check every", every, "seconds (10-100)"),
+                                          ("Rate the last", over, "minutes (1-10)"))):
+            grid.attach(self._label(a, wrap=False), 0, r, 1, 1)
+            grid.attach(spin, 1, r, 1, 1)
+            grid.attach(self._label(b, dim=True, wrap=False), 2, r, 1, 1)
+        more.pack_start(self._label("Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.", dim=True),
+                        False, False, 0)
+        more.pack_start(self._label("<b>Addresses</b>  <span alpha='60%'>IP, host name or URL - at least one</span>",
+                                    markup=True), False, False, 0)
+        tgrid = Gtk.Grid(column_spacing=8, row_spacing=6)
+        more.pack_start(tgrid, False, False, 0)
+        rows = []
+        for i in range(quality.MAX_TARGETS):
+            e = Gtk.Entry()
+            e.set_width_chars(26)
+            e.set_placeholder_text(quality.DEFAULT_HOST if i == 0 else "optional")
+            m = Gtk.ComboBoxText()
+            m.append("ping", "Ping")
+            m.append("tcp", "TCP port")
+            port = Gtk.SpinButton.new_with_range(1, 65535, 1)
+            port.set_width_chars(6)
+            m.connect("changed", lambda c, port=port: port.set_sensitive(c.get_active_id() == "tcp"))
+            if i == 0:   # the first address is never empty: cleared, it is 1.1.1.1 again
+                e.connect("focus-out-event", self._refill_first)
+            tgrid.attach(e, 0, i, 1, 1)
+            tgrid.attach(m, 1, i, 1, 1)
+            tgrid.attach(port, 2, i, 1, 1)
+            rows.append((e, m, port))
+        more.pack_start(self._label("The first rating comes one full period after each connect and each change here. "
+                                    "The checks go through the VPN tunnel; an address in your local network is not "
+                                    "reachable while the kill-switch is on (unless lanAllow lets it through).", dim=True),
+                        False, False, 0)
+        save = Gtk.Button(label="Save connection settings")
+        save.get_style_context().add_class("suggested-action")
+        save.set_halign(Gtk.Align.END)
+        cp.pack_end(save, False, False, 0)
+        more.show_all()
+        more.set_no_show_all(True)                 # shown only while the check box is ticked (show_all leaves it alone)
+        en.connect("toggled", lambda b: more.set_visible(b.get_active()))
+
         self._buttons(box, ("Close", lambda: w.destroy(), True))
         self.settings = w
-        self._se = {"lb": lb, "upd": upd, "vm": vm, "busy": False}
+        self._se = {"lb": lb, "upd": upd, "vm": vm, "busy": False, "nb": nb, "en": en, "more": more, "every": every,
+                    "over": over, "rows": rows}
         upd.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "updateCheck", "true" if b.get_active() else "false"]))
         vm.connect("changed", lambda c: self._se["busy"] or self.app.admin(["set", "vm", c.get_active_id()]))
+        save.connect("clicked", lambda _b: self._save_check())
         w.connect("destroy", lambda *_: setattr(self, "settings", None))
         self.update_settings()
         w.show_all()
+        more.set_visible(en.get_active())
+
+    @staticmethod
+    def _refill_first(entry, _event) -> bool:
+        if not entry.get_text().strip():
+            entry.set_text(quality.DEFAULT_HOST)
+        return False
+
+    def _save_check(self) -> None:
+        se = self._se
+        rows = [(e.get_text(), m.get_active_id() or "tcp", p.get_value_as_int()) for e, m, p in se["rows"]]
+        try:
+            chk = quality.from_form(se["en"].get_active(), se["every"].get_value_as_int(), se["over"].get_value_as_int(),
+                                    rows, is_host)
+        except ValueError as e:
+            self.message("Not saved", str(e), error=True)
+            return
+        self.app.admin(["set", "connectionCheck", json.dumps(chk.to_json())])
 
     def update_settings(self) -> None:
         if not self.settings:
@@ -260,6 +345,17 @@ class Windows:
             se["lb"].show_all()
             se["upd"].set_active(bool(cfg.update_check) if cfg else True)
             se["vm"].set_active_id({True: "true", False: "false"}.get(cfg.vm, "auto") if cfg else "auto")
+            chk = cfg.check if cfg else quality.CheckConfig()
+            se["en"].set_active(chk.enabled)
+            se["more"].set_visible(chk.enabled)
+            se["every"].set_value(chk.interval_seconds)
+            se["over"].set_value(chk.window_minutes)
+            for i, (e, m, p) in enumerate(se["rows"]):
+                t = chk.targets[i] if i < len(chk.targets) else None
+                e.set_text(t.host if t else "")
+                m.set_active_id(t.method if t else "tcp")
+                p.set_value(t.port if t and t.method == "tcp" else 443)
+                p.set_sensitive((t.method if t else "tcp") == "tcp")
         finally:
             se["busy"] = False
 
@@ -467,7 +563,8 @@ class TrayApp:
         self.tunnel = (self.store.allowed_tunnel(cfg.profile) or nm.iface(cfg.profile)) if up else None
         return traymodel.Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up,
                                guard_running=traymodel.guard_running(), others=tuple(nm.other_tunnels(self.tunnel) if armed else ()),
-                               expect=self.expect.kind)
+                               expect=self.expect.kind, check_enabled=cfg.check.enabled,
+                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None)
 
     def refresh(self) -> bool:
         changed = self.reload_config()
@@ -478,8 +575,8 @@ class TrayApp:
             self.facts = self.collect()
             self.view = v = traymodel.tray_state(self.facts)
         self.ind.set_icon_full(str(icon_path(v.state)), v.title)
-        self.ind.set_title(traymodel.tooltip(v, self.awake.active))
-        self.head.set_label(f"VeroScudo - {v.title}")
+        self.ind.set_title(traymodel.tooltip(v, self.awake.active, self.facts))
+        self.head.set_label(traymodel.menu_head(v, self.facts))
         ms = traymodel.menu_state(v)
         self.on_item.set_sensitive(ms.on and self.facts.configured)
         self.off_item.set_sensitive(ms.off)
@@ -646,7 +743,9 @@ class _PreviewApp:
         self.facts, self.view = facts, traymodel.tray_state(facts)
         self.cfg = Config.from_text('{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","vpnType":"sstp"},'
                                     '{"profile":"wg-home","server":"203.0.113.9","port":51820,"protocol":"udp","vpnType":"wireguard"}],'
-                                    '"activeProfile":"CorporateVPN"}')
+                                    '"activeProfile":"CorporateVPN","connectionCheck":{"enabled":true,"intervalSeconds":10,'
+                                    '"windowMinutes":2,"targets":[{"host":"1.1.1.1","method":"tcp","port":443},'
+                                    '{"host":"10.0.0.1","method":"ping"}]}}')
         self.awake_on, self.tunnel = False, ("ppp0" if facts.up else None)
 
     def kind(self, name):
@@ -685,6 +784,12 @@ def preview(outdir: Path) -> int:
 
     for name, f in {
         "status-protected": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True),
+        "status-protected-good": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
+                                                 quality=quality.Quality("good", 0.0, 45, 18, 0)),
+        "status-protected-unstable": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
+                                                     quality=quality.Quality("unstable", 22.2, 310, 18, 4)),
+        "status-protected-bad": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
+                                                quality=quality.Quality("bad", 61.1, 900, 18, 11)),
         "status-blocked": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=False),
         "status-off": traymodel.Facts(name="CorporateVPN", kind="vpn"),
         "status-attention": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, guard_running=False),
@@ -693,8 +798,12 @@ def preview(outdir: Path) -> int:
         w.show_status()
         shot(w.status, name)
     w = Windows(_PreviewApp(traymodel.Facts(name="CorporateVPN", armed=True, up=True)))
-    w.show_settings()
-    shot(w.settings, "settings")
+    for i, tab in enumerate(("profiles", "behaviour", "connection")):
+        w.show_settings()
+        if tab == "connection":
+            w._se["en"].set_active(True)
+        w._se["nb"].set_current_page(i)
+        shot(w.settings, f"settings-{tab}")
     w.show_about()
     shot(w.about, "about")
     _ = GLib

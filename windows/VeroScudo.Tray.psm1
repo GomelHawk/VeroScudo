@@ -56,6 +56,44 @@ function ConvertTo-VeroExitView {
        Tip = (('{0}  {1}' -f $c.Ip, $c.Org) + "`r`n" + ('from {0}, {1:yyyy-MM-dd HH:mm}, profile {2}' -f $c.Source, $t, $c.Profile)) }
 }
 
+function ConvertTo-VeroConnectionView {
+    <# The status window's CONNECTION card, the tooltip and the menu header. $St: ConvertTo-VeroTrayState's result; $Check: the
+       config's ConnectionCheck; $Quality: Read-VeroQuality's result or $null; $Expect: what the user waits on.
+       Text: the quality while protected, else what the guard does about the connection (the two never matter at once).
+       Tone: good | warn | bad | normal. Word: Good | Unstable | Bad while protected and rated, else $null. Pure
+       (the same texts as connection_text / quality_word in linux/veroscudo/traymodel.py). #>
+    [CmdletBinding()] param($St, $Check, $Quality, [string]$Expect)
+    $enabled = [bool]($Check -and $Check.Enabled)
+    $text = '-'; $tone = 'normal'; $word = $null; $tip = ''
+    if (-not $St -or ($St.State -eq 'attention' -and -not $St.Armed)) { $text = '-' }
+    elseif ($St.State -eq 'blocked' -or ($St.Armed -and -not $St.Connected)) {
+        $text = switch ($Expect) { 'connect' { 'connecting' } 'switch' { 'switching' } 'reconnect' { 'reconnecting' } default { 'redialing' } }
+        $tone = 'warn'
+    }
+    elseif (-not $St.Armed) { $text = if ($St.Connected) { 'connected (VPN off)' } else { '-' } }
+    elseif (-not $enabled) { $text = 'connected (check off)' }
+    else {
+        $text = Format-VeroQuality $Quality
+        if ($Quality -and $Quality.State -ne 'checking') {
+            $tone = switch ($Quality.State) { 'good' { 'good' } 'unstable' { 'warn' } default { 'bad' } }
+            if ($St.State -eq 'protected') { $q = [string]$Quality.State; $word = $q.Substring(0, 1).ToUpperInvariant() + $q.Substring(1) }
+            $tip = '{0} checks in the last {1} min: {2} lost ({3}%){4}' -f $Quality.Checks, $Check.WindowMinutes, $Quality.Lost,
+                ([double]$Quality.LossPct).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture),
+                $(if ($null -ne $Quality.RttMs) { ", median $($Quality.RttMs) ms" } else { '' })
+        }
+        $addr = @($Check.Targets | ForEach-Object { if ($_.Method -eq 'ping') { "$($_.Host) (ping)" } else { "$($_.Host):$($_.Port)" } }) -join ', '
+        $tip = (@($tip, "Every $($Check.IntervalSeconds) s: $addr") | Where-Object { $_ }) -join "`r`n"
+    }
+    [pscustomobject]@{ Text = $text; Tone = $tone; Word = $word; Tip = $tip }
+}
+
+function Get-VeroTrayTip {
+    <# 'VeroScudo - Protected, connection good' (63 characters at most: the notification area's limit). Pure. #>
+    [CmdletBinding()] param([string]$Title, [string]$Word, [switch]$Awake)
+    $t = "VeroScudo - $Title$(if ($Word) { ", connection $($Word.ToLowerInvariant())" })$(if ($Awake) { ', keeping PC awake' })"
+    $t.Substring(0, [Math]::Min(63, $t.Length))
+}
+
 function Test-VeroTrayFileChanged {
     <# True once per new write of a state file (the guard writes them; the tray only reads). $Stamps remembers the last
        write time per path between calls; the first sight of a file is not a change. #>
@@ -105,4 +143,4 @@ function Test-VeroUacCancelled {
     $false
 }
 
-Export-ModuleMember -Function ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled
+Export-ModuleMember -Function ConvertTo-VeroConnectionView, Get-VeroTrayTip, ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled

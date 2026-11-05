@@ -16,6 +16,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from .quality import Quality, describe
 from .state import kind_label
 
 # where install.sh puts the program on both platforms: root-owned, named in the sudoers rule
@@ -41,6 +42,8 @@ class Facts:
     others: tuple[str, ...] = ()          # tunnels of other VPNs next to the active profile's
     expect: str | None = None             # what the user asked for and waits on: connect | reconnect | switch
     config_error: str = ""
+    check_enabled: bool = False           # Settings > Connection is on
+    quality: Quality | None = None        # the guard's last rating (quality.json), None = none yet / too old
 
 
 @dataclass(frozen=True)
@@ -79,8 +82,37 @@ def tray_state(f: Facts) -> View:
     return View("blocked", title, text, True, False)
 
 
-def tooltip(v: View, awake: bool = False) -> str:
-    return f"VeroScudo - {v.title}" + (", keeping awake" if awake else "")
+def quality_word(f: Facts, v: View) -> str | None:
+    """'Good' / 'Unstable' / 'Bad' while protected and rated, else None - for the tooltip and the menu header. Pure."""
+    if v.state != "protected" or not f.check_enabled or f.quality is None or f.quality.state == "checking":
+        return None
+    return f.quality.state.capitalize()
+
+
+def tooltip(v: View, awake: bool = False, f: Facts | None = None) -> str:
+    """'VeroScudo - Protected, connection good' - the same text as the Windows tray. Pure."""
+    word = quality_word(f, v) if f else None
+    return f"VeroScudo - {v.title}" + (f", connection {word.lower()}" if word else "") + (", keeping awake" if awake else "")
+
+
+def menu_head(v: View, f: Facts | None = None) -> str:
+    """The disabled first line of the menu: 'VeroScudo - Protected - Unstable'. Pure."""
+    word = quality_word(f, v) if f else None
+    return f"VeroScudo - {v.title}" + (f" - {word}" if word else "")
+
+
+def connection_text(f: Facts, v: View) -> str:
+    """The status window's Connection row (Windows: the CONNECTION card): the quality while protected, else what the
+    guard does about the connection - the two never matter at the same time. Pure."""
+    if not f.configured or (v.state == "attention" and not v.armed):
+        return "-"
+    if v.state == "blocked" or (v.armed and not v.connected):
+        return {"connect": "connecting", "switch": "switching", "reconnect": "reconnecting"}.get(f.expect or "", "redialing")
+    if v.state == "off" or not v.armed:
+        return "connected (VPN off)" if v.connected else "-"
+    if not f.check_enabled:
+        return "connected (check off)"
+    return describe(f.quality) if f.quality else "checking…"
 
 
 @dataclass(frozen=True)
@@ -153,6 +185,7 @@ def status_rows(f: Facts, v: View, awake: bool, tunnel: str | None) -> list[tupl
         ("State", v.title),
         ("Tunnel", tunnel or ("connected" if v.connected else "-")),
         ("Firewall", "kill-switch ON" if v.armed else "normal"),
+        ("Connection", connection_text(f, v)),
         ("Guard", "running" if f.guard_running else "NOT running"),
         ("Keep awake", "on" if awake else "off"),
     ] + ([("Other VPNs", ", ".join(f.others))] if f.others else [])

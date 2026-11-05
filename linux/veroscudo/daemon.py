@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import quality
 from .backend import firewall, nm
 from .config import Config, config_path
 from .state import Decision, StateStore, decide
@@ -32,6 +33,7 @@ class Guard:
         # tray) dials once and returns - still armed and blocked; the daemon's watchdog takes the redial over within 15 s
         self.attempts: int | None = None
         self._cfg_stamp = self._stamp()
+        self.quality = quality.Monitor(self.store.home / "quality.json")   # Settings > Connection; read by the tray
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -302,6 +304,33 @@ class Guard:
             log.info("disarmed but kill-switch still active - restoring")
             self.disable_killswitch(unless_armed=True)
 
+    # ---- connection quality (optional) ---------------------------------------
+    def quality_tick(self) -> float:
+        """One round of checks if they are wanted and the VPN is on and connected; otherwise the samples are dropped (a new
+        connection starts a new rating). Returns the seconds until the next round. Logs only a change of the rating."""
+        cfg = self.cfg
+        chk = cfg.check
+        if not chk.enabled or not self.store.armed or not nm.is_connected(cfg.profile):
+            if self.quality.samples or self.quality.path.exists():
+                self.quality.reset()
+            return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
+        q = self.quality.add_round(chk, cfg.profile, quality.run_round(chk.targets))
+        if q.state != "checking" and q.state != self.quality.last_state:
+            log.info("connection quality: %s (%s of %s checks lost, %s)", q.state, q.lost, q.checks,
+                     f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")
+            self.quality.last_state = q.state
+        return float(chk.interval_seconds)
+
+    def quality_loop(self) -> None:
+        while True:
+            started = time.monotonic()
+            try:
+                wait = self.quality_tick()
+            except Exception:
+                log.exception("connection check")
+                wait = 30.0
+            time.sleep(max(1.0, wait - (time.monotonic() - started)))
+
     # ---- main loop -----------------------------------------------------------
     def run(self) -> None:
         log.info("VeroScudo daemon, profiles: %s (active '%s')", ", ".join(self.base.names), self.cfg.profile)
@@ -316,4 +345,5 @@ class Guard:
                     log.exception("watchdog")
 
         threading.Thread(target=tick, daemon=True).start()
+        threading.Thread(target=self.quality_loop, daemon=True, name="quality").start()
         nm.watch(lambda: set(self.base.names), on_up=self.on_event_up, on_down=self.on_event_down)

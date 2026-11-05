@@ -150,3 +150,35 @@ Describe 'the tray native helpers (VeroScudo.Tray.cs) compile' {
         [VeroTheme]::Dark().Frame.IsEmpty | Should -BeFalse; [VeroTheme]::Light().Frame.IsEmpty | Should -BeFalse
     }
 }
+Describe 'ConvertTo-VeroConnectionView: the CONNECTION card, tooltip and menu header' {
+    BeforeAll {
+        $script:chkOn = [pscustomobject]@{ Enabled = $true; IntervalSeconds = 10; WindowMinutes = 2; Targets = @([pscustomobject]@{ Host = '1.1.1.1'; Method = 'tcp'; Port = 443 }, [pscustomobject]@{ Host = '10.0.0.1'; Method = 'ping'; Port = 443 }) }
+        $script:chkOff = [pscustomobject]@{ Enabled = $false; IntervalSeconds = 10; WindowMinutes = 1; Targets = @() }
+        function Q([string]$s, [double]$loss = 0, $rtt = 45) { [pscustomobject]@{ State = $s; LossPct = $loss; RttMs = $rtt; Checks = 12; Lost = 2 } }
+        $script:d = [string][char]0x00B7
+    }
+    It 'protected and rated: the quality, its colour and the word' {
+        $v = ConvertTo-VeroConnectionView -St (ConvertTo-VeroTrayState (Facts @{})) -Check $script:chkOn -Quality (Q 'unstable' 22.2 310)
+        $v.Text | Should -Be "unstable $($script:d) 22.2% lost"; $v.Tone | Should -Be 'warn'; $v.Word | Should -Be 'Unstable'
+        $v.Tip | Should -Match '12 checks in the last 2 min: 2 lost'; $v.Tip | Should -Match '1.1.1.1:443, 10.0.0.1 \(ping\)'
+        (ConvertTo-VeroConnectionView -St (ConvertTo-VeroTrayState (Facts @{})) -Check $script:chkOn -Quality (Q 'good')).Tone | Should -Be 'good'
+        (ConvertTo-VeroConnectionView -St (ConvertTo-VeroTrayState (Facts @{})) -Check $script:chkOn -Quality (Q 'bad' 70)).Tone | Should -Be 'bad'
+    }
+    It '<name>' -ForEach @(
+        @{ name = 'not rated yet: checking'; f = @{}; on = $true; text = 'checking' + [char]0x2026 }
+        @{ name = 'check off'; f = @{}; on = $false; text = 'connected (check off)' }
+        @{ name = 'blocked: redialing'; f = @{ Up = $false }; on = $true; text = 'redialing' }
+        @{ name = 'switching'; f = @{ Up = $false; Expect = 'switch' }; on = $true; text = 'switching' }
+        @{ name = 'off'; f = @{ Armed = $false; Up = $false }; on = $true; text = '-' }
+        @{ name = 'off, VPN still connected'; f = @{ Armed = $false }; on = $true; text = 'connected (VPN off)' }
+    ) {
+        $st = ConvertTo-VeroTrayState (Facts $f)
+        $v = ConvertTo-VeroConnectionView -St $st -Check $(if ($on) { $script:chkOn } else { $script:chkOff }) -Quality $null -Expect ([string]$f['Expect'])
+        $v.Text | Should -Be $text; $v.Word | Should -BeNullOrEmpty
+    }
+    It 'the tooltip carries the word and stays within 63 characters' {
+        Get-VeroTrayTip -Title 'Protected' -Word 'Good' | Should -Be 'VeroScudo - Protected, connection good'
+        Get-VeroTrayTip -Title 'Protected' | Should -Be 'VeroScudo - Protected'
+        (Get-VeroTrayTip -Title 'Protected' -Word 'Unstable' -Awake).Length | Should -BeLessOrEqual 63
+    }
+}
