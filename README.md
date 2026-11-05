@@ -27,8 +27,8 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 | Platform | Status |
 | :-- | :-- |
 | Windows 10/11 | **stable** - verified with the live leak tests |
-| Linux (Ubuntu 22.04+, NetworkManager) | **beta** - unit-tested, no real-machine log yet |
-| macOS (pf + scutil) | **alpha** - unit-tested, never run on a Mac |
+| Linux (Ubuntu 22.04+, NetworkManager) | **beta** - unit-tested, install/on/off/uninstall tested in a container in CI, no real-machine leak log yet |
+| macOS (pf + scutil) | **alpha** - unit-tested, install/uninstall checked in CI, never run with a real VPN |
 
 ## What you get
 
@@ -60,8 +60,8 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 - **A tray icon** that shows the state at a glance - Protected, Blocked, Off, Attention -
   with *Turn on* / *Turn off*, status and log one click away.
 - **Keep awake** (tray). A menu toggle that keeps the PC from sleeping, locked screen included, so a
-  long download or job finishes while you are away. The screen can still turn off. Linux: tray toggle too;
-  Linux and macOS: `veroscudo awake` (until Ctrl-C).
+  long download or job finishes while you are away. The screen can still turn off. Same toggle on Linux and macOS;
+  also `veroscudo awake` there (until Ctrl-C).
 - **Update notice.** The tray tells you when a newer release exists (one check of the GitHub
   release after sign-in, only while traffic is allowed; `updateCheck: false` turns it off). Installing stays manual.
 - **Two actions, nothing else.** On and Off. No "unblock" button, no timer, no backdoor -
@@ -136,23 +136,41 @@ To update, run `Install.ps1` again; it keeps your config (a 1.0 single-profile c
 
 ### Linux (Ubuntu 22.04+, NetworkManager) - beta
 
-```bash
-sudo apt install nftables network-manager python3-gi gir1.2-nm-1.0
-cd VeroScudo/linux && sudo ./install.sh
-sudo veroscudo on
-```
+1. Create the VPN connection in **Settings > Network > VPN** (or let IT do it) and connect once by hand.
+2. Download the [latest release](https://github.com/GomelHawk/VeroScudo/releases) (`VeroScudo-<version>-linux.tar.gz`),
+   unpack it and run the installer as your own user:
 
-See [`linux/README.md`](linux/README.md). The Linux backend is unit-tested but has not yet
-been through the real-machine tests; treat it as a preview.
+   ```bash
+   cd VeroScudo-linux && sudo ./install.sh
+   ```
+
+   It installs what is missing (nftables, NetworkManager's GObject bindings, the tray's GTK/AppIndicator packages,
+   `wireguard-tools` - it asks first), lists your NetworkManager VPN connections to pick the one to protect, copies the
+   program to `/opt/veroscudo`, starts the guard service and the **tray icon** (top bar; also at every login and from the
+   applications menu as *VeroScudo*). `sudo ./install.sh --profile "Office VPN"` skips the question.
+3. Connect the VPN - as usual, or with the tray's **Turn VPN on**. The shield turns green. Done.
+
+Uninstall: tray > **About** > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (add `--purge` to also delete the
+config). See [`linux/README.md`](linux/README.md). CI installs, uses and uninstalls it in a container; it has not yet
+been through the real-machine leak tests - treat it as a preview.
 
 ### macOS - alpha
 
-```bash
-cd VeroScudo/macos && sudo ./install.sh
-sudo veroscudo on
-```
+1. Create the VPN service in **System Settings > VPN** (IKEv2, L2TP or Cisco IPSec) and connect once by hand.
+2. Unpack `VeroScudo-<version>-macos-alpha.tar.gz` and run:
 
-`pf` anchor + `scutil --nc`, CLI only, never run on a real Mac yet. See [`macos/README.md`](macos/README.md).
+   ```bash
+   cd VeroScudo-macos/macos && sudo ./install.sh
+   ```
+
+   It lists your VPN services to pick from, installs to `/opt/veroscudo` (Apple's own `python3`; the Command Line Tools
+   are needed - `xcode-select --install`), starts the guard (launchd) and the **menu-bar icon** (also at every login and as
+   `/Applications/VeroScudo.app`), and puts `veroscudo` on the PATH.
+3. Turn the VPN on from the menu bar. macOS reports no "you hung up" reason, so **turn it off with VeroScudo** too - a
+   disconnect in System Settings counts as a drop (you stay blocked until *Turn VPN off*).
+
+Uninstall: menu bar > **About VeroScudo** > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh [--purge]`. `pf` anchor +
+`scutil --nc`; never run on a real Mac yet - see [`macos/README.md`](macos/README.md).
 
 ## Using it
 
@@ -168,9 +186,10 @@ sudo veroscudo on
 | *Reconnect VPN* (tray, status window, `-Action reconnect`, `veroscudo reconnect`) | blocks, hangs up, redials; traffic again once the tunnel is back |
 | The VPN rejects your password | stays blocked, stops redialing, icon *Attention*; store the right password, then *Reconnect* |
 
-Tray menu: **Turn VPN on** / **Turn VPN off** / **Reconnect VPN** / **VPN profile ▸** / Status / Open log /
-Settings / About / Exit (the guard keeps running without the tray). Left-click shows the status window.
-The tray runs without administrator rights.
+Tray menu (the same on Windows, Linux and macOS): **Turn VPN on** / **Turn VPN off** / **Reconnect VPN** /
+**VPN profile ▸** / Status / Open log / Settings / Keep awake / Check for updates / About / Exit (the guard keeps running
+without the tray). Windows: left-click shows the status window; Linux: middle-click. The tray runs without administrator
+rights; changing Settings asks for an administrator's password.
 
 Command line (Windows): `powershell -File "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action status`
 (also `on`, `off`, and elevated `switch -VpnProfile <name>`). Log: `%ProgramData%\VeroScudo\state\veroscudo.log`.

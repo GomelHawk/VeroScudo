@@ -281,3 +281,25 @@ def test_user_off_still_clears_even_if_a_stale_table_exists(env):
     g.arm()
     g.disarm()
     assert calls["clear"] == 1 and not g.store.armed
+
+
+def test_a_command_dials_once_and_hands_the_redial_to_the_daemon(env, monkeypatch):
+    g, calls, connected = env
+    monkeypatch.setattr(daemon.nm, "up", lambda p: calls["up"].append(p) or False)          # never connects
+    monkeypatch.setattr(daemon.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not wait for a retry")))
+    g.attempts = 1
+    g.on()
+    assert calls["up"] == ["Work"] and g.store.armed               # one dial, still armed (blocked)
+    assert not g.store.lock_alive()                                # the daemon's watchdog can take the loop over
+    assert not calls["allows_tunnel"](calls["apply"][-1])
+
+
+def test_the_guard_records_what_the_kill_switch_lets_through(env):
+    g, calls, connected = env
+    g.arm()
+    assert g.store.allowed_tunnel("Work") is None                    # armed, tunnel down: blocked
+    connected.add("Work")
+    g.enable_killswitch(tunnel_up=True)
+    assert g.store.allowed_tunnel("Work") == "tun0" and g.store.allowed_tunnel("Backup") is None
+    g.disarm()
+    assert g.store.allowed_tunnel("Work") is None

@@ -5,7 +5,7 @@ Wants=NetworkManager.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/veroscudo daemon
+ExecStart=/opt/veroscudo/bin/veroscudo daemon
 Restart=always
 RestartSec=3
 RuntimeDirectory=veroscudo
@@ -13,6 +13,8 @@ StateDirectory=veroscudo
 # keep the reconnect lock's directory across restarts; the armed flag itself is in StateDirectory (survives reboot)
 RuntimeDirectoryPreserve=restart
 Environment=VEROSCUDO_HOME=/run/veroscudo
+# the log is root:adm 0640 (the tray of an administrator shows it): install.sh enables this line where the group exists
+#SupplementaryGroups=adm
 # hardening: root, but only what a firewall + NetworkManager client needs (nft, nmcli over D-Bus, wg show).
 # ProtectKernelModules is NOT set on purpose: nftables loads its modules on demand.
 NoNewPrivileges=yes

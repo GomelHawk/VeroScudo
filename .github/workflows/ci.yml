@@ -53,7 +53,7 @@ jobs:
           path: TestResults.xml
 
   linux:
-    name: Linux + macOS backends (pytest + ruff + shellcheck)
+    name: Linux + macOS backends (pytest + ruff + shellcheck + nft -c)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -75,5 +75,91 @@ jobs:
         run: python -m ruff check .
       - name: shellcheck
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck linux/*.sh macos/*.sh
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck nftables
+          shellcheck linux/*.sh macos/*.sh linux/tests-local/*.sh
+      - name: nftables accepts every ruleset (nft -c - parsed and checked by the kernel, nothing loaded)
+        run: |
+          python linux/tests-local/render_rulesets.py nft "$RUNNER_TEMP/rs"
+          for f in "$RUNNER_TEMP"/rs/*.rules; do sudo nft -c -f "$f" || { echo "nft refused $f"; cat "$f"; exit 1; }; done
+
+  linux-install:
+    # install.sh, On/Off through the sudo rule, upgrade while armed, uninstall - for real, in a systemd container whose own
+    # network namespace takes the kill-switch (the runner's network is not touched)
+    name: Linux install / use / uninstall (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Container test
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: linux/tests-local/container-test.sh "$IMAGE"
+
+  macos:
+    # Apple's python3 (3.9) is what the guard runs on a Mac. The VPN is never turned on here: an armed pf would cut the
+    # runner off - the kill-switch itself is checked by pfctl's parser, the rest by install -> checks -> uninstall.
+    name: macOS (Apple python3, pfctl parse, install / uninstall)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Unit tests on Apple's python3
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet 'pytest==8.3.5'
+          cd linux && "$RUNNER_TEMP/venv/bin/python" -m pytest -q
+      - name: pf accepts every ruleset (pfctl -n - parsed, nothing loaded)
+        run: |
+          /usr/bin/python3 linux/tests-local/render_rulesets.py pf "$RUNNER_TEMP/rs"
+          for f in "$RUNNER_TEMP"/rs/*.rules; do
+            sudo pfctl -q -n -a com.apple/250.VeroScudo -f "$f" || { echo "pfctl refused $f"; cat "$f"; exit 1; }
+          done
+      - name: Install (config preseeded, nothing asked)
+        run: |
+          sudo mkdir -p /etc/veroscudo
+          echo '{"profiles":[{"profile":"CI-IKEv2","server":"vpn.example.com","port":4500,"protocol":"udp","vpnType":"ikev2"}]}' \
+            | sudo tee /etc/veroscudo/config.json >/dev/null
+          sudo ./macos/install.sh
+      - name: Check the install
+        run: |
+          set -x
+          sudo launchctl print system/com.gomelhawk.veroscudo | grep -q 'state = running'
+          pgrep -f 'bin/veroscudo daemon'
+          /opt/veroscudo/bin/veroscudo status | tee "$RUNNER_TEMP/status.txt"
+          grep -q 'state      : off' "$RUNNER_TEMP/status.txt"
+          sudo visudo -cf /etc/sudoers.d/veroscudo
+          plutil -lint /Applications/VeroScudo.app/Contents/Info.plist /Library/LaunchAgents/com.gomelhawk.veroscudo.tray.plist
+          test "$(cat /etc/paths.d/veroscudo)" = /opt/veroscudo/bin
+          test "$(stat -f %Su:%Sg:%Lp /var/log/veroscudo.log)" = root:admin:640
+          if find /opt/veroscudo -perm +022 | grep -q .; then echo "writable by others under /opt/veroscudo"; exit 1; fi
+          # the menu-bar app's class definitions load with the installed PyObjC (a bad PyObjC method signature fails here)
+          /usr/bin/python3 -I -c 'import sys; sys.path[:0] = ["/opt/veroscudo/lib", "/opt/veroscudo/tray-lib"]; import veroscudo.tray_macos'
+      - name: Menu-bar app running (screenshot as artifact)
+        run: |
+          sleep 10
+          pgrep -fl 'bin/veroscudo-tray' || { launchctl print "gui/$(id -u)/com.gomelhawk.veroscudo.tray" || true; exit 1; }
+          screencapture -x "$RUNNER_TEMP/menubar.png" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: macos-menubar
+          path: ${{ runner.temp }}/menubar.png
+          if-no-files-found: ignore
+      - name: Log
+        if: always()
+        run: sudo cat /var/log/veroscudo.out /var/log/veroscudo.log 2>/dev/null || true
+      - name: Uninstall
+        run: |
+          sudo /opt/veroscudo/uninstall.sh --purge
+          for f in /opt/veroscudo /Applications/VeroScudo.app /Library/LaunchDaemons/com.gomelhawk.veroscudo.plist \
+                   /Library/LaunchAgents/com.gomelhawk.veroscudo.tray.plist /etc/sudoers.d/veroscudo /etc/paths.d/veroscudo /etc/veroscudo; do
+            if [ -e "$f" ]; then echo "left behind: $f"; exit 1; fi
+          done
+          if pgrep -fl 'bin/veroscudo'; then echo "still running"; exit 1; fi

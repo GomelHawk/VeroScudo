@@ -114,3 +114,33 @@ def test_policy_based_ipsec_is_refused_at_import():
     assert d["unsupported"] and "no tunnel interface" in d["note"]
     with pytest.raises(ValueError, match="cannot be imported"):
         importer.add_profiles(BASE, [d], ["I"])
+
+
+TWO = '{"profiles":[{"profile":"Work","server":"vpn.example.com"},{"profile":"Backup","server":"vpn2.example.com"}],"activeProfile":"Work","vm":"auto"}'
+
+
+def test_remove_profile_moves_the_default_and_keeps_the_rest():
+    j = json.loads(importer.remove_profile(TWO, "Work"))
+    assert [p["profile"] for p in j["profiles"]] == ["Backup"] and j["activeProfile"] == "Backup" and j["vm"] == "auto"
+
+
+@pytest.mark.parametrize("name,msg", [("Nope", "no profile"), ("Work", "only profile")])
+def test_remove_profile_refuses(name, msg):
+    raw = importer.remove_profile(TWO, "Backup") if name == "Work" else TWO
+    with pytest.raises(ValueError, match=msg):
+        importer.remove_profile(raw, name)
+
+
+def test_set_default_and_options():
+    assert json.loads(importer.set_default(TWO, "Backup"))["activeProfile"] == "Backup"
+    with pytest.raises(ValueError):
+        importer.set_default(TWO, "Nope")
+    assert json.loads(importer.set_option(TWO, "updateCheck", "false"))["updateCheck"] is False
+    assert json.loads(importer.set_option(TWO, "vm", "false"))["vm"] is False
+    assert json.loads(importer.set_option(TWO, "vm", "auto"))["vm"] == "auto"
+
+
+@pytest.mark.parametrize("key,value", [("strict", "false"), ("retrySeconds", "1"), ("lanAllow", "0.0.0.0/0"), ("vm", "yes")])
+def test_set_option_has_no_way_to_weaken_the_rule(key, value):
+    with pytest.raises(ValueError):
+        importer.set_option(TWO, key, value)

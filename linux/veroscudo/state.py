@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import sys
@@ -68,6 +69,7 @@ class StateStore:
         self.lock = self.home / "reconnect.lock"
         self.server_ip = self.state / "server.ip"           # 1.0 single-profile cache, read as a fallback
         self.fw_lock_file = self.home / "firewall.lock"     # see firewall_lock()
+        self.applied_file = self.home / "applied.json"     # what the kill-switch allows right now (read by tray and status)
         self._fw_rlock = threading.RLock()
         self._fw_depth = 0
         self._fw_fd: int | None = None
@@ -91,6 +93,25 @@ class StateStore:
                     fcntl.flock(self._fw_fd, fcntl.LOCK_UN)
                     os.close(self._fw_fd)
                     self._fw_fd = None
+
+    def set_applied(self, profile: str | None, tunnel: str | None) -> None:
+        """Written by the guard each time it applies or removes the kill-switch: the profile and the tunnel interface the
+        rules let through (None: everything blocked). Atomic replace; readable by the signed-in user."""
+        try:
+            tmp = self.applied_file.with_suffix(".new")
+            tmp.write_text(json.dumps({"profile": profile, "tunnel": tunnel}))
+            os.replace(tmp, self.applied_file)
+        except OSError:
+            pass
+
+    def allowed_tunnel(self, profile: str) -> str | None:
+        """The tunnel the kill-switch lets through for `profile`, as the guard last applied it - None while blocked. This,
+        not "NetworkManager says activated", is what "protected" means: a dead WireGuard link stays activated."""
+        try:
+            j = json.loads(self.applied_file.read_text())
+        except (OSError, ValueError):
+            return None
+        return j.get("tunnel") if isinstance(j, dict) and j.get("profile") == profile else None
 
     def server_cache(self, profile: str) -> Path:
         return self.state / f"server-{safe_name(profile)}.ip"

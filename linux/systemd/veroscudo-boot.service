@@ -8,7 +8,7 @@ Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/veroscudo boot
+ExecStart=/opt/veroscudo/bin/veroscudo boot
 StateDirectory=veroscudo
 
 [Install]

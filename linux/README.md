@@ -6,27 +6,51 @@ turn it off.** See `../docs/ARCHITECTURE.md`.
 Works with any VPN that NetworkManager manages (OpenVPN, WireGuard, IKEv2/strongSwan, L2TP,
 SSTP via `network-manager-sstp`). Not for vendor VPN apps that bypass NetworkManager.
 
-Requirements (Ubuntu 22.04+): `nftables`, `network-manager`, `python3-gi`, `gir1.2-nm-1.0`
-(for the deactivation *reason*; without it the daemon falls back to polling and treats every
-drop as a failure unless it came from `veroscudo off`). Tray: `gir1.2-ayatanaappindicator3-0.1`.
+## Install, use, uninstall
 
 ```bash
-sudo ./install.sh            # asks for the NetworkManager connection name, installs the service
-veroscudo on                 # connect + protect     (sudoers drop-in lets your user run on/off)
+sudo ./install.sh                         # installs missing packages (asks), lets you pick the VPN connection, starts it all
+sudo ./install.sh --profile "Office VPN"  # no questions about the profile;  --yes: no question about packages
+```
+
+The installer needs Ubuntu 22.04+ (or another apt-based distribution; elsewhere it names the missing packages): nftables,
+NetworkManager, `python3-gi` + `gir1.2-nm-1.0` (the "you hung up" reason), `gir1.2-gtk-3.0` +
+`gir1.2-ayatanaappindicator3-0.1` + `libnotify-bin` (tray), `pkexec` (Settings), `wireguard-tools`. Plain GNOME (not Ubuntu)
+also gets `gnome-shell-extension-appindicator` - enable it once in the Extensions app.
+
+What goes where: the program in `/opt/veroscudo` (root's; run by `/usr/bin/python3 -I`), `veroscudo` on the PATH through
+`/usr/local/bin`, the services `veroscudo.service` (guard) and `veroscudo-boot.service` (kill-switch before the network at
+boot), the tray autostart `/etc/xdg/autostart/veroscudo-tray.desktop` and the menu entry *VeroScudo*, the sudoers rule
+`/etc/sudoers.d/veroscudo` (your user: `on`, `off`, `reconnect`, `use` without a password - nothing else), the config
+`/etc/veroscudo/config.json`, the log `/var/log/veroscudo.log` (readable by the `adm` group).
+
+**Tray** (top bar): Turn VPN on / off, Reconnect VPN, VPN profile ▸, Status… (middle-click too), Open log, Settings…
+(import a NetworkManager connection, remove, default, update check, containers/VMs - each change asks for your password),
+Keep awake, Check for updates, About (Uninstall…), Exit tray. Exit leaves the guard running; *VeroScudo* in the
+applications menu brings the icon back.
+
+**Uninstall**: tray > About > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (`--purge`: also config, state, log).
+
+Command line:
+
+```bash
 veroscudo status
-veroscudo off                # deliberately off -> raw internet
-veroscudo reconnect          # block, take the VPN down, redial; traffic again once the tunnel is back
+sudo veroscudo on            # arm + dial once; the service keeps redialing until it is up
+sudo veroscudo off           # deliberately off -> raw internet
+sudo veroscudo reconnect     # block, take the VPN down, redial; traffic again once the tunnel is back
 veroscudo profiles           # configured profiles with their type, * = active
+sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 veroscudo check              # does each profile's protocol/port match its NetworkManager connection?
 veroscudo import             # list NetworkManager's VPN connections and what would be imported
 sudo veroscudo import "Office L2TP"   # add it with its type's server ports (L2TP, PPTP, SSTP, OpenVPN, WireGuard, OpenConnect;
                                       # strongSwan/libreswan IPsec is refused: no tunnel interface to allow)
+sudo veroscudo remove|default <profile>       # what Settings does
+sudo veroscudo set updateCheck true|false     # also: vm auto|true|false
 veroscudo awake              # keep the system from sleeping until Ctrl-C (the tray has a Keep awake toggle too)
-sudo veroscudo use Backup    # switch: stays blocked until the new tunnel is up
 ```
 
-More profiles: add entries to the `"profiles"` list in `/etc/veroscudo/config.json` (see
-`../docs/ARCHITECTURE.md`); the tray shows them under *VPN profile*.
+More profiles: tray > Settings > *Import…*, `sudo veroscudo import <connection>`, or entries in the `"profiles"` list of
+`/etc/veroscudo/config.json` (see `../docs/ARCHITECTURE.md`); the guard picks a change up within 15 s.
 
 What it guarantees: an nftables table with `policy drop` output and forward chains - a drop
 there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel is down and only
@@ -47,6 +71,7 @@ in NetworkManager when the link is dead, so VeroScudo reads its handshakes (`wg`
 no handshake for 3 minutes counts as a drop and the connection is restarted. Give the peer a
 `PersistentKeepalive` (e.g. 25). Every switch to a WireGuard profile shows a notice.
 
-**Status: beta.** The state machine and the nftables ruleset are unit-tested; the daemon has
-not yet been through the real-machine tests on Ubuntu (see `tests-local/`). Treat it as a
-preview until that log is in the repo.
+**Status: beta.** The state machine and the nftables ruleset are unit-tested, every ruleset passes `nft -c`, and
+`tests-local/container-test.sh` installs, turns on, upgrades, turns off and uninstalls in a systemd container on Ubuntu
+22.04 and 24.04 (CI). The real-machine leak tests with a real VPN are still open - see `tests-local/README.md` for the
+VM recipe. Treat it as a preview until that log is in the repo.

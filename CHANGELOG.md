@@ -5,6 +5,46 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Linux and macOS: install and use like on Windows
+- **Tray on Linux, menu-bar app on macOS** with the Windows tray's menu: Turn VPN on / off, Reconnect VPN, VPN profile ▸,
+  Status…, Open log, Settings, Keep awake, Check for updates, About (with *Uninstall…*), Exit. Same icons, same state
+  texts and notifications (connection lost, protected again, not connected after 2 minutes, turned off). The decisions
+  live in one tested module (`traymodel.py`); GTK (Linux) and AppKit through PyObjC (macOS) only draw them. Linux:
+  `python3 -m veroscudo.tray --preview DIR` renders every window into PNGs.
+- **Settings** (Linux window, macOS submenu): import one of the system's VPN connections, remove a profile, choose the
+  default, update check, containers/VMs (Linux). Each change asks for an administrator's password (pkexec / the macOS
+  password dialog) - the passwordless sudo rule still covers only on, off, reconnect and use. New root actions
+  `veroscudo remove|default|set`; the daemon picks a changed `config.json` up within 15 s (a broken file keeps the running
+  configuration). There is no setting that weakens the rule.
+- **Installers** (`sudo ./install.sh [--profile <connection>]`): Linux installs the missing packages (asks, or `--yes`),
+  both list the system's VPN connections to pick from instead of asking for server, port and protocol (`veroscudo setup`),
+  start the tray at once and at every login (Linux: XDG autostart + an applications-menu entry; macOS: a login item and
+  `/Applications/VeroScudo.app`), and put `veroscudo` on the PATH (macOS: `/etc/paths.d`). The program lives in
+  `/opt/veroscudo` on both, run by the system's own `python3 -I` - no pip and no venv on Linux, PyObjC only for the
+  macOS menu-bar app in its own folder. An older pip / venv install is removed.
+- **Uninstall**: `sudo /opt/veroscudo/uninstall.sh [--purge]` on both (also from About > Uninstall…) removes the service,
+  the kill-switch, the tray, the sudo rule and the program; `--purge` also the config, state and log.
+- macOS: runs on Apple's python3 3.9 (the package required 3.10, so the alpha could not be installed at all).
+- The log `/var/log/veroscudo.log` is root:adm (Linux) / root:admin (macOS) 0640, so an administrator's tray can show it;
+  Debian's `adm` reads the journal, where the same lines went anyway.
+
+### Fixed
+- Linux, macOS: **"protected" means what the kill-switch lets through.** The guard records the tunnel it allows
+  (`/run/veroscudo/applied.json`); the tray and `veroscudo status` show *Protected* only when that matches. A dead
+  WireGuard link stays "activated" in NetworkManager and only root can read its handshakes, so the tray showed it as
+  protected while the guard kept it blocked.
+- Linux: the installer installs `wireguard-tools` - without `wg` a dead WireGuard link was never noticed.
+- Linux, macOS: `veroscudo on` / `reconnect` / `use` dial once and return (still armed and blocked); the daemon keeps
+  redialing. They used to redial in the foreground until connected - forever for a dead VPN, which a tray click cannot wait for.
+- Windows tests: the locks-folder repair test used the shared test folder, which an earlier test had already locked down
+  when CI ran elevated - it failed in CI only.
+
+### Tests
+- CI: every nftables and pf ruleset is fed to the real parser (`nft -c`, `pfctl -n`); `linux/tests-local/container-test.sh`
+  installs, turns on (blocked: nothing leaves), upgrades while armed, turns off and uninstalls in a systemd + NetworkManager
+  container on Ubuntu 22.04 and 24.04; a macOS job runs the unit tests on Apple's python3, installs, checks the guard and the
+  menu-bar app, and uninstalls (it never turns the VPN on - that would cut the runner off).
+
 ### Security (manual test on a real machine, 2026-11-05)
 - Windows: **the lock files were open to every program of the account again after a reinstall.** `Install.ps1` resets
   everything under the state folder to its rules ("Users: read"), `state\locks` included, and the folder was locked down

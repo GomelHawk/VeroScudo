@@ -1,9 +1,14 @@
-"""veroscudo on|off|reconnect|status|profiles|use <profile>|import [<connection>...]|check|awake|arm|disarm|watchdog|daemon|boot
+"""veroscudo on|off|reconnect|status|profiles|use <profile>|import [<connection>...]|check|awake|setup [<connection>]|
+remove <profile>|default <profile>|set <key> <value>|arm|disarm|watchdog|daemon|boot
 
-reconnect = your Reconnect: block, take the VPN down, redial; traffic again once the tunnel is back."""
+reconnect = your Reconnect: block, take the VPN down, redial; traffic again once the tunnel is back.
+setup     = the installer's first profile: pick one of the system's VPN connections (or type it in) - root.
+remove / default / set = the tray's Settings (asked for with an administrator's password) - root."""
 from __future__ import annotations
 
 import argparse
+import grp
+import json
 import logging
 import logging.handlers
 import os
@@ -12,28 +17,58 @@ from pathlib import Path
 
 from . import __version__, importer, keepawake
 from .backend import firewall, nm
-from .config import Config
+from .config import Config, config_path
 from .daemon import Guard
 from .state import StateStore, kind_label, switch_notice
 
 LOG = "/var/log/veroscudo.log"
+# who may read the log besides root: the administrators' group (Debian/Ubuntu 'adm' also reads the journal, where the
+# daemon's output goes anyway; macOS 'admin'). The tray's Status and Open log read it as the signed-in user.
+LOG_GROUP = "admin" if sys.platform == "darwin" else "adm"
+
+
+def share_log(path: str) -> None:
+    """root:<admins> 0640 - best effort (the group may not exist; a user's own run cannot chown)."""
+    try:
+        if os.geteuid() == 0:
+            os.chown(path, 0, grp.getgrnam(LOG_GROUP).gr_gid)
+        os.chmod(path, 0o640)
+    except (KeyError, OSError):
+        pass
+
+
+class SharedLog(logging.handlers.RotatingFileHandler):
+    """Bounded like the Windows log (2 MB + one rotated copy); every file it opens - also after a rotation - gets the
+    log's owner and mode, not root's umask."""
+
+    def _open(self):
+        stream = super()._open()
+        share_log(self.baseFilename)
+        return stream
 
 
 def _setup_logging() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     try:
         path = os.environ.get("VEROSCUDO_LOG", LOG)
-        if not os.path.exists(path):                     # created by root: readable by root only (profile names, servers, decisions)
+        if not os.path.exists(path):                     # never world-readable: profile names, servers, decisions
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o640))
-        # bounded like the Windows log: 2 MB + one rotated copy
-        handlers.append(logging.handlers.RotatingFileHandler(path, maxBytes=2 * 1024 * 1024, backupCount=1))
+        handlers.append(SharedLog(path, maxBytes=2 * 1024 * 1024, backupCount=1))
     except OSError:
         pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
 
 
+def is_up(cfg: Config, store: StateStore) -> bool:
+    """Connected - and, while armed, let through by the kill-switch as the guard last applied it. A dead WireGuard link stays
+    'activated' and only root can read its handshakes; the guard's own verdict (applied.json) is what counts."""
+    if not nm.is_connected(cfg.profile):
+        return False
+    return not store.armed or store.allowed_tunnel(cfg.profile) is not None
+
+
 def status(cfg: Config, store: StateStore) -> int:
-    armed, up = store.armed, nm.is_connected(cfg.profile)
+    armed, up = store.armed, is_up(cfg, store)
     state = "off" if not armed else ("protected" if up else "blocked")
     kind = nm.kind(cfg.profile)
     print(f"profile    : {cfg.profile} ({kind_label(kind)})")
@@ -78,14 +113,140 @@ def do_import(names: list[str]) -> int:
     importer.write_config(text, p)
     for m in msgs:
         print(m)
-    print("restart the daemon to pick them up: sudo systemctl restart veroscudo   (macOS: sudo launchctl kickstart -k system/com.gomelhawk.veroscudo)")
+    print("the guard picks the change up within 15 s")
+    return 0
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    v = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
+    return v or default
+
+
+def manual_profile() -> str:
+    """config.json text for one profile typed in by hand (the connection must exist in the system's VPN settings)."""
+    mac = sys.platform == "darwin"
+    while True:
+        name = _ask("VPN connection name, exactly as in the system's VPN settings")
+        server = _ask("VPN server host name or address")
+        port = _ask("VPN port", "4500" if mac else "443")
+        proto = _ask("VPN transport, tcp or udp", "udp" if mac else "tcp").lower()
+        cfg = {"profiles": [{"profile": name, "server": server, "port": int(port) if port.isdigit() else -1, "protocol": proto}],
+               "activeProfile": name, "retrySeconds": 10, "vm": False if mac else "auto", "updateCheck": True, "lanAllow": []}
+        text = json.dumps(cfg, indent=2) + "\n"
+        try:
+            Config.from_text(text)
+            return text
+        except (ValueError, KeyError, TypeError) as e:
+            print(f"  not valid: {e} - again")
+
+
+def choose(found: list[dict]) -> list[str] | None:
+    """Numbered list of the system's VPN connections; returns [name], or None for "type it in by hand". Only an importable
+    connection can be chosen."""
+    usable = [d for d in found if d["server"] and not d.get("unsupported")]
+    print("VPN connections on this computer:")
+    for i, d in enumerate(found, 1):
+        what = f"{d['vpn_type'] or d['protocol']}  {d['server']}:{d['port']}" if d in usable else "cannot be used"
+        print(f"  {i:>2}) {d['name']:<28} {what}{'  - ' + d['note'] if d['note'] else ''}")
+    print("   0) none of these - type the settings in")
+    while True:
+        pick = _ask("Protect which one", "1" if usable else "0")
+        if pick == "0":
+            return None
+        if pick.isdigit() and 1 <= int(pick) <= len(found) and found[int(pick) - 1] in usable:
+            return [found[int(pick) - 1]["name"]]
+        print("  pick a number from the list (one that can be used), or 0")
+
+
+def do_setup(names: list[str]) -> int:
+    """The installer's first profile. Keeps a valid config.json; with names imports those; else asks."""
+    if os.geteuid() != 0:
+        print("veroscudo: setup writes /etc/veroscudo/config.json - run it with sudo", file=sys.stderr)
+        return 2
+    p = config_path()
+    if p.exists() and not names:
+        try:
+            cfg = Config.load(p)
+            print(f"config.json kept: profiles {', '.join(cfg.names)} (default '{cfg.default_profile}')")
+            return 0
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"config.json is not valid ({e}) - it is replaced by the profile you pick now")
+    found = nm.discover()
+    if not names:
+        if not sys.stdin.isatty():
+            print("veroscudo: no config.json yet - name the VPN connection: setup <connection>", file=sys.stderr)
+            return 2
+        if not found:
+            print("No VPN connection found. Create it first in the system's VPN settings (Linux: Settings > Network > VPN;"
+                  " macOS: System Settings > VPN) and connect once by hand - or type the settings in now.")
+        names = choose(found) if found else None
+    if names is None:
+        text = manual_profile()
+    else:
+        raw = p.read_text() if p.exists() and _valid(p) else ""
+        try:
+            text, msgs = importer.add_profiles(raw, found, [n for n in names if n not in _names(raw)])
+        except ValueError as e:
+            print(f"veroscudo: {e}", file=sys.stderr)
+            return 2
+        for m in msgs:
+            print(m)
+    importer.write_config(text, p)
+    print(f"config written: {p}")
+    return 0
+
+
+def _valid(p: Path) -> bool:
+    try:
+        Config.load(p)
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _names(raw: str) -> set[str]:
+    try:
+        return set(Config.from_text(raw).names) if raw.strip() else set()
+    except (ValueError, KeyError, TypeError):
+        return set()
+
+
+def do_edit(action: str, args: list[str], store: StateStore) -> int:
+    """remove <profile> | default <profile> | set <key> <value> - the tray's Settings, run as root."""
+    if os.geteuid() != 0:
+        print(f"veroscudo: {action} changes /etc/veroscudo/config.json - run it with sudo", file=sys.stderr)
+        return 2
+    want = 2 if action == "set" else 1
+    if len(args) != want:
+        print(f"veroscudo {action} {'<key> <value>' if action == 'set' else '<profile>'}", file=sys.stderr)
+        return 2
+    p = config_path()
+    try:
+        raw = p.read_text()
+        if action == "remove":
+            if store.armed and store.active == args[0]:
+                raise ValueError(f"'{args[0]}' is in use - switch to another profile or turn the VPN off first")
+            text = importer.remove_profile(raw, args[0])
+        elif action == "default":
+            text = importer.set_default(raw, args[0])
+        else:
+            text = importer.set_option(raw, args[0], args[1])
+    except (OSError, ValueError) as e:
+        print(f"veroscudo: {e}", file=sys.stderr)
+        return 2
+    importer.write_config(text, p)
+    if action == "remove" and store.active == args[0]:
+        store.active_file.unlink(missing_ok=True)       # the selection falls back to the default
+    print(f"config.json updated ({action} {' '.join(args)}); the guard picks it up within 15 s")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
-    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "import", "check", "awake", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
-    ap.add_argument("name", nargs="*", help="profile name (for 'use'), connection names (for 'import')")
+    ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "import", "check", "awake", "setup", "remove",
+                                       "default", "set", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("name", nargs="*", help="profile name (use, remove, default), connection names (import, setup), "
+                                            "key and value (set)")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
     _setup_logging()
@@ -93,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
         return keepawake.hold()
     if a.action == "import":
         return do_import(a.name)
+    if a.action == "setup":
+        return do_setup(a.name)
+    if a.action in ("remove", "default", "set"):
+        return do_edit(a.action, a.name, StateStore())
     a.name = a.name[0] if a.name else None
     store = StateStore()
     try:
@@ -103,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.action in ("boot", "daemon") and store.armed:
             with store.firewall_lock():
                 firewall.apply(firewall.render_lockdown())
+                store.set_applied(None, None)
             logging.getLogger("veroscudo").error("config.json unusable (%s) - armed: everything but DHCP is blocked until it is fixed", e)
             return 2
         print(f"veroscudo: {e}", file=sys.stderr)
@@ -126,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         print("veroscudo: this action needs root (install.sh adds a sudoers rule: sudo veroscudo on|off|use <profile>)", file=sys.stderr)
         return 2
     g = Guard(cfg, store)
+    if a.action in ("on", "reconnect", "use"):
+        g.attempts = 1              # a command returns; the daemon keeps redialing (the tray must not wait for a dead VPN)
     if a.action == "use":
         try:
             g.use(a.name)

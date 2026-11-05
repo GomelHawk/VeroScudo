@@ -81,16 +81,17 @@ jobs:
         run: |
           mkdir -p dist/VeroScudo-linux/assets/icons
           cp -r linux/. dist/VeroScudo-linux/
-          cp -r assets/icons/png dist/VeroScudo-linux/assets/icons/
+          cp -r assets/icons/png assets/icons/app dist/VeroScudo-linux/assets/icons/
           cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-linux/
           (cd dist && tar -czf "VeroScudo-$VERSION-linux.tar.gz" VeroScudo-linux)
       - name: macOS archive (alpha)
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          mkdir -p dist/VeroScudo-macos
+          mkdir -p dist/VeroScudo-macos/assets/icons
           cp -r macos dist/VeroScudo-macos/macos
           cp -r linux dist/VeroScudo-macos/linux
+          cp -r assets/icons/png assets/icons/app dist/VeroScudo-macos/assets/icons/
           cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-macos/
           (cd dist && tar -czf "VeroScudo-$VERSION-macos-alpha.tar.gz" VeroScudo-macos)
       - name: Checksums

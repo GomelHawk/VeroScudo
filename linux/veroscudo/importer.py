@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG, Config
+from .config import Config, config_path
 
 
 def to_profile(d: dict) -> dict:
@@ -22,8 +22,7 @@ def to_profile(d: dict) -> dict:
 def add_profiles(raw: str, found: list[dict], names: list[str]) -> tuple[str, list[str]]:
     """Adds the named, importable connections to the config text (validated). Returns (new text, messages). Pure.
     Raises ValueError for a name that is unknown, not importable or already configured."""
-    j = json.loads(raw) if raw.strip() else {}
-    profiles = list(j.get("profiles") or ([j["vpn"]] if j.get("vpn") else []))
+    j, profiles = _load(raw)
     have = {str(p.get("profile")) for p in profiles}
     by_name = {d["name"]: d for d in found}
     msgs = []
@@ -38,16 +37,66 @@ def add_profiles(raw: str, found: list[dict], names: list[str]) -> tuple[str, li
         profiles.append(to_profile(d))
         have.add(n)
         msgs.append(f"imported '{n}': {d['vpn_type'] or d['protocol']} to {d['server']} port {d['port']}" + (f" ({d['note']})" if d["note"] else ""))
-    j.pop("vpn", None)
-    j["profiles"] = profiles
     j.setdefault("activeProfile", profiles[0]["profile"])
+    return _dump(j, profiles), msgs
+
+
+def _load(raw: str) -> tuple[dict, list[dict]]:
+    j = json.loads(raw) if raw.strip() else {}
+    profiles = list(j.get("profiles") or ([j["vpn"]] if j.get("vpn") else []))
+    j.pop("vpn", None)
+    return j, profiles
+
+
+def _dump(j: dict, profiles: list[dict]) -> str:
+    j["profiles"] = profiles
     text = json.dumps(j, indent=2) + "\n"
     Config.from_text(text)                                   # the same validation as at load time
-    return text, msgs
+    return text
+
+
+def remove_profile(raw: str, name: str) -> str:
+    """config.json without profile `name`. The last profile cannot go (the guard needs one); when the default goes, the
+    first remaining profile becomes the default. Pure; raises ValueError."""
+    j, profiles = _load(raw)
+    keep = [p for p in profiles if str(p.get("profile")) != name]
+    if len(keep) == len(profiles):
+        raise ValueError(f"no profile named '{name}' in config.json")
+    if not keep:
+        raise ValueError(f"'{name}' is the only profile - add another one first (or uninstall)")
+    if j.get("activeProfile") == name:
+        j["activeProfile"] = keep[0]["profile"]
+    return _dump(j, keep)
+
+
+def set_default(raw: str, name: str) -> str:
+    """The profile selected after an install or a reboot without a runtime choice. Pure; raises ValueError."""
+    j, profiles = _load(raw)
+    if name not in {str(p.get("profile")) for p in profiles}:
+        raise ValueError(f"no profile named '{name}' in config.json")
+    j["activeProfile"] = name
+    return _dump(j, profiles)
+
+
+# the settings the tray may change, and the values each accepts (the CLI's `set`, run as root)
+OPTIONS = {"updateCheck": {"true": True, "false": False},
+           "vm": {"auto": "auto", "true": True, "false": False}}
+
+
+def set_option(raw: str, key: str, value: str) -> str:
+    """updateCheck true|false, vm auto|true|false - nothing else (the strict rule has no setting). Pure; raises ValueError."""
+    if key not in OPTIONS:
+        raise ValueError(f"'{key}' cannot be set here (only: {', '.join(OPTIONS)})")
+    allowed = OPTIONS[key]
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of {', '.join(allowed)}")
+    j, profiles = _load(raw)
+    j[key] = allowed[value]
+    return _dump(j, profiles)
 
 
 def write_config(text: str, path: Path | None = None) -> Path:
-    p = path or Path(os.environ.get("VEROSCUDO_CONFIG", DEFAULT_CONFIG))
+    p = path or config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.new")
     tmp.write_text(text)

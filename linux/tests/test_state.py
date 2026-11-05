@@ -52,3 +52,12 @@ def test_stale_lock_in_a_folder_the_reader_may_not_write_is_dead_not_a_crash(tmp
     s.lock.write_text("4242")
     monkeypatch.setattr(type(s.lock), "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(PermissionError()))
     assert not s.lock_alive()
+
+
+def test_applied_tunnel_round_trip_and_garbage(tmp_path):
+    s = StateStore(tmp_path)
+    assert s.allowed_tunnel("W") is None
+    s.set_applied("W", "wg0")
+    assert s.allowed_tunnel("W") == "wg0" and s.allowed_tunnel("X") is None
+    s.applied_file.write_text("[1, 2")
+    assert s.allowed_tunnel("W") is None

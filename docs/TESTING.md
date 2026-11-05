@@ -5,11 +5,14 @@
 | Layer | Where | Runs in CI | What it pins |
 |---|---|---|---|
 | Unit (Windows) | `windows/tests/` (Pester 5, on Windows PowerShell 5.1) | yes | the tray's decisions (state/title/text, location line, update notice - `VeroScudo.Tray.Tests.ps1`), config defaults/validation (per profile type), the decision table, forged-event handling, the WFP filter set (every permit scoped, DNS only while down, per-tunnel-type server ports, OpenVPN/WireGuard endpoints), struct layout of the native helper, sync/fail-closed, profile switching, Reconnect order and our own 631, the password pause, OpenVPN config checks / command line / management parser, WireGuard health and transitions, lock, update URLs |
-| Unit (Linux/macOS) | `linux/tests/` (pytest) | yes | same, plus the rendered nftables and pf rulesets, tunnel-interface checks, the guard's event handling and switching with fakes |
+| Unit (Linux/macOS) | `linux/tests/` (pytest; on macOS with Apple's python3 3.9) | yes | same, plus the rendered nftables and pf rulesets, tunnel-interface checks, the guard's event handling and switching with fakes, the tray's decisions (`traymodel.py`), config edits |
+| Ruleset parse | `linux/tests-local/render_rulesets.py` -> `nft -c`, `pfctl -n` | yes | the kernel / pf accept every ruleset VeroScudo can produce |
+| Install (Linux) | `linux/tests-local/container-test.sh` (systemd + NetworkManager container, Ubuntu 22.04 and 24.04) | yes | install, sudo rule scope, On blocks everything, the daemon redials, config reload, upgrade while armed, Off, uninstall, `--purge` |
+| Install (macOS) | the `macos` CI job | yes | install with Apple's python3, guard running, menu-bar app starts (screenshot artifact), uninstall leaves nothing - never armed |
 | Lint | PSScriptAnalyzer, ruff, shellcheck | yes | |
-| Real machine | `windows/tests-local/` | **no** | the actual firewall, VPN and scheduled tasks |
+| Real machine | `windows/tests-local/`, `linux/tests-local/README.md` (VM walk-through) | **no** | the actual firewall, VPN and scheduled tasks / services |
 
-CI cannot dial a VPN or change a firewall. The real-machine scripts are the proof; run them
+CI cannot dial a real VPN; only the container's own firewall is changed there. The real-machine scripts are the proof; run them
 on your laptop with the guard installed and paste the verdict into your PR.
 
 ## Real-machine scripts (Windows)

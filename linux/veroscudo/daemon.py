@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .backend import firewall, nm
-from .config import Config
+from .config import Config, config_path
 from .state import Decision, StateStore, decide
 
 log = logging.getLogger("veroscudo")
@@ -28,6 +28,35 @@ class Guard:
         self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
+        # how many dials a redial loop makes before it hands over: None = until connected (the daemon). The CLI (and so the
+        # tray) dials once and returns - still armed and blocked; the daemon's watchdog takes the redial over within 15 s
+        self.attempts: int | None = None
+        self._cfg_stamp = self._stamp()
+
+    @staticmethod
+    def _stamp() -> tuple[float, int]:
+        try:
+            st = config_path().stat()
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return (0.0, 0)
+
+    def reload_config(self) -> bool:
+        """Picks up a changed config.json (the tray's Settings, `veroscudo import`) without a restart. A file that does not
+        load keeps the running configuration - the kill-switch never loses its profile to a typo - and is logged once."""
+        stamp = self._stamp()
+        if stamp == self._cfg_stamp:
+            return False
+        self._cfg_stamp = stamp
+        try:
+            new = Config.load()
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.error("config.json changed but cannot be used (%s) - keeping the previous configuration", e)
+            return False
+        self.base = new
+        log.info("config.json changed - profiles: %s (default '%s', active '%s')", ", ".join(new.names),
+                 new.default_profile, self.cfg.profile)
+        return True
 
     @property
     def cfg(self) -> Config:
@@ -82,6 +111,7 @@ class Guard:
             firewall.apply(rs)
             why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
             self._applied = rs
+            self.store.set_applied(self.cfg.profile, tun)
             log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
 
     def disable_killswitch(self, unless_armed: bool = False) -> None:
@@ -93,6 +123,7 @@ class Guard:
                 return
             firewall.clear()
             self._applied = None
+            self.store.set_applied(None, None)
         log.info("kill-switch OFF (firewall restored)")
 
     def boot(self) -> None:
@@ -104,6 +135,7 @@ class Guard:
         ips = list(cfg.server_ips) or self.cached_server_ips(cfg)
         with self.store.firewall_lock():
             firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy()))
+            self.store.set_applied(cfg.profile, None)
         log.info("boot: armed - kill-switch ON before the network starts (server %s)", ", ".join(ips) or "not cached")
 
     # ---- actions -------------------------------------------------------------
@@ -247,6 +279,10 @@ class Guard:
                     log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
                     break
                 log.info("attempt %d failed", attempt)
+                if self.attempts is not None and attempt >= self.attempts:
+                    log.info("still not connected - traffic stays blocked; the VeroScudo service keeps redialing every %d s",
+                             self.cfg.retry_seconds)
+                    break
                 time.sleep(self.cfg.retry_seconds)
             if not self.store.armed:
                 log.info("disarmed during reconnect - stopping")
@@ -256,6 +292,7 @@ class Guard:
             self.enable_killswitch(tunnel_up=True)
 
     def watchdog(self) -> None:
+        self.reload_config()
         if self.store.armed:
             up = nm.is_connected(self.cfg.profile)
             self.enable_killswitch(up)

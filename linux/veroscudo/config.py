@@ -14,6 +14,10 @@ _HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\
 _BAD_NAME = re.compile(r'[\x00-\x1f"\\]')
 
 
+def config_path() -> Path:
+    return Path(os.environ.get("VEROSCUDO_CONFIG", DEFAULT_CONFIG))
+
+
 def is_lan_range(value: str) -> bool:
     """A single address or a network narrow enough to be a LAN - never 'everything' (IPv4 /8+, IPv6 /16+)."""
     try:
@@ -176,7 +180,7 @@ class Config:
     @staticmethod
     def load(path: Path | None = None, active: str | None = None) -> Config:
         """active: the runtime selection (StateStore.active); an unknown name falls back to the configured default."""
-        p = path or Path(os.environ.get("VEROSCUDO_CONFIG", DEFAULT_CONFIG))
+        p = path or config_path()
         if not p.exists():
             raise FileNotFoundError(f"VeroScudo config not found: {p} (run install.sh)")
         return Config.from_text(p.read_text(), active)
