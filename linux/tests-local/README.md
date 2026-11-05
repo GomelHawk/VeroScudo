@@ -3,7 +3,7 @@
 ## In a container (no VM, no VPN; CI runs it on every change)
 
 ```bash
-linux/tests-local/container-test.sh ubuntu:24.04      # or ubuntu:22.04; needs Docker
+linux/tests-local/container-test.sh ubuntu:24.04      # or ubuntu:22.04 / ubuntu:26.04; needs Docker
 ```
 
 A privileged Ubuntu container with systemd and NetworkManager: `install.sh --yes --profile …`, status as the user,

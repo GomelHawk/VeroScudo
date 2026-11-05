@@ -73,5 +73,5 @@ no handshake for 3 minutes counts as a drop and the connection is restarted. Giv
 
 **Status: beta.** The state machine and the nftables ruleset are unit-tested, every ruleset passes `nft -c`, and
 `tests-local/container-test.sh` installs, turns on, upgrades, turns off and uninstalls in a systemd container on Ubuntu
-22.04 and 24.04 (CI). The real-machine leak tests with a real VPN are still open - see `tests-local/README.md` for the
+22.04, 24.04 and 26.04 (CI). The real-machine leak tests with a real VPN are still open - see `tests-local/README.md` for the
 VM recipe. Treat it as a preview until that log is in the repo.

@@ -8,7 +8,7 @@
 # OpenVPN connection whose plugin is not installed - NetworkManager knows it, every dial fails, so the container stays armed
 # and blocked, which is exactly what is checked.
 #
-#     linux/tests-local/container-test.sh [ubuntu:24.04|ubuntu:22.04]      (needs Docker; CI runs it on both)
+#     linux/tests-local/container-test.sh [ubuntu:24.04|ubuntu:22.04|ubuntu:26.04]   (needs Docker; CI runs all three)
 set -euo pipefail
 IMAGE="${1:-ubuntu:24.04}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

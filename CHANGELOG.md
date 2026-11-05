@@ -42,7 +42,7 @@ All notable changes to VeroScudo are recorded here. The format follows
 ### Tests
 - CI: every nftables and pf ruleset is fed to the real parser (`nft -c`, `pfctl -n`); `linux/tests-local/container-test.sh`
   installs, turns on (blocked: nothing leaves), upgrades while armed, turns off and uninstalls in a systemd + NetworkManager
-  container on Ubuntu 22.04 and 24.04; a macOS job runs the unit tests on Apple's python3, installs, checks the guard and the
+  container on Ubuntu 22.04, 24.04 and 26.04; a macOS job runs the unit tests on Apple's python3, installs, checks the guard and the
   menu-bar app, and uninstalls (it never turns the VPN on - that would cut the runner off).
 
 ### Security (manual test on a real machine, 2026-11-05)
