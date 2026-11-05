@@ -284,7 +284,7 @@ def test_user_off_still_clears_even_if_a_stale_table_exists(env):
 
 
 def test_a_command_dials_once_and_hands_the_redial_to_the_daemon(env, monkeypatch):
-    g, calls, connected = env
+    g, calls, _connected = env
     monkeypatch.setattr(daemon.nm, "up", lambda p: calls["up"].append(p) or False)          # never connects
     monkeypatch.setattr(daemon.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not wait for a retry")))
     g.attempts = 1
@@ -295,7 +295,7 @@ def test_a_command_dials_once_and_hands_the_redial_to_the_daemon(env, monkeypatc
 
 
 def test_the_guard_records_what_the_kill_switch_lets_through(env):
-    g, calls, connected = env
+    g, _calls, connected = env
     g.arm()
     assert g.store.allowed_tunnel("Work") is None                    # armed, tunnel down: blocked
     connected.add("Work")

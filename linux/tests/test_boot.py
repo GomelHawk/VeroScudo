@@ -1,8 +1,12 @@
 import pytest
 
-from veroscudo import daemon, firewall
+from veroscudo import daemon
+from veroscudo.backend import firewall  # the platform's kill-switch (nftables / pf): what boot applies
 from veroscudo.config import Config
 from veroscudo.state import StateStore
+
+NFT = firewall.__name__.endswith(".firewall")              # else pf (macOS)
+BLOCKS = "policy drop" if NFT else "block drop quick all"   # what a blocking ruleset of this backend says
 
 
 def _guard(tmp_path, monkeypatch):
@@ -27,7 +31,7 @@ def test_boot_blocks_when_armed_with_cached_server(tmp_path, monkeypatch):
     g.store.server_ip.write_text("203.0.113.5")
     g.boot()
     assert len(applied) == 1
-    assert "policy drop" in applied[0] and "203.0.113.5" in applied[0]
+    assert BLOCKS in applied[0] and "203.0.113.5" in applied[0]
 
 
 def test_boot_does_nothing_when_disarmed(tmp_path, monkeypatch):
@@ -79,6 +83,8 @@ def test_boot_fails_closed_when_armed_and_config_is_unusable(tmp_path, monkeypat
     assert len(applied) == 1
     rs = applied[0]
     assert rs == firewall.render_lockdown()
+    if not NFT:
+        return                                              # the pf lockdown is checked line by line in test_macos.py
     assert rs.count("policy drop") == 3
     for line in rs.splitlines():
         if "accept" in line:

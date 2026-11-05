@@ -11,9 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from veroscudo import firewall, pf  # noqa: E402
-from veroscudo.config import VPN_TYPES, Config  # noqa: E402
-from veroscudo.firewall import DnsPolicy  # noqa: E402
+from veroscudo import firewall, pf
+from veroscudo.config import VPN_TYPES, Config
+from veroscudo.firewall import DnsPolicy
 
 
 def configs():

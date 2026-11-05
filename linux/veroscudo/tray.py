@@ -145,7 +145,8 @@ class Windows:
             box, ("Turn VPN on", lambda: self.app.toggle_on_off(), True), ("Reconnect", lambda: self.app.act("reconnect"), False),
             ("Copy report", lambda: self.app.copy_report(), False), ("Close", lambda: w.destroy(), False))
         self.status = w
-        self._st = dict(img=img, title=title, text=text, grid=grid, tv=tv, sw=sw, onoff=onoff, redo=redo, copy=copy, rows=None)
+        self._st = {"img": img, "title": title, "text": text, "grid": grid, "tv": tv, "sw": sw, "onoff": onoff, "redo": redo,
+                    "copy": copy, "rows": None}
         w.connect("destroy", lambda *_: setattr(self, "status", None))
         self.update_status()
         w.show_all()
@@ -226,7 +227,7 @@ class Windows:
                                    dim=True), False, False, 0)
         self._buttons(box, ("Close", lambda: w.destroy(), True))
         self.settings = w
-        self._se = dict(lb=lb, upd=upd, vm=vm, busy=False)
+        self._se = {"lb": lb, "upd": upd, "vm": vm, "busy": False}
         upd.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "updateCheck", "true" if b.get_active() else "false"]))
         vm.connect("changed", lambda c: self._se["busy"] or self.app.admin(["set", "vm", c.get_active_id()]))
         w.connect("destroy", lambda *_: setattr(self, "settings", None))
@@ -664,7 +665,7 @@ class _PreviewApp:
     def toggle_on_off(self):
         pass
 
-    act = admin = copy_report = lambda *a, **k: None   # noqa: E731 - preview buttons do nothing
+    act = admin = copy_report = lambda *a, **k: None
 
 
 def preview(outdir: Path) -> int:

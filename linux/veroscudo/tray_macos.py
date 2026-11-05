@@ -61,7 +61,7 @@ def _image(name: str, size: float):
 
 class Tray(NSObject):
     def init(self):
-        self = objc.super(Tray, self).init()
+        self = objc.super(Tray, self).init()     # noqa: PLW0642 - PyObjC's init pattern: init may return another object
         if self is None:
             return None
         self.store = StateStore()
@@ -407,7 +407,7 @@ class Tray(NSObject):
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .tray import _single_instance          # the same one-per-session lock (fcntl) as the Linux tray
+    from .tray import _single_instance  # the same one-per-session lock (fcntl) as the Linux tray
     lock = _single_instance()
     if lock is None:
         return 0
