@@ -238,6 +238,15 @@ def test_guard_does_not_check_while_off_or_blocked_and_drops_the_rating(guard):
     assert len(rounds) == 1
 
 
+def test_guard_counts_each_round_in_the_statistics(guard):
+    g, _, _ = guard
+    g.store.set_armed(True)
+    g.quality_tick()
+    g.stats.flush()
+    lines = [ln for f in (g.store.state / "stats").glob("*.jsonl") for ln in f.read_text().splitlines()]
+    assert len(lines) == 1 and '"sent":1,"lost":0' in lines[0]
+
+
 def test_guard_does_nothing_when_the_check_is_off(tmp_path, monkeypatch):
     monkeypatch.setattr(quality, "run_round", lambda t: pytest.fail("checked while disabled"))
     g = daemon.Guard(cfg(), StateStore(tmp_path / "run", tmp_path / "lib"))

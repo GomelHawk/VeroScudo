@@ -187,7 +187,7 @@ Uninstall: menu bar > **About VeroScudo** > *Uninstall…*, or `sudo /opt/verosc
 | The VPN rejects your password | stays blocked, stops redialing, icon *Attention*; store the right password, then *Reconnect* |
 
 Tray menu (the same on Windows, Linux and macOS): **Turn VPN on** / **Turn VPN off** / **Reconnect VPN** /
-**VPN profile ▸** / Status / Open log / Settings / Keep awake / Check for updates / About / Exit (the guard keeps running
+**VPN profile ▸** / Status / Open log / **Statistics** (7 days, one bar per 10 minutes) / Settings / Keep awake / Check for updates / About / Exit (the guard keeps running
 without the tray). Windows: left-click shows the status window; Linux: middle-click. The tray runs without administrator
 rights; changing Settings asks for an administrator's password. Settings has three tabs: **VPN profiles**, **Behaviour**
 and **Connection**.

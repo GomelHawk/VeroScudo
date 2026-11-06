@@ -13,9 +13,10 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, keepawake, quality, traymodel, update
+from . import __version__, badge, exitinfo, keepawake, quality, stats, traymodel, update
 from .backend import nm
 from .config import Config, config_path, is_host
 from .state import StateStore, kind_label, switch_notice
@@ -23,12 +24,16 @@ from .state import StateStore, kind_label, switch_notice
 ICONS = traymodel.env_icons(Path("/usr/share/veroscudo/icons"))
 
 
+def _runtime_base() -> Path:
+    # the user's own runtime folder (Linux XDG_RUNTIME_DIR, macOS TMPDIR): never a shared /tmp another user could hold
+    base = Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or f"/tmp/veroscudo-{os.getuid()}")
+    base.mkdir(mode=0o700, exist_ok=True)
+    return base
+
+
 def _single_instance():
     """One tray per session: returns the held lock file, or None when another tray already holds it."""
-    # the user's own runtime folder (Linux XDG_RUNTIME_DIR, macOS TMPDIR): never a shared /tmp another user could hold
-    base = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or f"/tmp/veroscudo-{os.getuid()}"
-    Path(base).mkdir(mode=0o700, exist_ok=True)
-    f = open(Path(base) / "veroscudo-tray.lock", "w")  # noqa: SIM115 - held until exit
+    f = open(_runtime_base() / "veroscudo-tray.lock", "w")  # noqa: SIM115 - held until exit
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -50,6 +55,25 @@ def icon_path(state: str) -> Path:
     return ICONS / f"{state}.png"
 
 
+def awake_icon(state: str, out: Path, size: int = 64) -> bool:
+    """Writes the state icon with the keep-awake badge (badge.py) to `out`: AppIndicator takes icons by file only. False
+    when it cannot be drawn - the tray then shows the plain icon."""
+    _, GdkPixbuf, GLib, _, _ = _gtk()
+    try:
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon_path(state)), size, size, False)
+        if not pb.get_has_alpha():
+            pb = pb.add_alpha(False, 0, 0, 0)
+        rs, data = pb.get_rowstride(), pb.get_pixels()
+        packed = b"".join(data[y * rs:y * rs + size * 4] for y in range(size))
+        nb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(badge.awake_badge(packed, size)), GdkPixbuf.Colorspace.RGB,
+                                             True, 8, size, size, size * 4)
+        out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        nb.savev(str(out), "png", [], [])
+        return True
+    except Exception:  # noqa: BLE001 - a missing or odd icon must not stop the tray
+        return False
+
+
 def _popen(argv: list[str]) -> None:
     try:
         subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -69,7 +93,7 @@ class Windows:
     def __init__(self, app) -> None:
         self.app = app
         self.Gdk, self.GdkPixbuf, self.GLib, self.Gtk, self.Pango = _gtk()
-        self.status = self.settings = self.about = None
+        self.status = self.settings = self.about = self.stats = None
 
     # helpers
     def _pixbuf(self, path: Path, size: int):
@@ -117,12 +141,30 @@ class Windows:
         return out
 
     # status
+    def _dark(self, widget) -> bool:
+        """A dark theme: the text is lighter than mid-grey (GTK 3 has no direct question for it)."""
+        c = widget.get_style_context().get_color(self.Gtk.StateFlags.NORMAL)
+        return (0.299 * c.red + 0.587 * c.green + 0.114 * c.blue) > 0.5
+
+    def _toned(self, label, text: str, tone: str, dark: bool) -> None:
+        """Sets a label's text in a tone's colour (traymodel.tone_colour) - the colours of the Windows status window."""
+        col = traymodel.tone_colour(tone, dark)
+        t = self.GLib.markup_escape_text(text)
+        label.set_markup(f"<span foreground='{col}'>{t}</span>" if col else t)
+
+    def _link(self, text: str, cb):
+        """A small link (Refresh, Clear) - a label link, so it looks like the Windows tray's link labels."""
+        lb = self.Gtk.Label()
+        lb.set_markup(f"<small><a href='#'>{self.GLib.markup_escape_text(text)}</a></small>")
+        lb.connect("activate-link", lambda *_: (cb(), True)[1])
+        return lb
+
     def show_status(self) -> None:
         if self.status:
             self.status.present()
             return
         Gtk = self.Gtk
-        w, box = self._window("VeroScudo", 460)
+        w, box = self._window("VeroScudo", 480)
         head = Gtk.Box(spacing=14)
         img = Gtk.Image()
         head.pack_start(img, False, False, 0)
@@ -132,45 +174,108 @@ class Windows:
         tb.pack_start(text, False, False, 0)
         head.pack_start(tb, True, True, 0)
         box.pack_start(head, False, False, 0)
+        # where the traffic leaves the tunnel: one line under the header (Settings > Behaviour, "Show exit location")
+        loc = Gtk.Frame()
+        lrow = Gtk.Box(spacing=10)
+        lrow.set_border_width(8)
+        loc.add(lrow)
+        badge = Gtk.Label()
+        css = Gtk.CssProvider()
+        css.load_from_data(b"label { background-color: alpha(@theme_fg_color, 0.12); border-radius: 4px; padding: 1px 6px; }")
+        badge.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        place = self._label(wrap=False)
+        place.set_ellipsize(self.Pango.EllipsizeMode.END)
+        right = self._label(dim=True, wrap=False, xalign=1.0)
+        lrow.pack_start(badge, False, False, 0)
+        lrow.pack_start(place, True, True, 0)
+        lrow.pack_start(right, False, False, 0)
+        lrow.pack_start(self._link("Refresh", self.app.refresh_exit), False, False, 0)
+        box.pack_start(loc, False, False, 0)
         grid = Gtk.Grid(column_spacing=18, row_spacing=6)
         box.pack_start(grid, False, False, 0)
-        box.pack_start(self._label("<b>Recent events</b>", markup=True), False, False, 0)
+        other = self._label()
+        box.pack_start(other, False, False, 0)
+        evh = Gtk.Box(spacing=8)
+        evh.pack_start(self._label("<b>Recent events</b>", markup=True), True, True, 0)
+        # Clear empties this view only: the log stays (the record of what happened; root-owned, rotates by itself).
+        # Open log still shows everything.
+        evh.pack_end(self._link("Clear", self.app.clear_events), False, False, 0)
+        box.pack_start(evh, False, False, 0)
         tv = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
         sw = Gtk.ScrolledWindow()
         sw.set_size_request(-1, 170)
         sw.set_shadow_type(Gtk.ShadowType.IN)
         sw.add(tv)
         box.pack_start(sw, True, True, 0)
-        onoff, redo, copy, _ = self._buttons(
-            box, ("Turn VPN on", lambda: self.app.toggle_on_off(), True), ("Reconnect", lambda: self.app.act("reconnect"), False),
-            ("Copy report", lambda: self.app.copy_report(), False), ("Close", lambda: w.destroy(), False))
+        onoff, redo, _log, copy = self._buttons(
+            box, ("Turn VPN on", lambda: self.app.toggle_on_off(), False), ("Reconnect", lambda: self.app.act("reconnect"), False),
+            ("Open log", lambda: self.app.open_log(), False), ("Copy report", self._copy, True))
         self.status = w
         self._st = {"img": img, "title": title, "text": text, "grid": grid, "tv": tv, "sw": sw, "onoff": onoff, "redo": redo,
-                    "copy": copy, "rows": None}
+                    "copy": copy, "rows": None, "loc": loc, "badge": badge, "place": place, "right": right, "other": other}
         w.connect("destroy", lambda *_: setattr(self, "status", None))
-        self.update_status()
+        loc.show_all()
+        for x in (loc, other, badge, right):            # shown or hidden by update_status only (show_all leaves them alone)
+            x.set_no_show_all(True)
         w.show_all()
+        self.update_status()
+
+    def _copy(self) -> None:
+        self.app.copy_report()
+        self._st["copy"].set_label("Copied")
 
     def update_status(self) -> None:
         if not self.status:
             return
-        Gtk, st = self.Gtk, self._st
-        f, v = self.app.facts, self.app.view
+        st, app = self._st, self.app
+        f, v = app.facts, app.view
         pb = self._pixbuf(icon_path(v.state), 64)
         if pb:
             st["img"].set_from_pixbuf(pb)
-        st["title"].set_markup(f"<span size='x-large' weight='bold'>{self.GLib.markup_escape_text(v.title)}</span>")
+        dark = self._dark(st["title"])                 # asked of a label that is on screen: a new one has no theme yet
+        col = traymodel.tone_colour(traymodel.title_tone(f, v), dark)
+        attrs = f" foreground='{col}'" if col else ""
+        st["title"].set_markup(f"<span size='x-large' weight='bold'{attrs}>{self.GLib.markup_escape_text(v.title)}</span>")
         st["text"].set_text(v.text)
-        rows = traymodel.status_rows(f, v, self.app.awake_on, self.app.tunnel)
+        # exit location
+        show = app.exit_enabled()
+        st["loc"].set_visible(show)
+        if show:
+            xv = app.exit_view()
+            st["badge"].set_visible(xv.has)
+            st["right"].set_visible(xv.has)
+            if xv.has:
+                alpha = "100%" if xv.fresh else "60%"      # not looked up through the tunnel that is up now: grey
+                st["badge"].set_markup(f"<small><b><span alpha='{alpha}'>{self.GLib.markup_escape_text(xv.code or '?')}"
+                                       "</span></b></small>")
+                st["place"].set_markup(f"<span alpha='{alpha}'>{self.GLib.markup_escape_text(xv.place or xv.code)}</span>")
+                st["right"].set_text(xv.right)
+                for k in ("loc", "place", "right", "badge"):
+                    st[k].set_tooltip_text(xv.tip)
+            else:
+                st["place"].set_markup(f"<span alpha='60%'>{self.GLib.markup_escape_text(xv.text)}</span>")
+                st["loc"].set_tooltip_text(None)
+        # the table: CONNECTION coloured by its rating with the details as a tooltip, the firewall red while blocked
+        cv = traymodel.connection_view(f, v, app.cfg.check if app.cfg else None)
+        rows = [(k, val, cv.tone if k == "Connection" else traymodel.firewall_tone(f, v) if k == "Firewall" else "normal",
+                 cv.tip if k == "Connection" else "")
+                for k, val in traymodel.status_rows(f, v, app.awake_on, app.tunnel, last_drop=app.last_drop, foreign=())]
         if rows != st["rows"]:
             for child in st["grid"].get_children():
                 st["grid"].remove(child)
-            for i, (k, val) in enumerate(rows):
+            for i, (k, val, tone, tip) in enumerate(rows):
                 st["grid"].attach(self._label(k, dim=True, wrap=False), 0, i, 1, 1)
-                st["grid"].attach(self._label(val, wrap=False), 1, i, 1, 1)
+                vl = self._label(wrap=False)
+                self._toned(vl, val, tone, dark)
+                if tip:
+                    vl.set_tooltip_text(tip)
+                st["grid"].attach(vl, 1, i, 1, 1)
             st["grid"].show_all()
             st["rows"] = rows
-        ev = self.app.events()
+        other = traymodel.foreign_text(app.foreign)
+        st["other"].set_visible(bool(other))
+        self._toned(st["other"], f"Other VPNs: {other}" if other else "", "warn", dark)
+        ev = app.events(view=True)
         text = traymodel.log_hint() if ev is None else ("\n".join(ev) or "(no events yet)")
         buf = st["tv"].get_buffer()
         if buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False) != text:
@@ -181,7 +286,6 @@ class Windows:
         st["onoff"].set_label("Turn VPN off" if (v.armed or v.connected) else "Turn VPN on")
         st["onoff"].set_sensitive(f.configured)
         st["redo"].set_sensitive(ms.reconnect)
-        _ = Gtk
 
     # settings
     def show_settings(self) -> None:
@@ -209,8 +313,7 @@ class Windows:
         frame.set_size_request(-1, 170)
         pp.pack_start(frame, False, False, 0)
         row = Gtk.Box(spacing=8)
-        for text, cb in (("Import…", self.import_dialog), ("Remove", lambda: self._on_selected("remove")),
-                         ("Make default", lambda: self._on_selected("default"))):
+        for text, cb in (("Import…", self.import_dialog), ("Remove", lambda: self._on_selected("remove"))):
             b = Gtk.Button(label=text)
             b.connect("clicked", lambda _b, cb=cb: cb())
             row.pack_start(b, False, False, 0)
@@ -237,13 +340,10 @@ class Windows:
                         "When the VPN drops, nothing leaves this computer until it is back or you turn the VPN off.")
         strict.set_active(True)
         strict.set_sensitive(False)
-        vm = option("Protect VMs and containers",
-                    "Docker, libvirt and other VMs follow the kill-switch too. Off: VeroScudo leaves them alone.",
-                    show=sys.platform != "darwin")                       # macOS: not filtered yet (alpha)
-        upd = option("Check for updates when the tray starts",
-                     "Asks GitHub for the latest version, never while blocked. Nothing is installed automatically.")
-        bp.pack_start(self._label("Each change asks for an administrator's password and takes effect within 15 seconds.",
-                                  dim=True), False, False, 0)
+        vm = option("Protect VMs and containers", traymodel.VM_ABOUT)
+        upd = option("Check for updates when the tray starts", traymodel.UPDATE_ABOUT)
+        loc = option("Show exit location", traymodel.EXIT_ABOUT)
+        bp.pack_start(self._label(traymodel.BEHAVIOUR_NOTE, dim=True), False, False, 0)
 
         # -- Connection
         cp = page("Connection")
@@ -299,8 +399,10 @@ class Windows:
 
         self._buttons(box, ("Close", lambda: w.destroy(), True))
         self.settings = w
-        self._se = {"lb": lb, "upd": upd, "vm": vm, "busy": False, "nb": nb, "en": en, "more": more, "every": every,
+        self._se = {"lb": lb, "upd": upd, "vm": vm, "loc": loc, "busy": False, "nb": nb, "en": en, "more": more, "every": every,
                     "over": over, "rows": rows}
+        # your own setting (tray.json): saved at once, no administrator's password
+        loc.connect("toggled", lambda b: self._se["busy"] or self.app.set_exit_enabled(b.get_active()))
         upd.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "updateCheck", "true" if b.get_active() else "false"]))
         vm.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "vm", "true" if b.get_active() else "false"]))
         save.connect("clicked", lambda _b: self._save_check())
@@ -336,8 +438,6 @@ class Windows:
                 se["lb"].remove(child)
             for name in (cfg.names if cfg else []):
                 tags = [kind_label(self.app.kind(name))]
-                if name == cfg.default_profile:
-                    tags.append("default")
                 if name == cfg.profile:
                     tags.append("active")
                 lab = self._label(f"{name}   <span alpha='60%'>{self.GLib.markup_escape_text(' · '.join(tags))}</span>",
@@ -352,6 +452,7 @@ class Windows:
             se["lb"].show_all()
             se["upd"].set_active(bool(cfg.update_check) if cfg else True)
             se["vm"].set_active(bool(cfg.vm) if cfg else True)
+            se["loc"].set_active(self.app.exit_enabled())
             chk = cfg.check if cfg else quality.CheckConfig()
             se["en"].set_active(chk.enabled)
             se["more"].set_visible(chk.enabled)
@@ -370,6 +471,8 @@ class Windows:
         r = self._se["lb"].get_selected_row()
         if r is None:
             self.message("Select a profile first.")
+            return
+        if action == "remove" and not self.ask(*traymodel.remove_question(r.profile), "Remove"):
             return
         self.app.admin([action, r.profile])
 
@@ -408,6 +511,108 @@ class Windows:
         d.destroy()
         if resp == Gtk.ResponseType.OK and r is not None:
             self.app.admin(["import", r.profile])
+
+    # statistics: 7 days, one row per day on a 24 h grid, one bar per 10 minutes (the Windows tray's Statistics window).
+    # Each day's strip is a pixel image (GdkPixbuf from bytes): no cairo binding needed (python3-gi-cairo is not always there).
+    STAT_BAR, STAT_STRIP = 4, 24                                        # 144 bars x 4 px (3 px bar + 1 px gap) = 576 px
+
+    def show_stats(self) -> None:
+        if self.stats:
+            self.stats.present()
+            return
+        Gtk = self.Gtk
+        w, box = self._window("VeroScudo - Statistics", 620)
+        box.pack_start(self._label("<span size='x-large' weight='bold'>Last 7 days</span>", markup=True), False, False, 0)
+        box.pack_start(self._label("One bar = 10 minutes. Hover a bar for its time and numbers.", dim=True), False, False, 0)
+        width = 144 * self.STAT_BAR
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_border_width(12)
+        frame = Gtk.Frame()
+        frame.add(card)
+        box.pack_start(frame, False, False, 0)
+        axis = Gtk.Fixed()                                               # the time grid's labels: every 3 hours
+        axis.set_size_request(width, 16)
+        for h in range(9):
+            lb = self._label(f"<small>{h * 3:02d}</small>", markup=True, dim=True, wrap=False)
+            axis.put(lb, min(max(h * 18 * self.STAT_BAR - 7, 0), width - 14), 0)
+        card.pack_start(axis, False, False, 0)
+        rows = []
+        for _ in range(7):
+            head = Gtk.Box(spacing=8)
+            day = self._label("", wrap=False)
+            tot = self._label("", dim=True, wrap=False, xalign=1.0)
+            head.pack_start(day, False, False, 0)
+            head.pack_end(tot, False, False, 0)
+            img = Gtk.Image()
+            ev = Gtk.EventBox()
+            ev.add(img)
+            ev.set_has_tooltip(True)
+            card.pack_start(head, False, False, 0)
+            card.pack_start(ev, False, False, 0)
+            rows.append((day, tot, img, ev))
+        dark = self._dark(box)
+        legend = Gtk.Box(spacing=14)
+        for state, text in (("good", "Good (or VPN on, not rated)"), ("unstable", "Unstable"), ("bad", "Bad"), ("off", "VPN off")):
+            legend.pack_start(self._label(f"<span foreground='{self._stat_colour(state, dark)}'>\u25a0</span> <small>{text}</small>",
+                                          markup=True, wrap=False), False, False, 0)
+        box.pack_start(legend, False, False, 0)
+        box.pack_start(self._label("Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need "
+                                   "Settings > Connection; without it, VPN time is green.", dim=True), False, False, 0)
+
+        def fill() -> None:
+            week = self.app.stats_week()
+            for (day_lb, tot_lb, img, ev), (label, d) in zip(rows, week):
+                day_lb.set_text(label)
+                tot_lb.set_text(stats.total_text(d))
+                img.set_from_pixbuf(self._strip(d, dark))
+                ev.bars, ev.label = d.bars, label
+
+        def tip(ev, x, _y, _kb, t) -> bool:
+            i = x // self.STAT_BAR
+            if not 0 <= i < len(getattr(ev, "bars", ())):
+                return False
+            t.set_text(f"{ev.label}  {stats.bar_text(ev.bars[i])}")
+            return True
+
+        for r in rows:
+            r[3].connect("query-tooltip", tip)
+        fill()
+        self._buttons(box, ("Refresh", fill, False), ("Close", lambda: w.destroy(), True))
+        timer = self.GLib.timeout_add_seconds(60, lambda: (fill(), True)[1])     # the picture moves on while open
+        self.stats = w
+        w.connect("destroy", lambda *_: (self.GLib.source_remove(timer), setattr(self, "stats", None)))
+        w.show_all()
+
+    @staticmethod
+    def _stat_colour(state: str, dark: bool) -> str:
+        """The statistics palette (traymodel.stats_colour - shared with the macOS tray; Windows uses the same values)."""
+        return "#{:02x}{:02x}{:02x}".format(*(traymodel.stats_colour(state, dark) or (0, 0, 0)))
+
+    def _strip(self, day, dark: bool):
+        """One day's bars as an RGBA image, with the 3-hour grid lines as dotted columns."""
+        w, h, bw = 144 * self.STAT_BAR, self.STAT_STRIP, self.STAT_BAR
+        px = bytearray(w * h * 4)                                        # transparent
+        grid = (128, 128, 128, 110)
+
+        def put(x: int, y: int, c: tuple) -> None:
+            o = (y * w + x) * 4
+            px[o:o + 4] = bytes(c)
+
+        for b in day.bars:
+            if b.state == "future":
+                continue
+            hx = self._stat_colour(b.state, dark)
+            c = (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16), 255)
+            x0 = (b.start // 10) * bw
+            row = bytes(c) * (bw - 1)
+            for y in range(h):
+                o = (y * w + x0) * 4
+                px[o:o + len(row)] = row
+        for k in range(1, 8):                                            # 03 ... 21 (00 and 24 are the edges)
+            for y in range(0, h, 3):
+                put(k * 18 * bw - 1, y, grid)
+        return self.GdkPixbuf.Pixbuf.new_from_bytes(self.GLib.Bytes.new(bytes(px)), self.GdkPixbuf.Colorspace.RGB, True, 8,
+                                                    w, h, w * 4)
 
     # about
     def show_about(self) -> None:
@@ -460,9 +665,34 @@ class Windows:
         d.set_title("VeroScudo")
         d.format_secondary_text(secondary)
         d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, ok, Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.CANCEL)          # Enter never confirms a removal by accident
         r = d.run()
         d.destroy()
         return r == Gtk.ResponseType.OK
+
+    _ANSWERS = (("cancel", -6), ("anyway", 1), ("disconnect", 2))     # -6: Gtk.ResponseType.CANCEL
+
+    def foreign_dialog(self, prompt: traymodel.Prompt):
+        """Before Turn on, when another VPN is connected (traymodel.foreign_prompt decides the text and the buttons)."""
+        Gtk = self.Gtk
+        d = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+                              text="Another VPN is connected")
+        d.set_title(prompt.title)
+        d.format_secondary_text(prompt.text)
+        for answer, label, primary in prompt.buttons:
+            b = d.add_button(label, dict(self._ANSWERS)[answer])
+            if primary:
+                b.get_style_context().add_class("suggested-action")
+        d.set_default_response(dict(self._ANSWERS)["cancel"])
+        d.set_keep_above(True)
+        return d
+
+    def choose_foreign(self, prompt: traymodel.Prompt) -> str:
+        """'disconnect' | 'anyway' | 'cancel' - nothing happens without a click."""
+        d = self.foreign_dialog(prompt)
+        r = d.run()
+        d.destroy()
+        return next((a for a, code in self._ANSWERS if code == r), "cancel")
 
 
 # ---------------------------------------------------------------- the tray
@@ -486,6 +716,13 @@ class TrayApp:
         self.tunnel: str | None = None
         self.update_tag: str | None = None
         self.update_url = ""
+        self.exit = exitinfo.ExitFetch()
+        self.protected_since = 0.0
+        self.foreign: list[traymodel.Foreign] = []
+        self._foreign_at = 0.0
+        self._foreign_shown: set = set()
+        self.last_drop = "-"
+        self._badged: dict[str, str] = {}
         self.win = Windows(self)
         self.reload_config()
 
@@ -496,7 +733,7 @@ class TrayApp:
         self.head = self._item("VeroScudo", None)
         self.head.set_sensitive(False)
         m.append(Gtk.SeparatorMenuItem())
-        self.on_item = self._item("Turn VPN on", lambda: self.act("on"))
+        self.on_item = self._item("Turn VPN on", self.request_on)
         self.off_item = self._item("Turn VPN off", lambda: self.act("off"))
         self.redo_item = self._item("Reconnect VPN", lambda: self.act("reconnect"))
         self.prof_item = self._item("VPN profile", None)
@@ -506,6 +743,7 @@ class TrayApp:
         m.append(Gtk.SeparatorMenuItem())
         self.status_item = self._item("Status…", self.win.show_status)
         self._item("Open log", self.open_log)
+        self._item("Statistics…", self.win.show_stats)
         self._item("Settings…", self.win.show_settings)
         self.awake_item = Gtk.CheckMenuItem(label="Keep awake")
         m.append(self.awake_item)
@@ -539,8 +777,64 @@ class TrayApp:
     def discover(self) -> list[dict]:
         return nm.discover()
 
-    def events(self) -> list[str] | None:
-        return traymodel.read_events()
+    def events(self, view: bool = False) -> list[str] | None:
+        """The newest log lines; view=True: as the status window shows them (after Clear, without dates)."""
+        ev = traymodel.read_events()
+        if view and ev is not None:
+            return traymodel.filter_events(ev, str(keepawake.get_pref("eventsClearedAt", "") or ""))
+        return ev
+
+    def clear_events(self) -> None:
+        keepawake.set_pref("eventsClearedAt", traymodel.clear_stamp())
+        self.win.update_status()
+
+    # exit location (exitinfo.py)
+    def stats_week(self) -> list:
+        return stats.week(self.store.state)
+
+    def exit_enabled(self) -> bool:
+        return self.exit.enabled()
+
+    def set_exit_enabled(self, on: bool) -> None:
+        keepawake.set_pref("showExit", bool(on))
+        self.win.update_status()
+
+    def exit_view(self) -> exitinfo.ExitView:
+        return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
+                                  self.exit.checking, self.exit.failure)
+
+    def refresh_exit(self) -> None:
+        """The Refresh link: asked only while protected - otherwise the answer would show your real address."""
+        if self.view.state == "protected":
+            self.exit.start(self.facts.name)
+        else:
+            self.exit.failure = exitinfo.NOT_PROTECTED
+        self.win.update_status()
+
+    def find_foreign(self, force: bool = False) -> list[traymodel.Foreign]:
+        """Other VPNs next to the active profile; asked at most every 10 s (the window refreshes every 3 s)."""
+        if force or time.time() - self._foreign_at >= 10:
+            self._foreign_at = time.time()
+            cfg = self.cfg
+            own = self.tunnel
+            tunnels = nm.other_tunnels(own)
+            try:
+                owners = nm.tunnel_owners()
+            except (OSError, subprocess.SubprocessError):
+                owners = {}
+            self.foreign = traymodel.foreign_list(tunnels, owners, own, cfg.profile if cfg else "", cfg.names if cfg else ())
+        return self.foreign
+
+    def icon_file(self, state: str, awake: bool) -> str:
+        """The state icon, with the keep-awake badge while Keep awake is on (drawn once per state, kept in the user's
+        runtime folder)."""
+        plain = str(icon_path(state))
+        if not awake:
+            return plain
+        if state not in self._badged:
+            out = _runtime_base() / "veroscudo-icons" / f"{state}-awake.png"
+            self._badged[state] = str(out) if awake_icon(state, out) else plain
+        return self._badged[state]
 
     @property
     def awake_on(self) -> bool:
@@ -568,20 +862,31 @@ class TrayApp:
         armed = self.store.armed
         up = nm.is_connected(cfg.profile) and (not armed or self.store.allowed_tunnel(cfg.profile) is not None)
         self.tunnel = (self.store.allowed_tunnel(cfg.profile) or nm.iface(cfg.profile)) if up else None
+        foreign = self.find_foreign()
+        self.last_drop = traymodel.last_drop_text(self.store.last_drop(), cfg.profile)
         return traymodel.Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up,
-                               guard_running=traymodel.guard_running(), others=tuple(nm.other_tunnels(self.tunnel) if armed else ()),
+                               guard_running=traymodel.guard_running(), others=tuple(x.name for x in foreign) if armed else (),
                                expect=self.expect.kind, check_enabled=cfg.check.enabled,
-                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None)
+                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None,
+                               auth=self.store.auth_failed(cfg.profile))
 
     def refresh(self) -> bool:
         changed = self.reload_config()
         self.facts = self.collect()
         self.view = v = traymodel.tray_state(self.facts)
+        if traymodel.turned_on_elsewhere(self.last, v, self.expect.kind):
+            self.expect.start("connect")
+            self.facts = self.collect()
+            self.view = v = traymodel.tray_state(self.facts)
         if self.expect.update(v):
             notify(*traymodel.expired_notice(self.facts.name), state="blocked")
             self.facts = self.collect()
             self.view = v = traymodel.tray_state(self.facts)
-        self.ind.set_icon_full(str(icon_path(v.state)), v.title)
+        if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
+            self.protected_since = time.time()
+            self.exit.start(self.facts.name)
+        self.exit.poll()
+        self.ind.set_icon_full(self.icon_file(v.state, self.awake.active), v.title)
         self.ind.set_title(traymodel.tooltip(v, self.awake.active, self.facts))
         self.head.set_label(traymodel.menu_head(v, self.facts))
         ms = traymodel.menu_state(v)
@@ -589,8 +894,8 @@ class TrayApp:
         self.off_item.set_sensitive(ms.off)
         self.redo_item.set_sensitive(ms.reconnect)
         self.fill_profiles()
-        self.switch_notice()
-        n = traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
+        noticed = self.switch_notice() or self.foreign_notice(v)
+        n = None if noticed else traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
         if n:
             notify(*n, state=v.state)
         self.last = v.state
@@ -626,16 +931,45 @@ class TrayApp:
         self.prof_item.set_label(f"VPN profile: {cfg.profile} ({kind_label(self.kind(cfg.profile))})")
         self.prof_menu.show_all()
 
-    def switch_notice(self) -> None:
+    def switch_notice(self) -> bool:
         name = self.facts.name
         if self.facts.configured and keepawake.get_pref("lastProfile") != name:       # every switch, once
             keepawake.set_pref("lastProfile", name)
             n = switch_notice(self.facts.kind, name)
             if n:
                 notify("VeroScudo - WireGuard profile", n, state="blocked")
+                return True
+        return False
+
+    def foreign_notice(self, v: traymodel.View) -> bool:
+        """Another VPN connected while VeroScudo is on: once per detection (it is blocked - say so, and what to do)."""
+        if not v.armed:
+            self._foreign_shown = set()
+            return False
+        new, self._foreign_shown = traymodel.new_foreign(self._foreign_shown, self.foreign)
+        if new:
+            notify(*traymodel.foreign_notice(new[0]), "critical", state="attention")
+            return True
+        return False
 
     # actions
-    def act(self, action: str, arg: str | None = None) -> None:
+    def request_on(self) -> None:
+        """Turn VPN on: first asks when another VPN is connected (it would be blocked silently otherwise)."""
+        if not self.cfg:
+            self.act("on")
+            return
+        foreign = self.find_foreign(force=True)
+        if not foreign:
+            self.act("on")
+            return
+        answer = self.win.choose_foreign(traymodel.foreign_prompt(foreign, self.cfg.profile))
+        self._foreign_shown = {x.iface for x in foreign}            # just seen in the question: no notice for them again
+        if answer == "disconnect":
+            self.act("on", before=[nm.down_argv(x.connection) for x in foreign if x.connection])
+        elif answer == "anyway":
+            self.act("on")
+
+    def act(self, action: str, arg: str | None = None, before: list[list[str]] | None = None) -> None:
         if action == "on":
             self.expect.start("connect")
         elif action == "reconnect":
@@ -649,14 +983,18 @@ class TrayApp:
             self.expect.start("switch")
             notify("VeroScudo", f"Switching to '{arg}'" + (" - traffic stays blocked until it is connected" if self.store.armed else ""),
                    state="blocked" if self.store.armed else "off")
-        self.runner.start(action, traymodel.action_argv(action, arg))
+        # `before`: other VPNs to disconnect first (as you, through NetworkManager); a failure stops before the turn on
+        self.runner.start(action, *(before or []), traymodel.action_argv(action, arg))
         self.GLib.timeout_add(1500, lambda: (self.refresh(), False)[1])
 
     def switch(self, name: str) -> None:
         self.act("use", name)
 
     def toggle_on_off(self) -> None:
-        self.act("off" if (self.view.armed or self.view.connected) else "on")
+        if self.view.armed or self.view.connected:
+            self.act("off")
+        else:
+            self.request_on()
 
     def admin(self, args: list[str]) -> None:
         self.runner.start("admin:" + args[0], traymodel.admin_argv(args))
@@ -682,8 +1020,10 @@ class TrayApp:
 
     def copy_report(self) -> None:
         f, v = self.facts, self.view
-        lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel)]
-        ev = self.events()
+        xl = exitinfo.report_line(self.exit_view()) if self.exit_enabled() else None
+        lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
+                                                                     foreign=self.find_foreign(), exit_line=xl)]
+        ev = traymodel.read_events(n=15)
         text = "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events", *(ev or [traymodel.log_hint()])])
         cb = self.Gtk.Clipboard.get(self.Gdk.SELECTION_CLIPBOARD)
         cb.set_text(text, -1)
@@ -745,8 +1085,12 @@ class TrayApp:
 
 
 # ---------------------------------------------------------------- preview: every window as a PNG, nothing changed
+PREVIEW_EXIT = {"ip": "203.0.113.25", "city": "Example City", "country": "PL", "org": "AS64500 Example Net",
+                "source": "ipinfo.io", "profile": "CorporateVPN", "time": "2026-11-05T10:33:00+00:00"}
+
+
 class _PreviewApp:
-    def __init__(self, facts: traymodel.Facts) -> None:
+    def __init__(self, facts: traymodel.Facts, foreign=(), exit_info=PREVIEW_EXIT, checking=False, exit_fresh=True) -> None:
         self.facts, self.view = facts, traymodel.tray_state(facts)
         self.cfg = Config.from_text('{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","vpnType":"sstp"},'
                                     '{"profile":"wg-home","server":"203.0.113.9","port":51820,"protocol":"udp","vpnType":"wireguard"}],'
@@ -754,14 +1098,41 @@ class _PreviewApp:
                                     '"windowMinutes":2,"targets":[{"host":"1.1.1.1","method":"tcp","port":443},'
                                     '{"host":"10.0.0.1","method":"ping"}]}}')
         self.awake_on, self.tunnel = False, ("ppp0" if facts.up else None)
+        self.foreign = list(foreign)
+        self.last_drop = "10:40 - connection lost"
+        self._exit, self._checking, self._fresh = exit_info, checking, exit_fresh
 
     def kind(self, name):
         return "wireguard" if name.startswith("wg") else "vpn"
 
-    def events(self):
-        return ["2026-11-05 09:12:01 [INFO] ARMED", "2026-11-05 09:12:01 [INFO] kill-switch armed (profile=CorporateVPN, tunnel=up)",
-                "2026-11-05 10:40:13 [INFO] VPN 'CorporateVPN' terminated (user_requested=False) -> reconnect",
-                "2026-11-05 10:40:23 [INFO] reconnected 'CorporateVPN' after 1 attempt(s)"]
+    def events(self, view=False):
+        ev = ["2026-11-05 09:12:01,114 [INFO] ARMED",
+              "2026-11-05 09:12:01,220 [INFO] kill-switch armed (profile=CorporateVPN, tunnel=up)",
+              "2026-11-05 10:40:13,031 [INFO] VPN 'CorporateVPN' terminated (user_requested=False) -> reconnect",
+              "2026-11-05 10:40:23,502 [INFO] reconnected 'CorporateVPN' after 1 attempt(s)"]
+        return traymodel.filter_events(ev) if view else ev
+
+    def exit_enabled(self):
+        return True
+
+    def stats_week(self):
+        """A made-up week: a lunch-time problem every day, a bad half hour, an evening without VPN, one day with the check off."""
+        now = datetime(2026, 11, 7, 17, 25)
+        rows = []
+        for i in range(7):
+            m = {}
+            for t in range(8 * 60, 19 * 60 + 30):
+                if (i == 4 and t > 15 * 60) or (i == 0 and t > now.hour * 60 + now.minute):
+                    break
+                lost = int(t % 3 == 0) if 12 * 60 + 40 <= t < 13 * 60 + 20 else 3 if (i == 2 and 16 * 60 <= t < 16 * 60 + 30) \
+                    else int((t * 7 + i) % 41 == 0)
+                m[t] = (0, 0) if i == 5 else (3, min(lost, 3))
+            d = now.date() - timedelta(days=i)
+            rows.append((stats.day_label(d, now.date()), stats.day_row(m, until=now.hour * 60 + now.minute + 1 if i == 0 else 1440)))
+        return rows
+
+    def exit_view(self):
+        return exitinfo.exit_view(self._exit, self.view.state, self.facts.name, checking=self._checking, preview=self._fresh)
 
     def discover(self):
         return [{"name": "Office L2TP", "vpn_type": "l2tp", "server": "l2tp.example.com", "port": 1701, "protocol": "udp", "note": ""},
@@ -771,7 +1142,7 @@ class _PreviewApp:
     def toggle_on_off(self):
         pass
 
-    act = admin = copy_report = lambda *a, **k: None
+    act = admin = copy_report = open_log = refresh_exit = clear_events = set_exit_enabled = lambda *a, **k: None
 
 
 def preview(outdir: Path) -> int:
@@ -779,7 +1150,7 @@ def preview(outdir: Path) -> int:
     outdir.mkdir(parents=True, exist_ok=True)
 
     def shot(win, name: str) -> None:
-        win.show_all()
+        win.show()
         end = time.monotonic() + 0.8
         while time.monotonic() < end:
             Gtk.main_iteration_do(False)
@@ -789,19 +1160,25 @@ def preview(outdir: Path) -> int:
         print(outdir / f"{name}.png")
         win.destroy()
 
-    for name, f in {
-        "status-protected": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True),
-        "status-protected-good": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
-                                                 quality=quality.Quality("good", 0.0, 45, 18, 0)),
-        "status-protected-unstable": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
-                                                     quality=quality.Quality("unstable", 22.2, 310, 18, 4)),
-        "status-protected-bad": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=True, check_enabled=True,
-                                                quality=quality.Quality("bad", 61.1, 900, 18, 11)),
-        "status-blocked": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=False),
-        "status-off": traymodel.Facts(name="CorporateVPN", kind="vpn"),
-        "status-attention": traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, guard_running=False),
+    wg = traymodel.Foreign("example-wireguard", "wg1", "example-wireguard", False)
+    app_tun = traymodel.Foreign("tun1", "tun1", None, False)
+    other_profile = traymodel.Foreign("wg-home", "wg0", "wg-home", True)
+    prot = {"name": "CorporateVPN", "kind": "vpn", "armed": True, "up": True}
+    for name, (f, kw) in {
+        "status-protected": (traymodel.Facts(**prot), {}),
+        "status-protected-good": (traymodel.Facts(**prot, check_enabled=True, quality=quality.Quality("good", 0.0, 45, 18, 0)), {}),
+        "status-protected-unstable": (traymodel.Facts(**prot, check_enabled=True,
+                                                      quality=quality.Quality("unstable", 22.2, 310, 18, 4)), {}),
+        "status-protected-bad": (traymodel.Facts(**prot, check_enabled=True, quality=quality.Quality("bad", 61.1, 900, 18, 11)), {}),
+        "status-protected-other-vpn": (traymodel.Facts(**prot, others=("example-wireguard", "tun1")), {"foreign": (wg, app_tun)}),
+        "status-exit-checking": (traymodel.Facts(**prot), {"checking": True, "exit_info": None}),
+        "status-blocked": (traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=False), {"exit_fresh": False}),
+        "status-connecting": (traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, up=False, expect="connect"),
+                              {"exit_fresh": False}),
+        "status-off": (traymodel.Facts(name="CorporateVPN", kind="vpn"), {"exit_fresh": False}),
+        "status-attention": (traymodel.Facts(name="CorporateVPN", kind="vpn", armed=True, guard_running=False), {"exit_fresh": False}),
     }.items():
-        w = Windows(_PreviewApp(f))
+        w = Windows(_PreviewApp(f, **kw))
         w.show_status()
         shot(w.status, name)
     w = Windows(_PreviewApp(traymodel.Facts(name="CorporateVPN", armed=True, up=True)))
@@ -813,6 +1190,21 @@ def preview(outdir: Path) -> int:
         shot(w.settings, f"settings-{tab}")
     w.show_about()
     shot(w.about, "about")
+    w.show_stats()
+    shot(w.stats, "stats")
+    # dialogs, built as the tray shows them (never run: nothing is answered)
+    for name, fl in {"foreign-one": [wg], "foreign-profile": [other_profile], "foreign-app": [app_tun],
+                     "foreign-mixed": [wg, app_tun]}.items():
+        shot(w.foreign_dialog(traymodel.foreign_prompt(fl, "CorporateVPN")), name)
+    d = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE,
+                          text=traymodel.remove_question("wg-home")[0])
+    d.format_secondary_text(traymodel.remove_question("wg-home")[1])
+    d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Remove", Gtk.ResponseType.OK)
+    shot(d, "msg-remove")
+    # the tray icons with the keep-awake badge (and without, for comparison)
+    for st in traymodel.STATES:
+        if awake_icon(st, outdir / f"icon-{st}-awake.png", 64):
+            print(outdir / f"icon-{st}-awake.png")
     _ = GLib
     return 0
 

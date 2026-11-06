@@ -157,6 +157,8 @@ function Invoke-VeroActionWatchdog {
                 try {
                     Invoke-VeroCheck -Action $Action
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
+                    try { Update-VeroStats -Up (Test-VeroStatsUp) } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+                    try { [IO.File]::WriteAllText((Get-VeroPath).Heartbeat, [string][int64](Get-VeroEpoch)) } catch { Write-Verbose 'heartbeat not written' }
                 } catch {
                     if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
                     Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
@@ -171,7 +173,17 @@ function Invoke-VeroActionWatchdog {
             $due = if ($nextCheck -lt $nextProbe) { $nextCheck } else { $nextProbe }
             Start-Sleep -Seconds ([Math]::Max(1, [int][Math]::Ceiling(($due - (Get-Date)).TotalSeconds)))
         }
-    } finally { $single.Dispose() }
+    } finally {
+        try { Save-VeroStatsMinute } catch { Write-Verbose 'statistics: last minute not saved' }   # the minute so far (a restart adds to it)
+        $single.Dispose()
+    }
+}
+
+function Test-VeroStatsUp {
+    <# Statistics: VeroScudo's own VPN is up right now (armed and the active profile connected). Other VPNs do not count. #>
+    if (-not (Test-VeroArmed)) { return $false }
+    $cfg = try { Get-VeroConfig } catch { $null }
+    [bool]($cfg -and (Test-VeroVpnConnected $cfg.Profile -Type $cfg.Type))
 }
 
 function Invoke-VeroActionSwitch {

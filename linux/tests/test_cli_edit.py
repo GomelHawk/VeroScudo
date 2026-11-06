@@ -29,9 +29,9 @@ def test_root_changes_are_written(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     store = StateStore(tmp_path / "run", tmp_path / "lib")
     assert cli.do_edit("set", ["updateCheck", "false"], store) == 0
-    assert cli.do_edit("default", ["Backup"], store) == 0
+    assert cli.do_edit("default", ["Backup"], store) == 2              # gone: the tray menu's selection is what is used
     j = json.loads(cfg.read_text())
-    assert j["updateCheck"] is False and j["activeProfile"] == "Backup"
+    assert j["updateCheck"] is False
     assert cli.do_edit("set", ["retrySeconds"], store) == 2              # wrong arity
     assert cli.do_edit("set", ["strict", "false"], store) == 2           # no such setting
 
@@ -87,3 +87,11 @@ def test_written_config_is_what_the_guard_loads(cfg):
     text = importer.set_option(cfg.read_text(), "vm", "false")
     importer.write_config(text, cfg)
     assert json.loads(cfg.read_text())["vm"] is False
+
+
+def test_removing_the_profile_in_use_falls_back_to_the_first_remaining(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    store = StateStore(tmp_path / "run", tmp_path / "lib")
+    store.set_active("Work")
+    assert cli.do_edit("remove", ["Work"], store) == 0
+    assert store.active is None and json.loads(cfg.read_text())["activeProfile"] == "Backup"

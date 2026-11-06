@@ -70,7 +70,8 @@ def remove_profile(raw: str, name: str) -> str:
 
 
 def set_default(raw: str, name: str) -> str:
-    """The profile selected after an install or a reboot without a runtime choice. Pure; raises ValueError."""
+    """activeProfile = `name`: the fallback used only when nothing is selected (first start, the selected profile removed) -
+    there is no "default" to choose in the UI; the tray menu's selection is what is used. Pure; raises ValueError."""
     j, profiles = _load(raw)
     if name not in {str(p.get("profile")) for p in profiles}:
         raise ValueError(f"no profile named '{name}' in config.json")

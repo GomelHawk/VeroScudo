@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import quality
+from . import quality, stats
 from .backend import firewall, nm
 from .config import Config, config_path
 from .state import Decision, StateStore, decide
@@ -34,6 +34,7 @@ class Guard:
         self.attempts: int | None = None
         self._cfg_stamp = self._stamp()
         self.quality = quality.Monitor(self.store.home / "quality.json")   # Settings > Connection; read by the tray
+        self.stats = stats.Recorder(self.store.state)                      # tray > Statistics: VPN time and quality per minute
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -158,6 +159,7 @@ class Guard:
             self.disable_killswitch()
 
     def on(self) -> None:
+        self.resume_after_password()
         self.arm()
         if not nm.is_connected(self.cfg.profile):
             self.reconnect()
@@ -173,6 +175,7 @@ class Guard:
             log.info("reconnect requested, but a reconnect is already running - it continues")
             return
         cfg = self.cfg
+        self.resume_after_password()
         log.info("RECONNECT requested by you: traffic blocked, taking down '%s', redialing", cfg.profile)
         self.renew_marker.write_text(str(time.time()))
         self.enable_killswitch(tunnel_up=False, force=True)
@@ -218,6 +221,7 @@ class Guard:
             if self.store.armed and not nm.is_connected(name):
                 self.reconnect()
             return
+        self.resume_after_password()
         self.store.set_active(name)                            # first: the old profile's deactivation is then ignored
         log.info("active profile -> '%s'", name)
         if self.store.armed:
@@ -230,9 +234,25 @@ class Guard:
             nm.down(old.profile)
             log.info("took down '%s' (VPN is off - '%s' is selected for the next turn on)", old.profile, name)
 
+    def resume_after_password(self) -> None:
+        """Your On / Reconnect / switch: you have stored the password - redial again (Windows lifts the pause the same way)."""
+        if self.store.clear_auth_failed():
+            log.info("password pause lifted - redialing")
+
+    def on_event_auth(self, profile: str, which: str) -> None:
+        """The VPN refused the active profile for its password: stop redialing, so the server does not lock the account;
+        traffic stays blocked. The tray shows Password missing / rejected (Windows: Set-VeroAuthFailed)."""
+        if profile != self.cfg.profile or not self.store.armed:
+            return
+        if self.store.set_auth_failed(profile, which):
+            log.info("PASSWORD %s for '%s' - automatic redial paused so the account is not locked; traffic stays blocked. "
+                     "Store the right password in the system's VPN settings, then Turn on or Reconnect.",
+                     "MISSING" if which == "missing" else "REJECTED", profile)
+
     def on_event_up(self, profile: str) -> None:
         if profile not in self.base.names:
             return
+        self.store.clear_auth_failed()                         # connected: whatever was wrong with the password is fixed
         if profile != self.cfg.profile:
             self.store.set_active(profile)
             log.info("'%s' connected - now the active profile", profile)
@@ -254,6 +274,9 @@ class Guard:
         d = decide(deliberate, self.store.armed)
         log.info("VPN '%s' terminated (user_requested=%s) -> %s (decision source: %s)", profile, deliberate, d.value,
                  "veroscudo off" if off else "NetworkManager reason")
+        # the status window's "Last drop": why, in the words the Windows tray uses for its RAS event
+        self.store.record_drop(profile, "turned off" if off else "Reconnect" if renewing else
+                               "you disconnected" if deliberate else "connection lost")
         if d is Decision.DISARM:
             self.disarm()
         elif d is Decision.RECONNECT:
@@ -273,10 +296,14 @@ class Guard:
         attempt = 0
         try:
             while self.store.armed and not nm.is_connected(self.cfg.profile):
+                if self.store.auth_failed(self.cfg.profile):
+                    log.info("redial paused: the password of '%s' was refused - traffic stays blocked", self.cfg.profile)
+                    break
                 attempt += 1
                 self.enable_killswitch(tunnel_up=False)
                 if nm.is_stale(self.cfg.profile):            # WireGuard: activated but silent - take it down for a fresh start
                     log.info("WireGuard '%s': no handshake for over 3 minutes - restarting it", self.cfg.profile)
+                    self.store.record_drop(self.cfg.profile, "no WireGuard handshake for 3 min")
                     nm.down(self.cfg.profile)
                 if nm.up(self.cfg.profile):
                     nm.wait_connected(self.cfg.profile)
@@ -298,14 +325,22 @@ class Guard:
 
     def watchdog(self) -> None:
         self.reload_config()
+        up = bool(self.store.armed) and nm.is_connected(self.cfg.profile)
+        self.record_minute(up)
         if self.store.armed:
-            up = nm.is_connected(self.cfg.profile)
             self.enable_killswitch(up)
-            if not up and not self.store.lock_alive():
+            if not up and not self.store.lock_alive() and not self.store.auth_failed(self.cfg.profile):
                 self.reconnect_async()
         elif firewall.is_active():
             log.info("disarmed but kill-switch still active - restoring")
             self.disable_killswitch(unless_armed=True)
+
+    def record_minute(self, up: bool) -> None:
+        """Statistics: VeroScudo's own VPN up right now (armed and the active profile connected; other VPNs do not count)."""
+        try:
+            self.stats.tick(up)
+        except OSError:
+            log.exception("statistics")
 
     # ---- connection quality (optional) ---------------------------------------
     def quality_tick(self) -> float:
@@ -317,7 +352,12 @@ class Guard:
             if self.quality.samples or self.quality.path.exists():
                 self.quality.reset()
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
-        q = self.quality.add_round(chk, cfg.profile, quality.run_round(chk.targets), down_at=self.store.last_down())
+        results = quality.run_round(chk.targets)
+        try:
+            self.stats.checks(len(results), sum(1 for ok, _ in results if not ok))
+        except OSError:
+            log.exception("statistics")
+        q = self.quality.add_round(chk, cfg.profile, results, down_at=self.store.last_down())
         if q.state != "checking" and q.state != self.quality.last_state:
             log.info("connection quality: %s (%s of %s checks lost, %s)", q.state, q.lost, q.checks,
                      f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")
@@ -349,4 +389,4 @@ class Guard:
 
         threading.Thread(target=tick, daemon=True).start()
         threading.Thread(target=self.quality_loop, daemon=True, name="quality").start()
-        nm.watch(lambda: set(self.base.names), on_up=self.on_event_up, on_down=self.on_event_down)
+        nm.watch(lambda: set(self.base.names), on_up=self.on_event_up, on_down=self.on_event_down, on_auth=self.on_event_auth)

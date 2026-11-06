@@ -46,6 +46,7 @@ function Get-VeroPath {
         Foreign       = Join-Path $state 'foreign.json'                    # a VPN that is not a VeroScudo profile connected while armed
         Quality       = Join-Path $state 'quality.json'                    # connection check: the watchdog's last rating (read by the tray)
         LastDown      = Join-Path $state 'last-down.txt'                   # when the kill-switch last went to "blocked" (the check starts over)
+        Heartbeat     = Join-Path $state 'watchdog-beat.txt'               # the watchdog's last good pass (the tray's "Guard not running")
         OpenVpnDir    = Join-Path $home_ 'openvpn'
         UserDir       = $user
         SwitchRequest = Join-Path $user 'switch.request'

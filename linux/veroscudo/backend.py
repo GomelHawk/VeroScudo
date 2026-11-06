@@ -10,8 +10,8 @@ import sys
 from types import ModuleType
 
 # VPN control (nm.py / scutil.py): names the shared code may call
-VPN_API = ("check", "discover", "down", "iface", "is_connected", "is_stale", "kind", "nameservers", "nm_dns",
-           "other_tunnels", "resolve", "resolver_uid", "up", "vm_bridges", "wait_connected", "watch")
+VPN_API = ("check", "discover", "down", "down_argv", "iface", "is_connected", "is_stale", "kind", "nameservers", "nm_dns",
+           "other_tunnels", "resolve", "resolver_uid", "tunnel_owners", "up", "vm_bridges", "wait_connected", "watch")
 # kill-switch (firewall.py / pf.py)
 FIREWALL_API = ("DnsPolicy", "apply", "clear", "is_active", "render_lockdown", "render_ruleset")
 

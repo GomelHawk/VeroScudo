@@ -150,6 +150,38 @@ def other_tunnels(own: str | None, net: Path = SYS_NET) -> list[str]:
     return out
 
 
+def parse_active(text: str) -> list[tuple[str, str, str]]:
+    """`nmcli -t -f NAME,TYPE,DEVICE connection show --active` -> [(name, type, device)]; terse output escapes ':' in
+    names. Pure."""
+    out = []
+    for line in text.splitlines():
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) >= 3:
+            out.append((unescape(parts[0]), parts[1], unescape(parts[2])))
+    return out
+
+
+def tunnel_owners() -> dict[str, str]:
+    """Tunnel interface -> the NetworkManager connection that owns it, for the active VPN and WireGuard connections - so the
+    tray can name another VPN and offer to disconnect it. A 'vpn' connection's DEVICE is the card underneath, so its tunnel
+    comes from GENERAL.IP-IFACE (iface)."""
+    out = {}
+    for name, ctype, device in parse_active(_nmcli("-f", "NAME,TYPE,DEVICE", "connection", "show", "--active")):
+        if ctype in ("wireguard", "tun") and device and device != "--":
+            out[device] = name
+        elif ctype == "vpn":
+            t = iface(name)
+            if t:
+                out[t] = name
+    return out
+
+
+def down_argv(name: str) -> list[str]:
+    """The command that disconnects a VPN connection as the signed-in user (NetworkManager lets a local session do it):
+    the tray's "Disconnect ... and turn on". After `id` the name is a value, whatever it starts with."""
+    return ["nmcli", "connection", "down", "id", name]
+
+
 def parse_openvpn_data(data: str) -> dict:
     """NetworkManager's vpn.data of an OpenVPN connection -> {'hosts': [...], 'port': int|None, 'proto': 'tcp'|'udp'}. Pure."""
     items = {}
@@ -210,7 +242,7 @@ def wait_connected(profile: str, seconds: float = 10.0) -> bool:
 
 
 def down(profile: str) -> bool:
-    r = subprocess.run(["nmcli", "connection", "down", "id", profile], check=False, capture_output=True, text=True)
+    r = subprocess.run(down_argv(profile), check=False, capture_output=True, text=True)
     return r.returncode == 0
 
 
@@ -244,8 +276,15 @@ def nm_dns() -> list[str]:
 USER_REQUESTED_REASONS = {"user-requested", "user-disconnected"}
 
 
-def watch(profiles, on_up, on_down) -> None:
-    """Blocks. Calls on_up(profile) when a watched profile activates, on_down(profile, user_requested) when it deactivates.
+def auth_reason(reason_name: str) -> str | None:
+    """NetworkManager's deactivation reason -> 'missing' (no secrets: no password stored / the agent gave none) or
+    'rejected' (the VPN server refused the login), else None. Pure."""
+    return {"NO_SECRETS": "missing", "LOGIN_FAILED": "rejected"}.get(reason_name)
+
+
+def watch(profiles, on_up, on_down, on_auth=None) -> None:
+    """Blocks. Calls on_up(profile) when a watched profile activates, on_down(profile, user_requested) when it deactivates,
+    on_auth(profile, 'missing'|'rejected') when it failed for its password (before on_down).
     `profiles` is a callable returning the current set of names (config can change while running).
     Uses libnm (python3-gi + gir1.2-nm-1.0) for the deactivation reason; falls back to polling without reasons."""
     try:
@@ -272,6 +311,9 @@ def watch(profiles, on_up, on_down) -> None:
             elif st == NM.ActiveConnectionState.DEACTIVATED:
                 tracked.pop(ac.get_path(), None)
                 rs = NM.ActiveConnectionStateReason(reason)
+                why = auth_reason(rs.value_nick.upper().replace("-", "_")) if hasattr(rs, "value_nick") else None
+                if why and on_auth:
+                    on_auth(name, why)
                 on_down(name, rs == NM.ActiveConnectionStateReason.USER_DISCONNECTED)
 
         ac.connect("state-changed", changed)

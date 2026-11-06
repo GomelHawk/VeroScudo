@@ -210,8 +210,14 @@ function Get-StateFacts {
         Otp         = $(if ($ovpn -and [string]$ovpn.State -eq 'NEED_OTP') { [string]$ovpn.Challenge } else { $null })
         Conflicts   = @(if ($armed) { Get-VeroConflictList })
         Expect      = (Get-TrayExpect)
+        GuardStale  = $(if ($armed) { Get-GuardStale } else { 0 })
         NativeNext  = $(if ($nb) { try { '{0:HH:mm}' -f [datetime]::Parse([string]$nb.Next, $null, [Globalization.DateTimeStyles]::RoundtripKind) } catch { 'soon' } } else { $null })
     }
+}
+function Get-GuardStale {
+    <# Minutes since the watchdog's last good pass, when that is over 3 (it runs every 15 s); 0 = fine or not known yet. #>
+    try { $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]([IO.File]::ReadAllText($global:Paths.Heartbeat).Trim()) } catch { return 0 }
+    if ($age -gt 180) { [int][Math]::Floor($age / 60) } else { 0 }
 }
 function Get-State {
     if ($global:PreviewFacts) { return ConvertTo-VeroTrayState $global:PreviewFacts }
@@ -773,7 +779,10 @@ function Show-Settings {
     $card = New-Card $pages[0] 20 0 480 300
     $work = New-Object System.Collections.ArrayList
     if ($global:Config) { foreach ($pr in $global:Config.Profiles) { [void]$work.Add(($pr | Select-Object *, @{ n = 'ImportFrom'; e = { $null } }, @{ n = 'ImportText'; e = { $null } })) } }
-    $state = @{ Default = $(if ($global:Config) { $global:Config.DefaultProfile } else { '' }); Use = $null }
+    # no "default" to choose: the profile selected in the tray menu is used (the guard keeps it across reboots). config.json's
+    # activeProfile is only the fallback when nothing is selected yet (first start, the selected profile removed): Save writes
+    # the profile in use there, or the first one when that was removed.
+    $state = @{ Active = $(if ($global:Config) { $global:Config.Profile } else { '' }) }
     $lb = New-Object System.Windows.Forms.ListBox; $lb.Location = (P 12 12); $lb.Size = (Z 284 276); $lb.BorderStyle = 'FixedSingle'
     $lb.BackColor = $global:Theme.Bg; $lb.ForeColor = $global:Theme.Text; $lb.Font = $FontUI; $lb.IntegralHeight = $false
     $lb.Add_HandleCreated({ [VeroNative]::DarkScroll($this.Handle, $global:Dark) })
@@ -783,7 +792,7 @@ function Show-Settings {
         foreach ($pr in $work) {
             $needs = Test-VeroNeedsPassword $pr
             $cred = (-not $needs) -or [bool](Get-VeroCredential -Config $pr)
-            $mark = if ($pr.Profile -eq $state.Default) { ' (default)' } else { '' }
+            $mark = if ($pr.Profile -eq $state.Active) { ' (active)' } else { '' }
             $where = if ($pr.Type -eq 'openvpn') { $(if ($pr.ImportFrom) { 'to import' } else { '.ovpn' }) } else { $pr.Server }
             $null = $where                                                  # the server is in Edit; the list line must fit
             [void]$lb.Items.Add(('{0}{1} - {2}{3}' -f $pr.Profile, $mark, (Get-VeroTypeLabel $pr.Type), $(if ($cred) { '' } else { '  [no password]' })))
@@ -793,8 +802,8 @@ function Show-Settings {
     & $fill
     $bImp = New-Button $card 'Import from Windows...' 308 12 160 $true; $bAdd = New-Button $card 'Add...' 308 52 160
     $bEdit = New-Button $card 'Edit...' 308 92 160; $bDel = New-Button $card 'Remove' 308 132 160
-    $bDef = New-Button $card 'Set as default' 308 172 160; $bPw = New-Button $card 'Set password...' 308 220 160
-    $bKey = New-Button $card 'Key passphrase...' 308 260 160
+    $bPw = New-Button $card 'Set password...' 308 180 160
+    $bKey = New-Button $card 'Key passphrase...' 308 220 160
     $bImp.Add_Click(({
         $have = @($work | ForEach-Object Profile)
         $v = Select-WindowsVpn $have
@@ -802,15 +811,14 @@ function Show-Settings {
         $e = ConvertTo-VeroRasEntry -Vpn $v -UserName (Get-VeroRasSavedUser -Name $v.Name -AllUsers $v.AllUsers)
         if ($e.Auth -and -not $e.Username) { $e = Edit-VpnProfile $e }            # the one thing Windows did not tell us
         if (-not $e) { return }
-        [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }
+        [void]$work.Add($e)
         Request-ProfilePassword $e                                              # now, not "later in Settings": it gets forgotten
         & $fill; $lb.SelectedIndex = $lb.Items.Count - 1
     }).GetNewClosure())
-    $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [VeroMsg]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); if (-not $state.Default) { $state.Default = $e.Profile }; Request-ProfilePassword $e; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
-    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Default -eq $work[$i].Profile) { $state.Default = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
+    $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [VeroMsg]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); Request-ProfilePassword $e; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
+    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Active -eq $work[$i].Profile) { $state.Active = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
     $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile
-        if ([VeroMsg]::Show("Remove '$gone' from VeroScudo?`r`n`r`nOnly VeroScudo forgets it - the VPN itself stays in Windows. You do not need to remove profiles to use another one: select it in the tray menu (VPN profile).", 'VeroScudo', 'YesNo', 'Question') -ne 'Yes') { return }; $work.RemoveAt($i); if ($state.Default -eq $gone) { $state.Default = $work[0].Profile }; & $fill }).GetNewClosure())
-    $bDef.Add_Click(({ $i = $lb.SelectedIndex; if ($i -ge 0) { $state.Default = $work[$i].Profile; $state.Use = $work[$i].Profile; & $fill } }).GetNewClosure())
+        if ([VeroMsg]::Show("Remove '$gone' from VeroScudo?`r`n`r`nOnly VeroScudo forgets it - the VPN itself stays in Windows. You do not need to remove profiles to use another one: select it in the tray menu (VPN profile).", 'VeroScudo', 'YesNo', 'Question') -ne 'Yes') { return }; $work.RemoveAt($i); & $fill }).GetNewClosure())
     $bPw.Add_Click(({
         $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = $work[$i]
         if (-not (Test-VeroNeedsPassword $e)) { [VeroMsg]::Show("'$($e.Profile)' needs no password here$(if ($e.Type -eq 'wireguard') { ' - the WireGuard app keeps its keys' }).", 'VeroScudo') | Out-Null; return }
@@ -839,7 +847,7 @@ function Show-Settings {
         $c
     }
     $chkStrict = & $addOpt 'Strict kill-switch (always on)' 'When the VPN drops, nothing leaves this PC until it is back or you turn the VPN off.' $true $true
-    $chkVm = & $addOpt 'Protect VMs and containers' 'WSL, Docker and Hyper-V VMs follow the kill-switch too. Off: VeroScudo leaves them alone.' ((-not $global:Config) -or [bool]$global:Config.Vm) $false
+    $chkVm = & $addOpt 'Protect VMs and containers' 'WSL, Docker and Hyper-V VMs follow the kill-switch too. Off: VeroScudo leaves them alone. Never covered: a VM in bridged mode (VirtualBox, VMware, an external Hyper-V switch) - it goes to the network directly, past VeroScudo.' ((-not $global:Config) -or [bool]$global:Config.Vm) $false
     $chkWifi = & $addOpt 'Keep Wi-Fi stable while reconnecting' 'Stops Windows from resetting the Wi-Fi adapter about 15 s after a redial, which would drop the new VPN connection. Recommended.' ((-not $global:Config) -or [bool]$global:Config.WifiRecoveryFix) $false
     $chkUpd = & $addOpt 'Check for updates when the tray starts' 'Asks GitHub for the latest version, never while blocked. Nothing is installed automatically.' ((-not $global:Config) -or [bool]$global:Config.UpdateCheck) $false
     $chkLoc = & $addOpt 'Show exit location' 'Shows the country and IP your traffic leaves from (asks ipinfo.io after each connect).' ([bool](Test-ExitEnabled)) $false
@@ -889,7 +897,7 @@ function Show-Settings {
         } catch { & $selectTab 2; [VeroMsg]::Show("Not saved (Connection): $($_.Exception.Message)", 'VeroScudo') | Out-Null; return }
         $json = [ordered]@{
             profiles = @($work | ForEach-Object { ConvertTo-VeroProfileObject $_ })
-            activeProfile = $state.Default
+            activeProfile = $(if (@($work | ForEach-Object Profile) -contains $state.Active) { $state.Active } else { $work[0].Profile })
             retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = [bool]$chkVm.Checked
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
             connectionCheck = ConvertTo-VeroCheckObject $check
@@ -897,21 +905,111 @@ function Show-Settings {
         $imports = @($work | Where-Object { $_.Type -eq 'openvpn' -and $_.ImportFrom } | ForEach-Object { [pscustomobject]@{ Profile = $_.Profile; Text = $_.ImportText } })
         try {
             Save-ConfigElevated $json $imports; $global:Config = Get-VeroConfig; Update-ProfileMenu; $f.Close()
-            # Save never moves you off a connection (seen live: an edit while the WireGuard app's tunnel ran switched to the
-            # default Windows VPN). A new default applies right away only when nothing is connected and VeroScudo is off;
-            # otherwise you stay where you are and switch in the tray menu when you want.
-            if ($state.Use -and $global:Config -and $global:Config.Profile -ne $state.Use) {
-                $busy = (Test-VeroArmed) -or (Test-VeroVpnConnected $global:Config.Profile -Type $global:Config.Type) -or
-                        (@(try { Get-VeroForeignVpn -Config $global:Config } catch { @() }).Count -gt 0)
-                if ($busy) { $notify.ShowBalloonTip(8000, 'VeroScudo', "'$($state.Use)' is the default from now on. You stay on '$($global:Config.Profile)' - switch in the tray menu (VPN profile) when you want.", [System.Windows.Forms.ToolTipIcon]::Info) }
-                else { Request-ProfileSwitch $state.Use }
-            }
         }
         catch { [VeroMsg]::Show("Not saved: $($_.Exception.Message)", 'VeroScudo') | Out-Null }
     }).GetNewClosure())
     $global:SettingsForm = $f
     $f.Show(); $f.Activate(); $bCancel.Focus() | Out-Null
     $f
+}
+
+# ---------------------------------------------------------------- statistics window: 7 days of VPN time and quality
+# One row per day, 24 h wide, one bar per 10 minutes on a shared time grid (a problem at the same hour every day lines up
+# in one column). Data: the guard's state\stats day files (67-Stats.ps1). Hover a bar for its time and numbers.
+$global:StatsForm = $null; $global:PreviewStats = $null
+function Get-StatsDays {
+    $now = Get-Date
+    foreach ($i in 0..6) {
+        $d = $now.Date.AddDays(-$i)
+        $mins = if ($global:PreviewStats) { $global:PreviewStats[$i] } else { Read-VeroStatsDay -Date $d }
+        $until = if ($i -eq 0) { $now.Hour * 60 + $now.Minute + 1 } else { 1440 }
+        $row = ConvertTo-VeroStatsDay -Minutes $mins -BucketMinutes 10 -UntilMinute $until
+        $name = if ($i -eq 0) { 'Today' } elseif ($i -eq 1) { 'Yesterday' } else { $d.ToString('dddd', [Globalization.CultureInfo]::InvariantCulture) }
+        [pscustomobject]@{ Label = '{0}, {1}' -f $name, $d.ToString('d MMM', [Globalization.CultureInfo]::InvariantCulture); Row = $row }
+    }
+}
+function Show-Stats {
+    if ($global:StatsForm -and -not $global:StatsForm.IsDisposed) { $global:StatsForm.Activate(); return }
+    $f = New-Form 'VeroScudo - Statistics' 640 650
+    New-Label $f 'Last 7 days' 20 16 300 30 $FontBig | Out-Null
+    New-Label $f 'One bar = 10 minutes. Hover a bar for its time and numbers.' 20 50 600 20 $FontSmall $global:Theme.Sub | Out-Null
+    $card = New-Card $f 20 80 600 438
+    # geometry in logical px; the strip is 144 bars x 4 px (3 px bar + 1 px gap) = 576 px
+    $g = @{ X = 12; Top = 30; RowH = 57; BarW = 4; StripH = 24; LabelH = 20 }
+    $chart = New-Object System.Windows.Forms.Panel; $chart.Location = (P 0 0); $chart.Size = (Z 600 438); $chart.BackColor = $global:Theme.Card
+    $card.Controls.Add($chart)
+    # double buffering: a repaint on every hover would flicker otherwise
+    $chart.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'NonPublic,Instance').SetValue($chart, $true, $null)
+    $global:StatsDaysNow = @(Get-StatsDays)
+    $fSmall = $FontSmall; $fUI = $FontUI                                   # local copies: the handlers below are closures
+    $colors = @{
+        good = [System.Drawing.Color]::FromArgb(48, 200, 79); up = [System.Drawing.Color]::FromArgb(48, 200, 79)
+        unstable = [System.Drawing.Color]::FromArgb(232, 163, 61); bad = [System.Drawing.Color]::FromArgb(154, 74, 42)   # amber, brown: one calm palette with the green
+        off = $(if ($global:Dark) { [System.Drawing.Color]::FromArgb(70, 70, 70) } else { [System.Drawing.Color]::FromArgb(205, 205, 205) })
+    }
+    $chart.Add_Paint(({ param($s, $e)
+        $gr = $e.Graphics; $k = $global:Scale
+        $sub = New-Object System.Drawing.SolidBrush($global:Theme.Sub); $txt = New-Object System.Drawing.SolidBrush($global:Theme.Text)
+        $grid = New-Object System.Drawing.Pen($global:Theme.Border); $grid.DashStyle = 'Dot'
+        # the time grid: every 3 hours, labels on top, lines through all rows
+        foreach ($h in 0..8) {
+            $x = ($g.X + $h * 18 * $g.BarW) * $k
+            $lab = '{0:00}' -f ($h * 3)
+            $w = $gr.MeasureString($lab, $fSmall).Width
+            $lx = [Math]::Min([Math]::Max($x - $w / 2, 0), $s.Width - $w)
+            $gr.DrawString($lab, $fSmall, $sub, $lx, 8 * $k)
+            $gr.DrawLine($grid, $x, ($g.Top - 4) * $k, $x, ($g.Top + 7 * $g.RowH - 8) * $k)
+        }
+        $i = 0
+        foreach ($day in $global:StatsDaysNow) {
+            $y = $g.Top + $i * $g.RowH
+            $gr.DrawString($day.Label, $fUI, $txt, ($g.X - 2) * $k, $y * $k)
+            $tot = Format-VeroStatsTotal -Day $day.Row
+            $tw = $gr.MeasureString($tot, $fSmall).Width
+            $gr.DrawString($tot, $fSmall, $sub, ($g.X + 144 * $g.BarW) * $k - $tw, ($y + 2) * $k)
+            $by = ($y + $g.LabelH + 2) * $k
+            foreach ($b in $day.Row.Bars) {
+                if ($b.State -eq 'future') { continue }
+                $bx = ($g.X + ($b.Start / 10) * $g.BarW) * $k
+                $br = New-Object System.Drawing.SolidBrush($colors[$b.State])
+                $gr.FillRectangle($br, [single]$bx, [single]$by, [single](($g.BarW - 1) * $k), [single]($g.StripH * $k))
+                $br.Dispose()
+            }
+            $i++
+        }
+        $sub.Dispose(); $txt.Dispose(); $grid.Dispose()
+    }).GetNewClosure())
+    $tip = New-Object System.Windows.Forms.ToolTip; $tip.InitialDelay = 100; $tip.ReshowDelay = 50
+    $chart.Add_MouseMove(({ param($s, $e)
+        $k = $global:Scale; $lx = $e.X / $k; $ly = $e.Y / $k
+        $row = [int][Math]::Floor(($ly - $g.Top) / $g.RowH); $inRow = ($ly - $g.Top) - $row * $g.RowH
+        $bar = [int][Math]::Floor(($lx - $g.X) / $g.BarW)
+        $text = ''
+        if ($row -ge 0 -and $row -lt 7 -and $bar -ge 0 -and $bar -lt 144 -and $inRow -ge $g.LabelH -and $inRow -le ($g.LabelH + 2 + $g.StripH)) {
+            $day = $global:StatsDaysNow[$row]
+            $text = "$($day.Label)  " + (Format-VeroStatsBar -Bar $day.Row.Bars[$bar])
+        }
+        if ($tip.GetToolTip($s) -ne $text) { $tip.SetToolTip($s, $text) }
+    }).GetNewClosure())
+    # legend
+    $ly = 528; $lx = 20
+    foreach ($it in @(@('good', 'Good (or VPN on, not rated)'), @('unstable', 'Unstable'), @('bad', 'Bad'), @('off', 'VPN off'))) {
+        $sw = New-Object System.Windows.Forms.Panel; $sw.Location = (P $lx ($ly + 4)); $sw.Size = (Z 12 12); $sw.BackColor = $colors[$it[0]]; $f.Controls.Add($sw)
+        $w = if ($it[0] -eq 'good') { 200 } else { 90 }
+        New-Label $f $it[1] ($lx + 18) $ly $w 20 $FontSmall $global:Theme.Sub | Out-Null
+        $lx += $w + 26
+    }
+    New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; without it, VPN time is green.' 20 552 600 40 $FontSmall $global:Theme.Sub | Out-Null
+    $bRef = New-Button $f 'Refresh' 400 598 100
+    $bRef.Add_Click(({ $global:StatsDaysNow = @(Get-StatsDays); $chart.Invalidate() }).GetNewClosure())
+    (New-Button $f 'Close' 510 598 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())
+    # a minute later the picture has moved on: refresh while open
+    $timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 60000
+    $timer.Add_Tick(({ $global:StatsDaysNow = @(Get-StatsDays); $chart.Invalidate() }).GetNewClosure())
+    $f.Add_FormClosed(({ $timer.Stop(); $timer.Dispose() }).GetNewClosure())
+    if (-not $global:PreviewDir) { $timer.Start() }
+    $global:StatsForm = $f
+    $f.Show(); $f.Activate(); $f
 }
 
 function Show-About {
@@ -1110,6 +1208,7 @@ function Update-ProfileMenu {
 $null = Add-MenuSeparator
 $null = Add-MenuItem 'Status'       'info' { Show-Status | Out-Null }  
 $null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }
+$null = Add-MenuItem 'Statistics'   'chart' { Show-Stats | Out-Null }
 $null = Add-MenuItem 'Settings'     'gear' { Show-Settings | Out-Null }
 $mAwake = Add-MenuItem 'Keep awake' 'awake' {
     $want = $mAwake.Checked; $on = [VeroKeepAwake]::Set($want); $mAwake.Checked = $on; Save-KeepAwake $on
@@ -1229,6 +1328,18 @@ if ($Preview) {
     $global:PreviewFacts = $null; $global:PreviewQuality = $null
     foreach ($ti in 0..2) { Invoke-Shot "settings-$(@('profiles', 'behaviour', 'connection')[$ti])" { $sf = Show-Settings; & $global:SettingsTab $ti; Save-FormShot $sf $global:ShotName; $global:SettingsForm = $null } }
     $global:PreviewCheck = $null
+    # statistics: a made-up week - a good day, a lunch-time problem every day, an evening without VPN, check off one day
+    $global:PreviewStats = @(foreach ($i in 0..6) {
+        $m = @{}
+        foreach ($t in (8 * 60)..(19 * 60 + 30)) {
+            if (($i -eq 4 -and $t -gt 15 * 60) -or ($i -eq 0 -and $t -gt ((Get-Date).Hour * 60 + (Get-Date).Minute))) { break }
+            $lost = if ($t -ge 12 * 60 + 40 -and $t -lt 13 * 60 + 20) { [int]($t % 3 -eq 0) } elseif ($i -eq 2 -and $t -ge 16 * 60 -and $t -lt 16 * 60 + 30) { 3 } else { [int](($t * 7 + $i) % 41 -eq 0) }
+            $m[$t] = if ($i -eq 5) { @{ Sent = 0; Lost = 0 } } else { @{ Sent = 3; Lost = [Math]::Min($lost, 3) } }
+        }
+        $m
+    })
+    Invoke-Shot 'stats' { $fm = Show-Stats; Save-FormShot $fm $global:ShotName; $global:StatsForm = $null }
+    $global:PreviewStats = $null
     Invoke-Shot 'about' { Save-FormShot (Show-About) $global:ShotName }
     foreach ($i in 0..2) { Invoke-Shot "editor-$(@('ras', 'openvpn', 'wireguard')[$i])" { $x = New-VpnProfileForm $null; $x.TypeBox.SelectedIndex = $i; $x.Form.Show(); Save-FormShot $x.Form $global:ShotName } }
     if ($global:Config) { Invoke-Shot 'editor-edit' { $x = New-VpnProfileForm @($global:Config.Profiles)[0]; $x.Form.Show(); Save-FormShot $x.Form $global:ShotName } }

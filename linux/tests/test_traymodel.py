@@ -23,7 +23,8 @@ def test_a_stopped_guard_is_attention_whatever_else():
 
 def test_another_tunnel_while_protected_is_a_note_not_a_loss_of_protection():
     v = tm.tray_state(Facts(name="W", armed=True, up=True, others=("tun1",)))
-    assert v.state == "protected" and "tun1" in v.text
+    assert v.state == "attention" and v.title == "Protected" and "tun1" in v.text   # amber icon, like Windows
+    assert v.armed and v.connected
 
 
 def test_menu_enabling_matches_windows():
@@ -115,3 +116,10 @@ def test_runner_reports_results(tmp_path):
             break
         time.sleep(0.05)
     assert res and res[0][0] == "x" and res[0][2] == 3 and "no" in res[0][4]
+
+
+def test_password_missing_and_rejected_like_windows():
+    v = tm.tray_state(Facts(name="W", armed=True, up=False, auth="missing"))
+    assert (v.state, v.title) == ("attention", "Password missing") and "'W'" in v.text
+    v = tm.tray_state(Facts(name="W", armed=True, up=False, auth="rejected"))
+    assert (v.state, v.title) == ("attention", "Password rejected") and "stays blocked" in v.text

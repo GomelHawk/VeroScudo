@@ -34,6 +34,59 @@ def test_pf_refuses_a_strange_interface(bad):
         pf.render_ruleset(CFG, [], bad, vm_allowed=False)
 
 
+def test_pf_vm_bridges_follow_the_kill_switch_when_protected():
+    """VM setting on: bridge100 is open both ways (VM <-> host: DHCP, DNS); its way out is judged on en0/utun like the
+    host's own traffic, so nothing marks VM packets for a free pass."""
+    for tun in ("ipsec0", None):
+        rs = pf.render_ruleset(CFG, ["203.0.113.5"], tun, vm_allowed=bool(tun), bridges=("bridge100",))
+        assert "pass quick on { bridge100 } all keep state (if-bound)" in rs.splitlines()
+        assert "tag" not in rs
+
+
+def test_pf_vms_free_tags_vm_traffic_and_passes_it_out():
+    rs = pf.render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, bridges=("bridge100", "vmnet8"), vms_free=True)
+    lines = rs.splitlines()
+    assert f"pass in quick on {{ bridge100 vmnet8 }} all tag {pf.VM_TAG} keep state (if-bound)" in lines
+    assert f"pass out quick tagged {pf.VM_TAG} keep state (if-bound)" in lines
+    assert lines.index(f"pass out quick tagged {pf.VM_TAG} keep state (if-bound)") < lines.index("block drop quick all")
+
+
+def test_pf_without_bridges_adds_no_vm_rule():
+    rs = pf.render_ruleset(CFG, [], None, vm_allowed=False, vms_free=True)
+    assert "bridge" not in rs and "tag" not in rs
+
+
+def test_pf_refuses_a_strange_bridge():
+    with pytest.raises(ValueError):
+        pf.render_ruleset(CFG, [], None, vm_allowed=False, bridges=("bridge100 all; pass",))
+
+
+IFCONFIG = """lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	inet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 3c:22:fb:00:00:01
+bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	Configuration:
+	member: en1 flags=3<LEARNING,DISCOVER>
+	member: en2 flags=3<LEARNING,DISCOVER>
+bridge100: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
+	inet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
+	member: vmenet0 flags=3<LEARNING,DISCOVER>
+bridge101: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
+	member: en0 flags=3<LEARNING,DISCOVER>
+	member: vmenet1 flags=3<LEARNING,DISCOVER>
+vmnet8: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	inet 172.16.10.1 netmask 0xffffff00
+utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+"""
+
+
+def test_scutil_vm_bridges_skip_bridges_with_a_physical_port():
+    """bridge0 (Thunderbolt Bridge) and bridge101 (a bridged-mode VM on en0) put frames on the wire past pf: never allowed."""
+    assert scutil.parse_bridges(IFCONFIG) == ["bridge100", "vmnet8"]
+    assert scutil.parse_bridges("") == []
+
+
 def test_scutil_status_and_interface(monkeypatch):
     out = "Connected\nExtended Status <dictionary> {\n  IPv4 : <dictionary> {\n    InterfaceName : ipsec0\n  }\n}\n"
     monkeypatch.setattr(scutil, "_status", lambda p: out)

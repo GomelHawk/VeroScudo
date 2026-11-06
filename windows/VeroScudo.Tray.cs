@@ -293,6 +293,7 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
                         var pt = new PointF(8 + (float)(r * Math.Cos(a)), 8 + (float)(r * Math.Sin(a))); if (i == 0) path.StartFigure(); path.AddLine(pt, pt); }
                     path.CloseFigure(); g.FillPath(br, path);
                     using (var hole = new SolidBrush(t.Card)) g.FillEllipse(hole, 5.6f, 5.6f, 4.8f, 4.8f); break; }
+                case "chart": g.DrawLine(pen, 2, 14, 14, 14); g.FillRectangle(br, 3, 9, 2.4f, 4); g.FillRectangle(br, 6.8f, 5, 2.4f, 8); g.FillRectangle(br, 10.6f, 2, 2.4f, 11); break;
                 case "redo": g.DrawArc(pen, 2.5f, 3, 11, 11, 30, 300); g.FillPolygon(br, new[] { new PointF(14.6f, 6.4f), new PointF(13.6f, 1.4f), new PointF(9.8f, 4.6f) }); break;
                 case "sync": g.DrawArc(pen, 2.5f, 2.5f, 11, 11, 200, 230); g.FillPolygon(br, new[] { new PointF(13.8f, 2.2f), new PointF(14.2f, 7.2f), new PointF(9.6f, 5.4f) }); break;
                 case "help": g.DrawEllipse(pen, 2, 2, 12, 12); g.DrawArc(pen, 5.6f, 4.6f, 4.8f, 4.4f, 200, 230); g.DrawLine(pen, 8, 8.6f, 8, 10f); g.FillEllipse(br, 7.1f, 11.2f, 1.8f, 1.8f); break;

@@ -25,6 +25,55 @@ All notable changes to VeroScudo are recorded here. The format follows
   alone" on Windows but "no network while on" on Linux, and Linux had a third value; `"auto"` is now read as on. Linux:
   the drop-down became the check box, and `false` no longer cuts containers and VMs off - turn a VM's network off inside
   the VM for that.
+- **macOS: the VM setting now works too** (alpha - not yet seen on a real Mac). pf passes the host side of NAT and
+  host-only VMs (vmnet `bridgeN`: Parallels, VMware Fusion, UTM; older `vmnetN`/`vnicN`) both ways, and a VM's way out
+  meets the same rules as the Mac's own traffic - the tunnel while it is up, nothing while it is down. Off: VM traffic is
+  tagged and passed. A bridge with a physical port (bridged-mode VM, Thunderbolt Bridge) is never opened. The check box
+  is now in the macOS Settings too, and `veroscudo setup` writes `"vm": true` on macOS as well.
+- **Bridged VMs are named as not covered** in the description under the check box on every platform (their frames
+  bypass the host firewall; switch them to NAT). Behaviour on macOS got the same labels and descriptions as Windows and Linux.
+
+### Linux and macOS trays catch up with Windows
+- **Show exit location** (Linux; macOS next): the status window shows where your traffic leaves the tunnel - country
+  code, country / city and IP - looked up only right after VeroScudo reaches Protected and on *Refresh* (ipinfo.io,
+  Cloudflare's trace page as the fallback; 6 s per request, given up after 20 s), so the request always goes through the
+  tunnel. Grey with its time while not protected or for another profile; in the Copy report as *Exit*. Settings >
+  Behaviour > *Show exit location* (on by default) is your own setting: saved at once, no password.
+- **Other VPNs**: a notice once per detection when another VPN connects while VeroScudo is on (not a VeroScudo profile /
+  another profile / a VPN app's own tunnel - each with what to do), and an *Other VPNs: ...* line in the status window.
+  **Turn VPN on asks first** when another VPN is connected: disconnect it and turn on (NetworkManager connections,
+  as you), turn on anyway (its traffic stays blocked) or cancel - the Windows question and buttons.
+- **Status window like the Windows one**: the title and the *Connection* line in the rating's colour (details as a
+  tooltip), *kill-switch ON* red while blocked, a **Last drop** line (the guard now records each drop and why:
+  connection lost, you disconnected, Reconnect, turned off, silent WireGuard), *Recent events* without dates and with a
+  **Clear** link (the log itself stays), and **Open log** next to Reconnect and Copy report (*Copied* after a click).
+- **Keep-awake badge** on the tray icon while Keep awake is on (the green ring of the Windows icon, drawn from the icon
+  itself); the tooltip says *keeping PC awake* like on Windows.
+- **No more "default profile"** (Windows, Linux, macOS): *Make default* / *Set as default* and the *(default)* tag are
+  gone from Settings, and `veroscudo default` from the CLI. The profile you select in the tray menu is what is used - the
+  guard keeps it across reboots - so a default only ever mattered on the first start or after removing the selected
+  profile, and it looked like a switch that it was not. `activeProfile` in config.json stays as that fallback (no
+  visible setting; existing configs keep working); removing the profile in use falls back to the first remaining one.
+- **Remove asks first** (Linux): *Remove 'X' from VeroScudo?* with the Windows wording.
+- Turned on outside the tray (`sudo veroscudo on`) now reads as *Connecting*, not *connection lost* - as on Windows.
+- **macOS menu-bar app (alpha) has all of the above too**: a live Status window (Option-click on the icon opens it),
+  exit location, other VPNs found by their VPN service (`scutil --nc`; *Disconnect ... and turn on* stops it), the
+  keep-awake badge and Remove as on Windows, and the Statistics window - with the Linux tray's texts.
+- **Another tunnel next to a protected one** shows the amber icon with the title *Protected* and a note (Linux, macOS) -
+  as on Windows, which already did.
+- **Password missing / rejected** (Linux; macOS once a real Mac shows what scutil reports): when NetworkManager says the
+  VPN failed for its password (no secrets, or the login was refused), the guard stops redialing so the server does not
+  lock the account - traffic stays blocked - and the tray shows *Password missing* / *Password rejected* with the
+  Windows wording. Turn on, Reconnect or a profile switch (after you stored the right password) resumes; so does any
+  successful connect.
+- **Windows gets "Guard not running"** (Linux had it): the watchdog writes a heartbeat on every pass; while VeroScudo is on
+  and it is older than 3 minutes, the tray says the guard has stopped and how to fix it.
+
+### Statistics (Windows, Linux, macOS)
+- **Tray menu > Statistics:** the last 7 days of VPN time and connection quality, one row per day on a 24-hour time grid,
+  one bar per 10 minutes (green good, amber unstable, brown bad, grey VPN off; hover for the numbers), with each day's
+  VPN time and the share of it that was good. Only VeroScudo's own VPN counts. With the connection check off, VPN time
+  shows green. Recorded by the guard per minute in `stats/<date>.jsonl` (kept 8 days).
 
 ### Connection check (Windows, Linux, macOS)
 - **Optional connection quality check** (Settings > *Connection*, off by default): while protected, the guard checks up to

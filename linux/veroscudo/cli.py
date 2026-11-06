@@ -1,9 +1,9 @@
 """veroscudo on|off|reconnect|status|profiles|use <profile>|import [<connection>...]|check|awake|setup [<connection>]|
-remove <profile>|default <profile>|set <key> <value>|arm|disarm|watchdog|daemon|boot
+remove <profile>|set <key> <value>|arm|disarm|watchdog|daemon|boot
 
 reconnect = your Reconnect: block, take the VPN down, redial; traffic again once the tunnel is back.
 setup     = the installer's first profile: pick one of the system's VPN connections (or type it in) - root.
-remove / default / set = the tray's Settings (asked for with an administrator's password) - root."""
+remove / set = the tray's Settings (asked for with an administrator's password) - root."""
 from __future__ import annotations
 
 import argparse
@@ -139,7 +139,7 @@ def manual_profile() -> str:
         port = _ask("VPN port", "4500" if mac else "443")
         proto = _ask("VPN transport, tcp or udp", "udp" if mac else "tcp").lower()
         cfg = {"profiles": [{"profile": name, "server": server, "port": int(port) if port.isdigit() else -1, "protocol": proto}],
-               "activeProfile": name, "retrySeconds": 10, "vm": not mac, "updateCheck": True, "lanAllow": []}
+               "activeProfile": name, "retrySeconds": 10, "vm": True, "updateCheck": True, "lanAllow": []}
         text = json.dumps(cfg, indent=2) + "\n"
         try:
             Config.from_text(text)
@@ -175,7 +175,7 @@ def do_setup(names: list[str]) -> int:
     if p.exists() and not names:
         try:
             cfg = Config.load(p)
-            print(f"config.json kept: profiles {', '.join(cfg.names)} (default '{cfg.default_profile}')")
+            print(f"config.json kept: profiles {', '.join(cfg.names)}")
             return 0
         except (OSError, ValueError, KeyError, TypeError) as e:
             print(f"config.json is not valid ({e}) - it is replaced by the profile you pick now")
@@ -220,9 +220,13 @@ def _names(raw: str) -> set[str]:
 
 
 def do_edit(action: str, args: list[str], store: StateStore) -> int:
-    """remove <profile> | default <profile> | set <key> <value> - the tray's Settings, run as root."""
+    """remove <profile> | set <key> <value> - the tray's Settings, run as root."""
     if os.geteuid() != 0:
         print(f"veroscudo: {action} changes /etc/veroscudo/config.json - run it with sudo", file=sys.stderr)
+        return 2
+    if action not in ("remove", "set"):
+        print(f"veroscudo: unknown change '{action}' (there is no default profile: select one in the tray menu or with "
+              "`veroscudo use <profile>`)", file=sys.stderr)
         return 2
     want = 2 if action == "set" else 1
     if len(args) != want:
@@ -235,8 +239,9 @@ def do_edit(action: str, args: list[str], store: StateStore) -> int:
             if store.armed and store.active == args[0]:
                 raise ValueError(f"'{args[0]}' is in use - switch to another profile or turn the VPN off first")
             text = importer.remove_profile(raw, args[0])
-        elif action == "default":
-            text = importer.set_default(raw, args[0])
+            if (store.active or Config.from_text(raw).profile) == args[0]:
+                # the profile in use goes: the first remaining one is used from now on (as the Windows tray's Save)
+                text = importer.set_default(text, Config.from_text(text).names[0])
         else:
             text = importer.set_option(raw, args[0], args[1])
     except (OSError, ValueError) as e:
@@ -244,7 +249,7 @@ def do_edit(action: str, args: list[str], store: StateStore) -> int:
         return 2
     importer.write_config(text, p)
     if action == "remove" and store.active == args[0]:
-        store.active_file.unlink(missing_ok=True)       # the selection falls back to the default
+        store.active_file.unlink(missing_ok=True)       # the selection falls back to the first remaining profile
     print(f"config.json updated ({action} {' '.join(args)}); the guard picks it up within 15 s")
     return 0
 
@@ -252,8 +257,8 @@ def do_edit(action: str, args: list[str], store: StateStore) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="veroscudo", description="VeroScudo - Master the switch.")
     ap.add_argument("action", choices=["on", "off", "status", "profiles", "use", "import", "check", "awake", "setup", "remove",
-                                       "default", "set", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
-    ap.add_argument("name", nargs="*", help="profile name (use, remove, default), connection names (import, setup), "
+                                       "set", "arm", "disarm", "reconnect", "watchdog", "daemon", "boot"])
+    ap.add_argument("name", nargs="*", help="profile name (use, remove), connection names (import, setup), "
                                             "key and value (set)")
     ap.add_argument("--version", action="version", version=f"veroscudo {__version__}")
     a = ap.parse_args(argv)
@@ -264,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         return do_import(a.name)
     if a.action == "setup":
         return do_setup(a.name)
-    if a.action in ("remove", "default", "set"):
+    if a.action in ("remove", "set"):
         return do_edit(a.action, a.name, StateStore())
     a.name = a.name[0] if a.name else None
     store = StateStore()

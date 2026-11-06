@@ -202,7 +202,12 @@ Their packets are forwarded, not sent by the host, so they need their own contro
   them blocked until the tunnel is proven again - a different tunnel than before the drop (a redial), or traffic through
   it (a DNS question to the tunnel's DNS server, else TCP to 1.1.1.1:443, sent from the tunnel's own address).
 - **Linux**: the `forward` chain - accept only out through the tunnel, only while it is up.
-- **macOS**: not filtered (alpha).
+- **macOS** (pf, alpha - not yet run on a real Mac): the host side of NAT/host-only VMs (`bridgeN` of the vmnet
+  framework - Parallels, VMware Fusion, UTM, Lima; older `vmnetN`/`vnicN`) is passed both ways, so VM <-> host (DHCP,
+  DNS) always works; a VM's way out is judged where it leaves the Mac - the tunnel while up, nothing while down.
+  `vm: false`: packets that came in from a VM are tagged and passed out anywhere. A bridge with a physical member
+  (`enN`: a bridged-mode VM, the Thunderbolt Bridge) is never touched. Docker Desktop sends container traffic from its
+  own host process, so it always follows the kill-switch like any app.
 
 The toggle happens on the terminated/connected events, so VM traffic has a ~1–2 s exposure
 window after a drop; the host itself has none. Bridged VMs (Hyper-V external switch, VirtualBox/
@@ -226,8 +231,11 @@ addresses.
 
 ## Profiles
 
-Several VPN profiles can be configured; one is **active**. The runtime selection is kept in the
-admin-owned state folder (`active-profile`), the configured default in `activeProfile`.
+Several VPN profiles can be configured; one is **active**: the one selected in the tray menu (or with `veroscudo use`),
+kept by the guard in the admin-owned state folder (`active-profile`) across reboots, Off/On and tray restarts. There is
+no "default profile" to choose: `activeProfile` in config.json is only the fallback while nothing is selected - the
+first start after installing (the installer writes the first profile) and after the selected profile is removed (the
+first remaining one is then used and written there).
 
 Switching (tray menu *VPN profile*, `veroscudo use <name>`):
 
@@ -297,7 +305,7 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
 - `vm`: one on/off setting, the same on every platform (Settings > Behaviour, *Protect VMs and containers with the
   kill-switch*). `true` (default): their traffic follows the kill-switch - through the tunnel while it is up, nothing while
   blocked (Windows: WSL via the Hyper-V firewall, Default Switch VMs via port ACLs; Linux: the `forward` chain;
-  macOS: not filtered yet). `false`: VeroScudo leaves them alone - no rule for them at all; to cut a VM off, turn its
+  macOS: pf, see *VMs and containers*). `false`: VeroScudo leaves them alone - no rule for them at all; to cut a VM off, turn its
   network off inside the VM. `"auto"` (before 1.4) is read as `true`. Linux: bridge-local traffic (host <-> container,
   container <-> container, a VM's DHCP/DNS from dnsmasq) is allowed in every state - it never leaves the machine. Bridges
   with a physical NIC enslaved are never allowed.
@@ -337,6 +345,24 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
   row): the quality while protected, otherwise what the guard does about the connection (*redialing*, *connecting*,
   *switching*, *reconnecting*). `status` prints it too. A change of the rating is logged.
 - **Never acts on its own:** a bad rating changes nothing - no reconnect, no other profile. The user decides.
+
+## Statistics
+
+Tray menu > *Statistics* (the same window on Windows, Linux and macOS): the last 7 days, one row per day, 24 hours wide
+on a shared time grid, one bar per 10 minutes - a problem that comes back at the same hour every day lines up in one
+column. Hover a bar for its time and numbers. Each row also shows the day's VPN time and *good %* (the share of that time
+in good bars).
+
+- **What is recorded:** the guard's watchdog (Windows `Core/67-Stats.ps1`; Linux/macOS the daemon) notes, minute by
+  minute, whether **VeroScudo's** VPN was up (armed and the active profile connected - another VPN app does not count),
+  and, when the connection check is on, how many of its checks were sent and lost in that minute.
+- **Format:** one file per local day, `stats/yyyy-MM-dd.jsonl` in the state folder (Windows `state\stats`, Linux
+  `/var/lib/veroscudo/stats`, macOS the same; readable by the user, kept across reboots), one line per minute with the
+  VPN up: `{"m":605}` (up, check off) or `{"m":605,"sent":3,"lost":1}`. A minute without a line: VPN off, the computer
+  asleep or VeroScudo off. Raw counts rather than colours, so the window can group them into any bar width and a later
+  change of the thresholds re-rates old days. About 30 KB a day; files older than 8 days are removed by the guard.
+- **Colours:** the connection check's thresholds per bar - green under 10 % lost, amber 10-50 %, brown over 50 %; grey =
+  VPN off. With the check off there is nothing to rate: VPN time is green.
 
 ## Tray app
 

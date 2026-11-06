@@ -43,6 +43,12 @@ Describe 'ConvertTo-VeroTrayState: the tray state, title and text' {
         $v = ConvertTo-VeroTrayState (Facts @{ Otp = 'push 42' })
         $v.Title | Should -Be 'Code needed'; $v.Text | Should -Match 'push 42'; $v.State | Should -Be 'attention'
     }
+    It 'guard not running: the watchdog has been silent for minutes (like Linux), after a blocked helper' {
+        $v = ConvertTo-VeroTrayState (Facts @{ GuardStale = 5 })
+        $v.State | Should -Be 'attention'; $v.Title | Should -Be 'Guard not running'; $v.Text | Should -Match 'not run for 5 min'
+        (ConvertTo-VeroTrayState (Facts @{ GuardStale = 5; NativeNext = '12:30' })).Title | Should -Be 'Helper blocked'
+        (ConvertTo-VeroTrayState (Facts @{ GuardStale = 0 })).Title | Should -Be 'Protected'
+    }
     It 'a conflict while protected is a note, not a loss of protection' {
         $v = ConvertTo-VeroTrayState (Facts @{ Conflicts = @('another VPN is up', 'a filter layer') })
         $v.State | Should -Be 'attention'; $v.Title | Should -Be 'Protected'; $v.Text | Should -Match '^Note: another VPN is up \(\+1 more'

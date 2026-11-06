@@ -307,3 +307,49 @@ def test_the_guard_records_what_the_kill_switch_lets_through(env):
     assert g.store.allowed_tunnel("Work") == "tun0" and g.store.allowed_tunnel("Backup") is None
     g.disarm()
     assert g.store.allowed_tunnel("Work") is None
+
+
+def test_drops_are_recorded_with_their_reason_for_the_tray(env):
+    g, _, _ = env
+    g.arm()
+    g.reconnect_async = lambda: None                      # no background thread outliving the fakes
+    g.on_event_down("Work", user_requested=False)                  # a real drop: redials
+    assert g.store.last_drop()["why"] == "connection lost" and g.store.last_drop()["profile"] == "Work"
+    g.renew_marker.write_text(str(__import__("time").time()))      # your Reconnect took it down itself
+    g.on_event_down("Work", user_requested=True)
+    assert g.store.last_drop()["why"] == "Reconnect"
+    g.on_event_down("Work", user_requested=True)                   # you hung up
+    assert g.store.last_drop()["why"] == "you disconnected"
+
+
+# ---------------------------------------------------------------- password refused: redial paused (Windows: Set-VeroAuthFailed)
+def test_refused_password_pauses_redial_until_you_ask_again(env):
+    g, calls, _ = env
+    g.arm()
+    g.on_event_auth("Work", "rejected")
+    assert g.store.auth_failed("Work") == "rejected"
+    g.reconnect()                                          # the watchdog / a drop: no dial, the account is not locked
+    assert calls["up"] == [] and g.store.armed
+    g.renew()                                              # your Reconnect after storing the right password
+    assert calls["up"] == ["Work"] and g.store.auth_failed("Work") is None
+
+
+def test_password_event_for_another_profile_or_while_off_is_ignored(env):
+    g, _, _ = env
+    g.on_event_auth("Work", "missing")                     # off
+    g.arm()
+    g.on_event_auth("Backup", "missing")                   # not the active profile
+    assert g.store.auth_failed("Work") is None
+
+
+def test_connected_clears_the_password_pause(env):
+    g, _, _ = env
+    g.arm()
+    g.on_event_auth("Work", "missing")
+    g.on_event_up("Work")
+    assert g.store.auth_failed("Work") is None
+
+
+def test_nm_reason_names():
+    assert nm.auth_reason("NO_SECRETS") == "missing" and nm.auth_reason("LOGIN_FAILED") == "rejected"
+    assert nm.auth_reason("USER_DISCONNECTED") is None

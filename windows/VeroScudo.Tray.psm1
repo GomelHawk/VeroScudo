@@ -13,6 +13,7 @@ function ConvertTo-VeroTrayState($f) {
     $name = $f.Name; $why = $null; $head = 'Attention'
     $conf = @($f.Conflicts | Where-Object { $_ })
     if ($f.NativeNext) { $head = 'Helper blocked'; $why = "Windows blocked VeroScudo's helper (Smart App Control). The kill-switch stays on, but self-repair and automatic redial are paused - next try at $($f.NativeNext)." }
+    elseif ($f.ContainsKey('GuardStale') -and $f.GuardStale) { $head = 'Guard not running'; $why = "VeroScudo's watchdog has not run for $($f.GuardStale) min, so nothing watches the VPN or redials it. It normally restarts within a minute; if this stays, run Install.ps1 again." }
     elseif (-not $f.Cred) { $head = 'Password missing'; $why = "No password stored for '$name', so VeroScudo cannot redial it by itself. Add it in Settings: select the profile, Set password..." }
     elseif ($f.AuthBlocked) { $head = 'Password rejected'; $why = "The VPN server rejected the password for '$name'. Store the right one in Settings, then Reconnect - traffic stays blocked meanwhile." }
     elseif ($f.Otp) { $head = 'Code needed'; $why = "'$name' asks for a one-time code: $($f.Otp)" }

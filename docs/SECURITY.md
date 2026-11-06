@@ -52,8 +52,10 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   showed only the VPN's exit address (VMs blocked 1 s after the Wi-Fi went away). Remaining: a VPN that dies while the
   network itself stays up is caught when Windows reports it (~1-2 s, like WSL). Not tested: Windows Sandbox and Docker in
   Hyper-V mode. Without the Hyper-V PowerShell tools VeroScudo logs that these VMs are not covered.
-- **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/libvirt bridged mode) and **Docker
-  macvlan/ipvlan networks** - their frames bypass the host's IP stack. NAT-mode VMs, WSL and bridge-mode Docker/libvirt
+- **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/Parallels/libvirt bridged mode) and **Docker
+  macvlan/ipvlan networks** - their frames bypass the host's IP stack, so no host firewall can see them. VeroScudo does
+  not detect or report them (Settings > Behaviour says so under *Protect VMs and containers*); to protect such a VM,
+  switch it to NAT mode or run a VPN with a kill-switch inside it. NAT-mode VMs, WSL and bridge-mode Docker/libvirt
   are covered (with a ~1–2 s window after a drop).
 - **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, Hiddify, NordVPN ...) -
   VeroScudo cannot tell their "you hung up" from a failure. It detects their tunnels and filter layers and shows
@@ -62,7 +64,7 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   until the handshake age shows the drop; then the redial starts.
 - **DNS while blocked** is the one documented side channel: the OS resolver may query the
   network's DNS servers (needed to find the VPN server).
-- **macOS (alpha)**: the boot window before launchd starts the daemon; no VM filtering.
+- **macOS (alpha)**: the boot window before launchd starts the daemon; VM filtering (pf, vmnet bridges) written but not yet seen on a real Mac.
 
 ## Hardening checklist for changes
 

@@ -72,6 +72,8 @@ class StateStore:
         self.fw_lock_file = self.home / "firewall.lock"     # see firewall_lock()
         self.applied_file = self.home / "applied.json"     # what the kill-switch allows right now (read by tray and status)
         self.down_file = self.home / "last-down"            # when the kill-switch last went to "blocked" (connection check)
+        self.drop_file = self.home / "last-drop.json"       # the newest tunnel drop and why (the tray's "Last drop")
+        self.auth_file = self.state / "auth-failed.json"    # the password was missing/rejected: redial paused (survives a reboot)
         self._fw_rlock = threading.RLock()
         self._fw_depth = 0
         self._fw_fd: int | None = None
@@ -119,6 +121,56 @@ class StateStore:
             return float(self.down_file.read_text())
         except (OSError, ValueError):
             return 0.0
+
+    def record_drop(self, profile: str, why: str, now: float | None = None) -> None:
+        """The tunnel of `profile` went down (a drop, your disconnect, a Reconnect) - the status window's "Last drop", like
+        the Windows tray's RAS event. Only the newest one is kept; it is gone after a reboot (it lives in /run)."""
+        try:
+            tmp = self.drop_file.with_suffix(".new")
+            tmp.write_text(json.dumps({"profile": profile, "why": why, "time": time.time() if now is None else now}))
+            os.chmod(tmp, 0o644)                                 # the tray (the user) reads it
+            os.replace(tmp, self.drop_file)
+        except OSError:
+            pass
+
+    def set_auth_failed(self, profile: str, which: str) -> bool:
+        """The VPN refused `profile` for its password: which = 'missing' (none stored) or 'rejected'. The guard stops
+        redialing it so the account is not locked on the server (Windows: Set-VeroAuthFailed). True = newly set."""
+        first = self.auth_failed(profile) is None
+        try:
+            tmp = self.auth_file.with_suffix(".new")
+            tmp.write_text(json.dumps({"profile": profile, "which": which, "time": time.time()}))
+            os.chmod(tmp, 0o644)                                 # the tray (the user) reads it
+            os.replace(tmp, self.auth_file)
+        except OSError:
+            pass
+        return first
+
+    def auth_failed(self, profile: str) -> str | None:
+        """'missing' / 'rejected' while `profile`'s password problem stands, else None."""
+        try:
+            j = json.loads(self.auth_file.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(j, dict) or j.get("profile") != profile or j.get("which") not in ("missing", "rejected"):
+            return None
+        return j["which"]
+
+    def clear_auth_failed(self) -> bool:
+        """You stored a password and asked again (On, Reconnect, a profile switch) or the VPN connected: redial resumes."""
+        try:
+            self.auth_file.unlink()
+            return True
+        except OSError:
+            return False
+
+    def last_drop(self) -> dict | None:
+        """{profile, why, time} of the newest drop, or None."""
+        try:
+            j = json.loads(self.drop_file.read_text())
+        except (OSError, ValueError):
+            return None
+        return j if isinstance(j, dict) else None
 
     def allowed_tunnel(self, profile: str) -> str | None:
         """The tunnel the kill-switch lets through for `profile`, as the guard last applied it - None while blocked. This,

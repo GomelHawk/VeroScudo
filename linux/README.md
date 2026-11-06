@@ -24,10 +24,18 @@ boot), the tray autostart `/etc/xdg/autostart/veroscudo-tray.desktop` and the me
 `/etc/sudoers.d/veroscudo` (your user: `on`, `off`, `reconnect`, `use` without a password - nothing else), the config
 `/etc/veroscudo/config.json`, the log `/var/log/veroscudo.log` (readable by the `adm` group).
 
-**Tray** (top bar): Turn VPN on / off, Reconnect VPN, VPN profile ▸, Status… (middle-click too), Open log, Settings…
-(import a NetworkManager connection, remove, default, update check, containers/VMs - each change asks for your password),
-Keep awake, Check for updates, About (Uninstall…), Exit tray. Exit leaves the guard running; *VeroScudo* in the
-applications menu brings the icon back.
+**Tray** (top bar): Turn VPN on / off, Reconnect VPN, VPN profile ▸, Status… (middle-click too), Open log, Statistics… (7
+days of VPN time and connection quality, one bar per 10 minutes on a 24-hour grid), Settings…
+(import a NetworkManager connection, remove, default, update check, containers/VMs - each change asks for your password;
+*Show exit location* is your own setting and is saved at once), Keep awake (a green ring on the icon while on), Check for
+updates, About (Uninstall…), Exit tray. Exit leaves the guard running; *VeroScudo* in the applications menu brings the
+icon back.
+
+**Status window**: the state, where your traffic leaves the tunnel (country, city, IP - asked from ipinfo.io right after
+each connect and on *Refresh*, never while not protected), the profile, firewall, last drop and connection rating, other
+VPNs next to VeroScudo, the recent events (*Clear* empties the view, not the log), Turn VPN on/off, Reconnect, Open log
+and Copy report. **Another VPN**: Turn VPN on asks first when another VPN is connected (disconnect it and turn on, turn on
+anyway, or cancel); a VPN that connects while VeroScudo is on is announced once - its traffic is blocked.
 
 **Uninstall**: tray > About > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (`--purge`: also config, state, log).
 
@@ -44,8 +52,8 @@ veroscudo check              # does each profile's protocol/port match its Netwo
 veroscudo import             # list NetworkManager's VPN connections and what would be imported
 sudo veroscudo import "Office L2TP"   # add it with its type's server ports (L2TP, PPTP, SSTP, OpenVPN, WireGuard, OpenConnect;
                                       # strongSwan/libreswan IPsec is refused: no tunnel interface to allow)
-sudo veroscudo remove|default <profile>       # what Settings does
-sudo veroscudo set updateCheck true|false     # also: vm auto|true|false
+sudo veroscudo remove <profile>               # what Settings does
+sudo veroscudo set updateCheck true|false     # also: vm true|false
 veroscudo awake              # keep the system from sleeping until Ctrl-C (the tray has a Keep awake toggle too)
 ```
 

@@ -15,6 +15,7 @@ from .firewall import IFNAME, DnsPolicy, split_families
 
 ANCHOR = "com.apple/250.VeroScudo"
 TOKEN = Path("/var/run/veroscudo-pf.token")
+VM_TAG = "VEROSCUDO_VM"
 
 # the one rule every VeroScudo anchor ends with; is_active() looks for it
 _FINAL = "block drop quick all"
@@ -29,8 +30,16 @@ _BASE = [
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
                    dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False) -> str:
+    """`bridges` (scutil.vm_bridges: the host side of NAT/host-only VMs, e.g. bridge100) are passed in every state, both
+    ways: VM <-> host (DHCP and DNS from the vmnet service) stays on this machine. With the VM setting on, a VM's way out is
+    then judged like the host's own traffic on the interface it leaves by - the tunnel while it is up, nothing else while it
+    is down (the forwarded packet meets the rules below on en0/utun). `vms_free` (Settings: VMs not protected): packets that
+    came in from a VM are tagged and passed out on any interface - VeroScudo leaves them alone."""
     if tun_iface is not None and not IFNAME.match(tun_iface):
         raise ValueError(f"refusing interface name {tun_iface!r}")
+    for b in bridges:
+        if not IFNAME.match(b):
+            raise ValueError(f"refusing bridge name {b!r}")
     dns = dns or DnsPolicy()
     srv4, srv6 = split_families(server_ips)
     lan4, lan6 = split_families(cfg.lan_allow)
@@ -41,6 +50,14 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     if tun_iface:
         lines.append(f"pass quick on {tun_iface} all {kb}")
     lines += _BASE[1:]
+    if bridges:
+        bl = "{ " + " ".join(bridges) + " }"
+        if vms_free:
+            lines.append(f"pass in quick on {bl} all tag {VM_TAG} {kb}")
+            lines.append(f"pass out quick on {bl} all {kb}")
+            lines.append(f"pass out quick tagged {VM_TAG} {kb}")        # a VM's traffic, whichever way it leaves
+        else:
+            lines.append(f"pass quick on {bl} all {kb}")
     if not tun_iface:
         # macOS resolves through mDNSResponder; DNS only while blocked (redial), only to the network's resolvers
         # none known: no DNS permit at all (never "port 53 to anywhere")

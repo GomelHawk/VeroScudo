@@ -2090,3 +2090,69 @@ Describe 'Connection check: a real TCP check against a local listener' {
         @(Invoke-VeroProbeRound -Targets @([pscustomobject]@{ Host = '127.0.0.1'; Method = 'tcp'; Port = $port }))[0].Ok | Should -BeFalse
     }
 }
+
+Describe 'Statistics: minutes, day rows, bar texts' {
+    BeforeEach {
+        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
+        $script:statsDir = Join-Path (Get-VeroPath).State 'stats'
+        if (Test-Path $script:statsDir) { Remove-TestFile @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object FullName) }
+    }
+    It 'writes one line per minute with the VPN up, with the checks of that minute' {
+        $t = [datetime]'2026-11-07 10:05:10'
+        Update-VeroStats -Up $true -Now $t
+        Add-VeroStatsChecks -Sent 3 -Lost 1 -Now $t.AddSeconds(20)
+        Update-VeroStats -Up $false -Now $t.AddSeconds(60)                  # 10:06, VPN down: 10:05 is written, 10:06 is not
+        Update-VeroStats -Up $false -Now $t.AddSeconds(120)
+        $lines = @(Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl'))
+        $lines | Should -Be @('{"m":605,"sent":3,"lost":1}')
+    }
+    It 'writes an up minute without checks as up only, and the last minute when the watchdog stops' {
+        $t = [datetime]'2026-11-07 23:59:30'
+        Update-VeroStats -Up $true -Now $t
+        Save-VeroStatsMinute
+        Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl') | Should -Be '{"m":1439}'
+    }
+    It 'reads a day: adds up repeated minutes, skips broken lines, never more lost than sent' {
+        $d = ConvertFrom-VeroStatsText -Text "{`"m`":605,`"sent`":3,`"lost`":1}`n{`"m`":605,`"sent`":2,`"lost`":0}`ngarbage`n{`"m`":606}`n{`"m`":1500}`n{`"m`":7,`"sent`":1,`"lost`":9}`n"
+        $d.Keys.Count | Should -Be 3
+        $d[605].Sent | Should -Be 5; $d[605].Lost | Should -Be 1
+        $d[606].Sent | Should -Be 0
+        $d[7].Lost | Should -Be 1
+    }
+    It 'rates each bar with the connection check thresholds; unrated VPN time counts as good' {
+        $m = @{}
+        foreach ($i in 0..9) { $m[$i] = @{ Sent = 6; Lost = 0 } }             # 00:00-00:10 good
+        foreach ($i in 10..19) { $m[$i] = @{ Sent = 6; Lost = 2 } }           # 00:10-00:20 33 % lost: unstable
+        foreach ($i in 20..29) { $m[$i] = @{ Sent = 6; Lost = 4 } }           # 00:20-00:30 67 %: bad
+        foreach ($i in 30..34) { $m[$i] = @{ Sent = 0; Lost = 0 } }           # 00:30-00:40 VPN on 5 min, check off
+        $day = ConvertTo-VeroStatsDay -Minutes $m -BucketMinutes 10
+        $day.Bars.Count | Should -Be 144
+        @($day.Bars[0..4] | ForEach-Object State) | Should -Be @('good', 'unstable', 'bad', 'up', 'off')
+        $day.VpnMinutes | Should -Be 35
+        $day.GoodPct | Should -Be 43                                          # (10 + 5) of 35 minutes
+        Get-VeroStatsState -UpMinutes 10 -Sent 10 -Lost 1 | Should -Be 'unstable'   # exactly 10 %: not good, like the check
+    }
+    It 'marks the rest of today as future and a day without VPN as no VPN' {
+        $day = ConvertTo-VeroStatsDay -Minutes @{} -UntilMinute 600
+        $day.Bars[59].State | Should -Be 'off'
+        $day.Bars[60].State | Should -Be 'future'
+        $day.GoodPct | Should -BeNullOrEmpty
+        Format-VeroStatsTotal -Day $day | Should -Be 'no VPN'
+    }
+    It 'says what a bar and a day were' {
+        $bar = [pscustomobject]@{ Start = 860; State = 'unstable'; UpMinutes = 10; Sent = 60; Lost = 11 }
+        Format-VeroStatsBar -Bar $bar | Should -Be ("14:20-14:30  unstable {0} 18 % lost (11 of 60 checks), VPN on 10 of 10 min" -f [char]0x2013)
+        Format-VeroStatsBar -Bar ([pscustomobject]@{ Start = 0; State = 'off'; UpMinutes = 0; Sent = 0; Lost = 0 }) | Should -Be '00:00-00:10  VPN off'
+        Format-VeroStatsTotal -Day ([pscustomobject]@{ VpnMinutes = 580; GoodPct = 87 }) | Should -Be ("VPN 9 h 40 min {0} good 87 %" -f [char]0x00B7)
+    }
+    It 'removes only its own day files older than the kept days' {
+        New-Item -ItemType Directory -Path $script:statsDir -Force | Out-Null
+        foreach ($n in '2026-10-30.jsonl', '2026-10-31.jsonl', '2026-11-07.jsonl', 'notes.jsonl', 'keep.txt') { Set-Content -LiteralPath (Join-Path $script:statsDir $n) -Value '' }
+        Remove-VeroOldStats -Now ([datetime]'2026-11-07 12:00')
+        @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object Name | Sort-Object) | Should -Be @('2026-10-31.jsonl', '2026-11-07.jsonl', 'keep.txt', 'notes.jsonl')
+    }
+    It 'the watchdog counts only the own VPN as up' {
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        InModuleScope VeroScudo.Core { Test-VeroStatsUp } | Should -BeFalse
+    }
+}
