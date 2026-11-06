@@ -12,6 +12,7 @@ function Get-VeroFilterSpec {
         [string[]]$ServerIps = @(),
         [uint64]$TunnelLuid = 0,
         [uint64]$WslLuid = 0,
+        [uint64]$SwitchLuid = 0,               # the Hyper-V Default Switch's host adapter (its VMs' DHCP and DNS), 0 = none
         [string[]]$DnsServers = @(),
         [string]$TunnelType = 'Automatic',
         [string]$Svchost = $script:Svchost,
@@ -39,6 +40,10 @@ function Get-VeroFilterSpec {
     foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'loopback' $l $true $permit).Loopback() }
     if ($TunnelLuid) { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'VPN tunnel' $l $true $permit).Interface($TunnelLuid) } }
     if ($WslLuid)    { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'WSL switch' $l $true $permit).Interface($WslLuid) } }
+    # Hyper-V Default Switch: Windows itself is its VMs' DHCP server and DNS proxy (ICS). An internal switch - this adapter
+    # never reaches a network outside this PC. VMs protected: only while the tunnel is up (the DNS proxy then resolves through
+    # the tunnel; while blocked the VMs get nothing). Not protected (vm=false): always - VeroScudo leaves them alone.
+    if ($SwitchLuid -and ($TunnelLuid -or -not $Config.Vm)) { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'Default Switch (VM DHCP/DNS)' $l $true $permit).Interface($SwitchLuid) } }
 
     # the VPN server: only the protocol/ports of the profile's tunnel type; TCP/UDP only from svchost (SstpSvc, IKEEXT, RasMan)
     if ($PermitKind -eq 'endpoints') { $ServerIps = @() }                   # reserve types: their own endpoints below
@@ -162,6 +167,13 @@ function Get-VeroRasTunnelLuid {
     [VeroScudo.Iface]::LuidFromIndex([uint32]$if.ifIndex)
 }
 
+function Get-VeroSwitchLuid {
+    <# The Hyper-V Default Switch's host adapter, 0 when there is none (Hyper-V off) or it is down. By its fixed name: the
+       same in every Windows language. #>
+    $a = Get-VeroNic | Where-Object { $_.Name -eq 'vEthernet (Default Switch)' -and [string]$_.OperationalStatus -eq 'Up' } | Select-Object -First 1
+    if ($a) { Import-VeroNative; [VeroScudo.Iface]::LuidFromGuid([guid]$a.Id) } else { [uint64]0 }
+}
+
 function Get-VeroWslLuid {
     $a = Get-VeroNic | Where-Object { $_.Name -like 'vEthernet (WSL*' -and [string]$_.OperationalStatus -eq 'Up' } | Select-Object -First 1
     if ($a) { Import-VeroNative; [VeroScudo.Iface]::LuidFromGuid([guid]$a.Id) } else { [uint64]0 }
@@ -262,7 +274,7 @@ function Test-VeroHyperVFirewall {
 }
 function Test-VeroVmWanted {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config)
-    if ($Config.Vm -eq $false) { return $false }
+    if (-not $Config.Vm) { return $false }                                  # Settings: VMs and containers not protected
     if (-not (Test-VeroHyperVFirewall)) {
         # no Hyper-V firewall (older Windows): WSL/VM traffic cannot be controlled - say so instead of silently skipping it
         if (Get-VeroNic | Where-Object { $_.Name -like 'vEthernet*' -and [string]$_.OperationalStatus -eq 'Up' }) {
@@ -270,8 +282,7 @@ function Test-VeroVmWanted {
         }
         return $false
     }
-    if ($Config.Vm -eq 'auto') { return [bool](Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue | Where-Object VMCreatorId -eq $script:WslCreator) }
-    return [bool]$Config.Vm
+    [bool](Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue | Where-Object VMCreatorId -eq $script:WslCreator)   # WSL is there
 }
 $script:VmWarned = $false
 
@@ -445,14 +456,15 @@ function Get-VeroSyncPlan {
     $ips = @($srv.Ips); $eps = $srv.Endpoints; $app = [string]$srv.App
     $vm = Test-VeroVmWanted $Config
     $wsl = if ($vm) { Get-VeroWslLuid } else { [uint64]0 }
+    $sw = Get-VeroSwitchLuid                                               # Get-VeroFilterSpec decides when it is open
     $dns = @(if (-not $tun) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
     $rasType = & $th.RasTunnelType $Config.Profile                        # the built-in client's protocol (its ports); 'Automatic' for the others
     $crl = [bool](& $th.CrlWindow)
     $noDns = (-not $tun) -and @($dns).Count -eq 0
     if ($noDns -and -not $script:NoDnsLogged) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
     $script:NoDnsLogged = $noDns                                              # once per change, not every 15 s
-    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind
-    @{ Type = $type; Handler = $th; ForceDown = [bool]$ForceDown; Tunnel = $tun; Ips = @($ips); Dns = @($dns); Vm = $vm; Wsl = $wsl; Specs = @($specs) }
+    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -SwitchLuid $sw -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind
+    @{ Type = $type; Handler = $th; ForceDown = [bool]$ForceDown; Tunnel = $tun; Ips = @($ips); Dns = @($dns); Vm = $vm; Wsl = $wsl; Switch = $sw; Specs = @($specs) }
 }
 
 function Sync-VeroKillSwitchCore {
@@ -463,7 +475,7 @@ function Sync-VeroKillSwitchCore {
     $p = Get-VeroPath
     $plan = Get-VeroSyncPlan -Config $Config -Action $Action -ForceDown:$ForceDown
     $type = $plan.Type; $th = $plan.Handler; $ForceDown = $plan.ForceDown; $tun = $plan.Tunnel
-    $ips = @($plan.Ips); $dns = @($plan.Dns); $vm = $plan.Vm; $wsl = $plan.Wsl; $specs = @($plan.Specs)
+    $ips = @($plan.Ips); $dns = @($plan.Dns); $vm = $plan.Vm; $wsl = $plan.Wsl; $sw = $plan.Switch; $specs = @($plan.Specs)
     $fp = Get-VeroSpecFingerprint $specs
     $prev = Get-VeroAppliedState
     $present = Get-VeroWfpCount
@@ -477,13 +489,33 @@ function Sync-VeroKillSwitchCore {
             Enable-VeroEmergencyBlock -Action $Action
             throw
         }
-        @{ Fingerprint = $fp; Count = $specs.Count; Profile = $Config.Profile; Type = $type; Tunnel = [string]$tun; Wsl = [string]$wsl; Servers = $ips; Time = (Get-Date).ToString('o') } |
+        # a blocked set (a drop, a Reconnect, a switch): the connection check starts its rating over from here, however short
+        # the gap - its own rounds every 10-100 s can miss a Reconnect of a few seconds (seen live: "unstable" 1 s after one)
+        if (-not $tun) { try { [IO.File]::WriteAllText($p.LastDown, [string](Get-VeroEpoch)) } catch { Write-Verbose 'last-down not written' } }
+        @{ Fingerprint = $fp; Count = $specs.Count; Profile = $Config.Profile; Type = $type; Tunnel = [string]$tun; Wsl = [string]$wsl; Switch = [string]$sw; Servers = $ips; Time = (Get-Date).ToString('o') } |
             ConvertTo-Json | Set-Content $p.WfpState
         $why = if (-not $prev) { 'armed' } elseif ($present -ne $prev.Count) { "filters missing ($present of $($prev.Count))" } else { 'changed' }
-        Write-VeroLog ("kill-switch {0}: {1} filters, profile '{2}' ({7}), tunnel {3}, wsl {4}, server {5}, dns {6}" -f $why, $specs.Count, $Config.Profile,
+        Write-VeroLog ("kill-switch {0}: {1} filters, profile '{2}' ({7}), tunnel {3}, wsl {4}, default switch {8}, server {5}, dns {6}" -f $why, $specs.Count, $Config.Profile,
             $(if ($tun) { 'up' } elseif ($ForceDown) { 'BLOCKED for reconnect' } else { 'DOWN' }), $(if ($wsl) { 'bound' } else { '-' }), ($ips -join ','),
-            $(if ($tun) { 'tunnel only' } else { ($dns -join ',') }), (Get-VeroTypeLabel $type)) $Action
+            $(if ($tun) { 'tunnel only' } else { ($dns -join ',') }), (Get-VeroTypeLabel $type), $(if ($sw -and ($tun -or -not $Config.Vm)) { 'open' } else { '-' })) $Action   # as the filters have it
         if (Test-Path $p.Emergency) { Remove-VeroLegacyFirewall -Action $Action }
+    }
+    # Hyper-V Default Switch VMs: their traffic never reaches these filters (62-HyperVAcl.ps1). Protected: port ACLs while
+    # the tunnel is down - right after the filters, before the slower WSL step (seen live: they came 3 s after the filters).
+    # On every change; while blocked also every sync, so a VM created meanwhile is covered. Not protected: none at all.
+    # fix B: after Windows logged "network disconnected" (NetDown task) they stay blocked until the tunnel is proven: a new
+    # tunnel (a redial), or traffic through it - RAS reports a dead tunnel only seconds after the network is back
+    $suspect = Get-VeroNetSuspect
+    if ($suspect -and $tun) {
+        if ([string]$tun -ne [string]$suspect.Tunnel -or (Test-VeroTunnelCarries -Luid $tun)) {
+            Clear-VeroNetSuspect; $suspect = $null
+            Write-VeroLog 'the tunnel carries traffic again - Hyper-V VMs through the tunnel' $Action
+        }
+    }
+    $aclWant = ((-not [bool]$tun) -or [bool]$suspect) -and [bool]$Config.Vm
+    if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {
+        try { $null = Set-VeroVmBlock -Block $aclWant -Action $Action; $script:AclBlocked = $aclWant }
+        catch { Write-VeroLog "ERROR: Hyper-V port ACLs: $($_.Exception.Message)" $Action }
     }
     # the Hyper-V firewall queries are slow (~0.4 s): only when something changed, else every ~5 min as a tamper check
     $script:SyncCount++
@@ -501,6 +533,7 @@ function Sync-VeroKillSwitchCore {
 $script:SyncCount = 0
 $script:NoDnsLogged = $false
 $script:VmAllowed = $null
+$script:AclBlocked = $null
 
 function Disable-VeroKillSwitch {
     [CmdletBinding()] param([string]$Action = 'core')
@@ -512,13 +545,16 @@ function Disable-VeroKillSwitch {
         Remove-Item (Get-VeroPath).WfpState -Force -ErrorAction SilentlyContinue
         Remove-VeroLegacyFirewall -Action $a
         Restore-VeroVmAccess
+        Clear-VeroNetSuspect
+        try { $null = Set-VeroVmBlock -Block $false -Action $a } catch { Write-VeroLog "ERROR: Hyper-V port ACLs not removed: $($_.Exception.Message) - will retry" $a }
+        $script:AclBlocked = $null
         Write-VeroLog 'kill-switch OFF (filters removed)' $a
     } -Arguments @($Action)
 }
 
 function Test-VeroKillSwitchPresent {
     # anything VeroScudo changed and has not yet undone, incl. a WSL setting whose restore failed (retried by the watchdog)
-    ((Get-VeroWfpCount) -gt 0) -or (Test-Path (Get-VeroPath).Emergency) -or (Test-Path (Get-VeroPath).VmBackup) -or
+    ((Get-VeroWfpCount) -gt 0) -or (Test-Path (Get-VeroPath).Emergency) -or (Test-Path (Get-VeroPath).VmBackup) -or (Test-Path (Get-VeroPath).VmAcl) -or
         [bool](Get-NetFirewallRule -Group $script:LegacyGroup -ErrorAction SilentlyContinue)
 }
 

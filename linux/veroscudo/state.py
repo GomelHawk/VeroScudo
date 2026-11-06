@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
@@ -70,6 +71,7 @@ class StateStore:
         self.server_ip = self.state / "server.ip"           # 1.0 single-profile cache, read as a fallback
         self.fw_lock_file = self.home / "firewall.lock"     # see firewall_lock()
         self.applied_file = self.home / "applied.json"     # what the kill-switch allows right now (read by tray and status)
+        self.down_file = self.home / "last-down"            # when the kill-switch last went to "blocked" (connection check)
         self._fw_rlock = threading.RLock()
         self._fw_depth = 0
         self._fw_fd: int | None = None
@@ -103,6 +105,20 @@ class StateStore:
             os.replace(tmp, self.applied_file)
         except OSError:
             pass
+
+    def mark_down(self, now: float | None = None) -> None:
+        """The kill-switch was just applied without a tunnel (a drop, a Reconnect, a switch): the connection check starts
+        its rating over from here, however short the gap was - its own rounds can miss a Reconnect of a few seconds."""
+        try:
+            self.down_file.write_text(repr(time.time() if now is None else now))
+        except OSError:
+            pass
+
+    def last_down(self) -> float:
+        try:
+            return float(self.down_file.read_text())
+        except (OSError, ValueError):
+            return 0.0
 
     def allowed_tunnel(self, profile: str) -> str | None:
         """The tunnel the kill-switch lets through for `profile`, as the guard last applied it - None while blocked. This,

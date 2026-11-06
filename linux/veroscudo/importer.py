@@ -80,7 +80,7 @@ def set_default(raw: str, name: str) -> str:
 
 # the settings the tray may change, and the values each accepts (the CLI's `set`, run as root)
 OPTIONS = {"updateCheck": {"true": True, "false": False},
-           "vm": {"auto": "auto", "true": True, "false": False}}
+           "vm": {"true": True, "false": False, "auto": True}}       # "auto": the pre-1.4 value, = true
 
 
 def set_option(raw: str, key: str, value: str) -> str:

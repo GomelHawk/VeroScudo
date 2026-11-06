@@ -189,6 +189,18 @@ Their packets are forwarded, not sent by the host, so they need their own contro
 
 - **Windows (WSL)**: the Hyper-V firewall - the WSL VM's default outbound is set to Block while
   armed (restored on disarm), and an allow rule is enabled only while the tunnel is up.
+- **Windows (Hyper-V Default Switch)**: Windows itself is its VMs' DHCP server and DNS proxy, on the host adapter
+  `vEthernet (Default Switch)`. That adapter is allowed by interface only while the tunnel is up (the DNS proxy then
+  resolves through the tunnel); while blocked the VMs get nothing from Windows. `vm: false`: always open (left alone).
+  The VMs' own internet traffic is translated inside the Hyper-V switch, below WFP (WFP's forwarding layers do not see
+  it - live test 2026-11-06), so it is stopped there: while armed and the tunnel is down, every VM on the Default Switch
+  gets Hyper-V port ACLs (outbound deny all; allow the switch's subnet, broadcast, IPv6 link-local/multicast), applied
+  right after the WFP set and removed when the tunnel is back. VeroScudo records the rules it added
+  (`state\vm-acl.json`) and removes exactly those. A dead VPN is reported late (RAS: seen ~4 s after the Wi-Fi came
+  back), so the network itself is watched too: Windows logs "network disconnected" (NetworkProfile 10001) at once, the
+  `\VeroScudo\NetDown` task blocks the VMs right then and records it (`state\net-suspect.json`), and every sync keeps
+  them blocked until the tunnel is proven again - a different tunnel than before the drop (a redial), or traffic through
+  it (a DNS question to the tunnel's DNS server, else TCP to 1.1.1.1:443, sent from the tunnel's own address).
 - **Linux**: the `forward` chain - accept only out through the tunnel, only while it is up.
 - **macOS**: not filtered (alpha).
 
@@ -257,7 +269,7 @@ non-admin process can plant in `HKCU\Environment` must not redirect an elevated 
   ],
   "activeProfile":   "Work",
   "retrySeconds":    10,
-  "vm":              "auto",
+  "vm":              true,
   "wifiRecoveryFix": true,
   "updateCheck":     true,
   "lanAllow":        [],
@@ -282,9 +294,13 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
   kernel data channel. `wireguard` needs `server` + `port` (its endpoint) and no username.
 - `protocol` (Linux/macOS): `tcp` or `udp` - the VPN control channel. On Windows it follows the profile's tunnel type.
 - `serverIps`: pin the server addresses (nothing is resolved for that profile).
-- `vm`: `"auto"` (detect WSL / Docker / libvirt / host-only bridges), `true`, `false`. Linux: containers and VMs go out
-  through the tunnel only; bridge-local traffic (host <-> container, container <-> container, a VM's DHCP/DNS from
-  dnsmasq) is allowed in every state - it never leaves the machine. Bridges with a physical NIC enslaved are never allowed.
+- `vm`: one on/off setting, the same on every platform (Settings > Behaviour, *Protect VMs and containers with the
+  kill-switch*). `true` (default): their traffic follows the kill-switch - through the tunnel while it is up, nothing while
+  blocked (Windows: WSL via the Hyper-V firewall, Default Switch VMs via port ACLs; Linux: the `forward` chain;
+  macOS: not filtered yet). `false`: VeroScudo leaves them alone - no rule for them at all; to cut a VM off, turn its
+  network off inside the VM. `"auto"` (before 1.4) is read as `true`. Linux: bridge-local traffic (host <-> container,
+  container <-> container, a VM's DHCP/DNS from dnsmasq) is allowed in every state - it never leaves the machine. Bridges
+  with a physical NIC enslaved are never allowed.
 - `wifiRecoveryFix` (Windows only): sets `HKLM\SOFTWARE\Microsoft\WcmSvc\EnableBadStateTracking=0`.
   Without it Windows resets the Wi-Fi adapter ~15 s after a tunnel is dialed under the
   kill-switch (WLAN AutoConfig event 4003) and kills the fresh tunnel. Reverted on uninstall.
@@ -312,7 +328,8 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
   answered checks.
 - **The first rating waits one full period:** *checking* until `windowMinutes` (at least 3 rounds) have passed since the
   rating started. It starts over on every connect, every profile switch and every change of the check settings (interval,
-  period, addresses) - a connection that has just come up is often shaky for a moment, and an early *bad* or *good* would
+  period, addresses) - a connect is noticed by the guard recording each moment the kill-switch blocks (`last-down`), so a
+  Reconnect between two rounds counts too - a connection that has just come up is often shaky for a moment, and an early *bad* or *good* would
   not be one to trust.
 - **Where it shows:** the guard writes `quality.json` (Windows `state\`, Linux `/run/veroscudo/`, macOS
   `/var/run/veroscudo/`; readable by the user); the tray reads it. Tooltip: *VeroScudo - Protected, connection good*;

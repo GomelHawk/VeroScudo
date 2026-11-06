@@ -41,6 +41,7 @@ function Get-VeroStatus {
         Server     = Get-VeroStatusServer -Config $Config -Applied $applied
         Emergency  = Test-Path $p.Emergency
         Vm         = if (-not $r) { 'not managed' } elseif ([string]$r.Enabled -eq 'True') { 'allowed' } else { 'blocked' }
+        HyperVVms  = $(if (Test-Path $p.NetSuspect) { 'blocked: the network dropped, waiting for the tunnel to work again' } elseif (Test-Path $p.VmAcl) { $j = Get-Content $p.VmAcl -Raw | ConvertFrom-Json; 'blocked by port ACLs (' + ((@($j | ForEach-Object { $_ }) | ForEach-Object VMName | Select-Object -Unique) -join ', ') + ')' } else { '-' })
         Reconnect  = Test-VeroLockAlive
         Log        = $p.Log
     }
@@ -195,7 +196,7 @@ function Invoke-VeroActionStatus {
 
 function Invoke-VeroAction {
     [CmdletBinding()] param(
-        [Parameter(Mandatory)][ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'reconnect', 'watchdog', 'check', 'switch', 'status', 'openvpn')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'netdown', 'reconnect', 'watchdog', 'check', 'switch', 'status', 'openvpn')][string]$Action,
         $Config,
         [string]$VpnProfile
     )
@@ -208,6 +209,7 @@ function Invoke-VeroAction {
         { $_ -in 'on', 'on-disconnect', 'on-force' } { Invoke-VeroActionOn -Config $Config -Action $Action }
         'off'       { Invoke-VeroActionOff -Config $Config -Action $Action }
         'on-event'  { Invoke-VeroActionOnEvent -Config $Config -Action $Action }
+        'netdown'   { Invoke-VeroActionNetDown -Config $Config -Action $Action }
         'reconnect' {
             # the user's Reconnect: block, hang up, redial; normal traffic again only once the new tunnel is up
             if (-not (Test-VeroArmed)) { Write-VeroLog 'Reconnect: the VPN is off - use Turn on' $Action; return }

@@ -44,10 +44,14 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   your account can do the same. VeroScudo is not anti-malware.
 - **Administrators / root** can remove any filter.
 - **Traffic inside the tunnel** - that is the VPN's job.
-- **Hyper-V NAT VMs other than WSL on Windows** (Default Switch VMs, Windows Sandbox, Docker in Hyper-V mode) - their
-  forwarded packets do not pass the ALE layers VeroScudo filters; only WSL is covered (Hyper-V firewall). Where that
-  firewall is missing, VeroScudo now logs that VM traffic is not covered. An IPFORWARD-layer block is planned but needs a
-  live test first.
+- **Hyper-V Default Switch VMs - covered, with a short window when only the VPN dies.** Windows translates their
+  traffic inside the Hyper-V switch, below WFP (WFP's forwarding layers never see it), so VeroScudo stops it there with
+  Hyper-V port ACLs while the tunnel is down, and blocks them as soon as Windows logs "network disconnected" until the
+  tunnel is proven again (docs/ARCHITECTURE.md, *VMs and containers*). Live test 2026-11-06: before the fix a Default
+  Switch VM left through the ISP for 2-7 s per Reconnect or Wi-Fi drop; after it, two Reconnects and a 30 s Wi-Fi outage
+  showed only the VPN's exit address (VMs blocked 1 s after the Wi-Fi went away). Remaining: a VPN that dies while the
+  network itself stays up is caught when Windows reports it (~1-2 s, like WSL). Not tested: Windows Sandbox and Docker in
+  Hyper-V mode. Without the Hyper-V PowerShell tools VeroScudo logs that these VMs are not covered.
 - **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/libvirt bridged mode) and **Docker
   macvlan/ipvlan networks** - their frames bypass the host's IP stack. NAT-mode VMs, WSL and bridge-mode Docker/libvirt
   are covered (with a ~1–2 s window after a drop).

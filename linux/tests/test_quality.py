@@ -121,7 +121,8 @@ def test_only_the_window_counts():
 
 
 def test_the_window_holds_at_least_three_rounds():
-    assert quality.window_seconds(CheckConfig(True, 100, 1)) > 300
+    assert quality.window_seconds(CheckConfig(True, 100, 1)) == 300
+    assert quality.window_seconds(CheckConfig(True, 20, 1)) == 60          # 20 s / 1 min: rounds at 0, 20, 40, 60 s
     assert quality.window_seconds(CheckConfig(True, 10, 2)) == 120
 
 
@@ -281,3 +282,38 @@ def test_tooltip_and_menu_head_carry_the_rating_only_while_protected():
 def test_connection_row(facts, text):
     assert tm.connection_text(facts, view(facts)) == text
     assert ("Connection", text) in tm.status_rows(facts, view(facts), False, None)
+
+
+def test_a_reconnect_between_two_rounds_starts_the_rating_over(tmp_path):
+    """Seen live: "unstable" one second after a Reconnect - the tunnel was down for ~6 s between two 10 s rounds, so no
+    round saw it, and the old period went on with the check that failed during the Reconnect."""
+    m = quality.Monitor(tmp_path / "quality.json")
+    c = CheckConfig(True, 10, 1)
+    for i in range(7):
+        q = m.add_round(c, "Work", [(True, 20)], now=1000.0 + i * 10)
+    assert q.state == "good"
+    q = m.add_round(c, "Work", [(False, None)], now=1070.0, down_at=1065.0)      # blocked at 1065, back before 1070
+    assert q.state == "checking" and len(m.samples) == 1
+    q = m.add_round(c, "Work", [(True, 20)], now=1080.0, down_at=1065.0)         # the same down moment: no second restart
+    assert len(m.samples) == 2
+
+
+def test_the_guard_records_every_blocked_moment(guard, monkeypatch):
+    g, _, _ = guard
+    applied = []
+    monkeypatch.setattr(daemon.firewall, "apply", applied.append)
+    monkeypatch.setattr(daemon.firewall, "is_active", lambda: True)
+    monkeypatch.setattr(g, "desired_ruleset", lambda up: (f"ruleset up={up}", "tun0" if up else None))
+    g.store.set_armed(True)
+    g.enable_killswitch(False)                                                # blocked: a new connection will follow
+    first = g.store.last_down()
+    assert first > 0
+    g.enable_killswitch(True)                                                 # up: not a blocked moment
+    assert g.store.last_down() == first and len(applied) == 2
+
+
+def test_first_rating_exactly_after_the_set_period_with_20_s_rounds(tmp_path):
+    m = quality.Monitor(tmp_path / "quality.json")
+    c = CheckConfig(True, 20, 1)
+    states = [m.add_round(c, "Work", [(True, 20)], now=1000.0 + i * 20).state for i in range(4)]
+    assert states == ["checking", "checking", "checking", "good"]          # rounds at 0, 20, 40 s; rated at 60 s

@@ -753,12 +753,12 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
 $global:SettingsForm = $null
 function Show-Settings {
     if ($global:SettingsForm -and -not $global:SettingsForm.IsDisposed) { $global:SettingsForm.Activate(); return }
-    $f = New-Form 'VeroScudo settings' 520 556
+    $f = New-Form 'VeroScudo settings' 520 576
     # three tabs (the same on Linux and macOS): VPN profiles, Behaviour, Connection - drawn here in the theme's colours
     # (WinForms' TabControl paints its strip light grey on the dark theme)
     $pages = @(); $tabs = @()
     foreach ($i in 0..2) {
-        $pg = New-Object System.Windows.Forms.Panel; $pg.Location = (P 0 64); $pg.Size = (Z 520 380); $pg.BackColor = $global:Theme.Bg; $f.Controls.Add($pg); $pages += $pg
+        $pg = New-Object System.Windows.Forms.Panel; $pg.Location = (P 0 64); $pg.Size = (Z 520 400); $pg.BackColor = $global:Theme.Bg; $f.Controls.Add($pg); $pages += $pg
         $t = New-Label $f (@('VPN profiles', 'Behaviour', 'Connection')[$i]) (20 + $i * 130) 14 120 30 $FontBold; $t.TextAlign = 'MiddleCenter'; $t.Cursor = 'Hand'; $tabs += $t
     }
     $bar = New-Object System.Windows.Forms.Panel; $bar.Location = (P 20 44); $bar.Size = (Z 120 3); $bar.BackColor = $global:Theme.Accent; $f.Controls.Add($bar)
@@ -825,12 +825,26 @@ function Show-Settings {
         if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
                     New-Object System.Management.Automation.PSCredential('key', $sec) | Export-Clixml $cp.KeyPass }
     }).GetNewClosure())
-    $card2 = New-Card $pages[1] 20 0 480 180
-    $chkStrict = New-ThemedCheck; $chkStrict.Text = 'Strict kill-switch (always on - cannot be disabled)'; $chkStrict.Checked = $true; $chkStrict.AutoCheck = $false; $chkStrict.Location = (P 12 12); $chkStrict.Size = (Z 450 24); $chkStrict.ForeColor = $global:Theme.Sub; $card2.Controls.Add($chkStrict)
-    $chkVm = New-ThemedCheck; $chkVm.Text = 'Protect WSL / Docker Desktop traffic too'; $chkVm.Location = (P 12 42); $chkVm.Size = (Z 450 24); $chkVm.ForeColor = $global:Theme.Text; $chkVm.Checked = (-not $global:Config) -or ($global:Config.Vm -ne $false); $card2.Controls.Add($chkVm)
-    $chkWifi = New-ThemedCheck; $chkWifi.Text = 'Wi-Fi reset fix (recommended; applied by the installer)'; $chkWifi.Location = (P 12 72); $chkWifi.Size = (Z 450 24); $chkWifi.ForeColor = $global:Theme.Text; $chkWifi.Checked = (-not $global:Config) -or $global:Config.WifiRecoveryFix; $card2.Controls.Add($chkWifi)
-    $chkUpd = New-ThemedCheck; $chkUpd.Text = 'Check for a new release when the tray starts'; $chkUpd.Location = (P 12 102); $chkUpd.Size = (Z 450 24); $chkUpd.ForeColor = $global:Theme.Text; $chkUpd.Checked = (-not $global:Config) -or $global:Config.UpdateCheck; $card2.Controls.Add($chkUpd)
-    $chkLoc = New-ThemedCheck; $chkLoc.Text = 'Show exit location (asks ipinfo.io after each connect)'; $chkLoc.Location = (P 12 132); $chkLoc.Size = (Z 450 24); $chkLoc.ForeColor = $global:Theme.Text; $chkLoc.Checked = (Test-ExitEnabled); $card2.Controls.Add($chkLoc)
+    # each option: a short label and one grey line saying what it does (a long label was cut off; "Wi-Fi reset fix" said nothing)
+    $card2 = New-Card $pages[1] 20 0 480 330
+    $optY = 12
+    $addOpt = {
+        param([string]$label, [string]$about, [bool]$on, [bool]$locked)
+        $c = New-ThemedCheck; $c.Text = $label; $c.Checked = $on; $c.Location = (P 12 $optY); $c.Size = (Z 450 24)
+        $c.ForeColor = if ($locked) { $global:Theme.Sub } else { $global:Theme.Text }
+        if ($locked) { $c.AutoCheck = $false }
+        $card2.Controls.Add($c)
+        $d = New-WrapLabel $card2 $about 38 ($optY + 25) 424 $FontSmall $global:Theme.Sub
+        Set-Variable -Name optY -Scope 1 -Value ([int](Get-Logical $d.Bottom) + 9)
+        $c
+    }
+    $chkStrict = & $addOpt 'Strict kill-switch (always on)' 'When the VPN drops, nothing leaves this PC until it is back or you turn the VPN off.' $true $true
+    $chkVm = & $addOpt 'Protect VMs and containers' 'WSL, Docker and Hyper-V VMs follow the kill-switch too. Off: VeroScudo leaves them alone.' ((-not $global:Config) -or [bool]$global:Config.Vm) $false
+    $chkWifi = & $addOpt 'Keep Wi-Fi stable while reconnecting' 'Stops Windows from resetting the Wi-Fi adapter about 15 s after a redial, which would drop the new VPN connection. Recommended.' ((-not $global:Config) -or [bool]$global:Config.WifiRecoveryFix) $false
+    $chkUpd = & $addOpt 'Check for updates when the tray starts' 'Asks GitHub for the latest version, never while blocked. Nothing is installed automatically.' ((-not $global:Config) -or [bool]$global:Config.UpdateCheck) $false
+    $chkLoc = & $addOpt 'Show exit location' 'Shows the country and IP your traffic leaves from (asks ipinfo.io after each connect).' ([bool](Test-ExitEnabled)) $false
+    $null = $chkStrict
+    $card2.Height = [int](($optY + 3) * $global:Scale)                    # as tall as its options need
     $chkLoc.Add_CheckedChanged({ Set-TrayPref 'showExit' $this.Checked })   # your own setting: saved at once, no administrator prompt
     # Connection: optional quality checks through the tunnel while protected (66-Quality.ps1). The fields show only when ticked.
     $chk = if ($global:PreviewCheck) { $global:PreviewCheck } elseif ($global:Config) { $global:Config.ConnectionCheck } else { ConvertFrom-VeroCheckConfig $null }
@@ -862,9 +876,9 @@ function Show-Settings {
     New-WrapLabel $more 'The first rating comes one full period after each connect and each change here. The checks go through the VPN tunnel; an address in your local network is not reachable while the kill-switch is on (unless lanAllow lets it through).' 12 256 452 $FontSmall $global:Theme.Sub | Out-Null
     $more.Visible = $chkQ.Checked
     $chkQ.Add_CheckedChanged(({ $more.Visible = $chkQ.Checked }).GetNewClosure())
-    New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 452 480 36 $FontSmall $global:Theme.Sub | Out-Null
-    $bCancel = New-Button $f 'Close' 270 502 110
-    $bSave   = New-Button $f 'Save' 390 502 110 $true
+    New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 472 480 36 $FontSmall $global:Theme.Sub | Out-Null
+    $bCancel = New-Button $f 'Close' 270 522 110
+    $bSave   = New-Button $f 'Save' 390 522 110 $true
     $bCancel.Add_Click(({ $f.Close() }).GetNewClosure())
     $bSave.Add_Click(({
         if ($work.Count -eq 0) { [VeroMsg]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
@@ -876,7 +890,7 @@ function Show-Settings {
         $json = [ordered]@{
             profiles = @($work | ForEach-Object { ConvertTo-VeroProfileObject $_ })
             activeProfile = $state.Default
-            retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = $(if ($chkVm.Checked) { 'auto' } else { $false })
+            retrySeconds = $(if ($global:Config) { $global:Config.RetrySeconds } else { 10 }); vm = [bool]$chkVm.Checked
             wifiRecoveryFix = $chkWifi.Checked; updateCheck = $chkUpd.Checked; lanAllow = @($(if ($global:Config) { $global:Config.LanAllow } else { @() }))
             connectionCheck = ConvertTo-VeroCheckObject $check
         } | ConvertTo-Json -Depth 6

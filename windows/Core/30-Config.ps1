@@ -33,6 +33,8 @@ function Get-VeroPath {
         Emergency     = Join-Path $state 'emergency.flag'
         FwBackup      = Join-Path $state 'fw-original.json'
         VmBackup      = Join-Path $state 'vm-original.json'
+        VmAcl         = Join-Path $state 'vm-acl.json'                     # the Hyper-V port ACLs VeroScudo added (removed exactly these)
+        NetSuspect    = Join-Path $state 'net-suspect.json'                # the network dropped: VMs stay blocked until the tunnel is proven
         Log           = Join-Path $state 'veroscudo.log'
         Renew         = Join-Path $state 'renew.json'
         Conflicts     = Join-Path $state 'conflicts.json'
@@ -43,6 +45,7 @@ function Get-VeroPath {
         OnRefused     = Join-Path $state 'on-refused.json'                 # On refused: another VPN is connected (the tray says so)
         Foreign       = Join-Path $state 'foreign.json'                    # a VPN that is not a VeroScudo profile connected while armed
         Quality       = Join-Path $state 'quality.json'                    # connection check: the watchdog's last rating (read by the tray)
+        LastDown      = Join-Path $state 'last-down.txt'                   # when the kill-switch last went to "blocked" (the check starts over)
         OpenVpnDir    = Join-Path $home_ 'openvpn'
         UserDir       = $user
         SwitchRequest = Join-Path $user 'switch.request'
@@ -138,8 +141,11 @@ function Get-VeroConfig {
     $dupes = @($profiles | Group-Object Profile | Where-Object Count -gt 1)
     if ($dupes) { throw "config.json: profile '$($dupes[0].Name)' is listed twice" }
 
-    $vm = if ($null -ne $j.PSObject.Properties['vm']) { $j.vm } else { 'auto' }
-    if ($vm -is [string] -and $vm -ne 'auto') { throw "config.json: vm must be 'auto', true or false" }
+    # vm: protect VMs and containers with the kill-switch (true) or leave them alone (false). "auto" (before 1.4) = true.
+    $vm = if ($null -ne $j.PSObject.Properties['vm']) { $j.vm } else { $true }
+    if ($vm -is [string] -and $vm -ne 'auto') { throw 'config.json: vm must be true or false' }
+    if ($vm -isnot [string] -and $vm -isnot [bool]) { throw 'config.json: vm must be true or false' }
+    $vm = -not ($vm -is [bool] -and -not $vm)
     $retry = if ($j.PSObject.Properties['retrySeconds']) { [int]$j.retrySeconds } else { 10 }
     if ($retry -lt 3 -or $retry -gt 3600) { throw 'config.json: retrySeconds must be 3-3600' }
     $lan = @(if ($j.PSObject.Properties['lanAllow']) { $j.lanAllow } else { @() }) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }

@@ -35,14 +35,15 @@ MARK = "0x5653"          # conntrack mark of flows VeroScudo allowed outside the
 
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
-                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = ()) -> str:
+                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False) -> str:
     """Default-drop output, input and forward (containers/VMs) with the documented allow-list. DNS is allowed only while
     the tunnel is down: while it is up, name resolution goes through the tunnel like everything else (no DNS leak).
 
     `bridges` (nm.vm_bridges: host-only bridges such as docker0, virbr0) carry traffic that never leaves the machine -
     host <-> container, container <-> container on one bridge (br_netfilter sends those frames through the forward
     hook too), a VM's DHCP/DNS from libvirt's dnsmasq. That is allowed in every state, like loopback. Their way out
-    stays the tunnel only (`vm_allowed`, up only): a bridge is never forwarded to the physical card.
+    stays the tunnel only (`vm_allowed`, up only): a bridge is never forwarded to the physical card. `vms_free` (Settings:
+    VMs and containers not protected): VeroScudo leaves them alone - forwarding is not filtered at all.
 
     Every explicit permit outside the tunnel marks its connection; established traffic is accepted only with that mark. So a
     flow that used the tunnel (a connected UDP socket, a TCP socket bound to the tunnel address) cannot carry on over the
@@ -126,11 +127,11 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     lines += [
         "  }",
         "  chain forward {",
-        "    type filter hook forward priority 0; policy drop;",
+        f"    type filter hook forward priority 0; policy {'accept' if vms_free else 'drop'};",
     ]
-    if brset:
+    if brset and not vms_free:
         lines.append(f"    iifname {brset} oifname {brset} accept")       # container <-> container, bridge <-> bridge: on this machine
-    if tun_iface and vm_allowed:
+    if tun_iface and vm_allowed and not vms_free:
         lines.append(f'    oifname "{tun_iface}" accept')                 # containers/VMs out through the tunnel only
         lines.append(f'    iifname "{tun_iface}" ct state established,related accept')
     lines += ["  }", "}", ""]

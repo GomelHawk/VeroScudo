@@ -139,7 +139,7 @@ def manual_profile() -> str:
         port = _ask("VPN port", "4500" if mac else "443")
         proto = _ask("VPN transport, tcp or udp", "udp" if mac else "tcp").lower()
         cfg = {"profiles": [{"profile": name, "server": server, "port": int(port) if port.isdigit() else -1, "protocol": proto}],
-               "activeProfile": name, "retrySeconds": 10, "vm": False if mac else "auto", "updateCheck": True, "lanAllow": []}
+               "activeProfile": name, "retrySeconds": 10, "vm": not mac, "updateCheck": True, "lanAllow": []}
         text = json.dumps(cfg, indent=2) + "\n"
         try:
             Config.from_text(text)

@@ -101,7 +101,7 @@ if (-not (Test-Path $p.Config)) {
     if (-not $ProfileName) { $ProfileName = Read-Host 'Profile name' }
     $entry = New-ProfileEntry -Name $ProfileName -Kind $Type -Srv $Server -Prt $Port -User $UserName -Ovpn $OpenVpnConfig -WgConf $WireGuardConfig -KeepDco $Dco.IsPresent
     $json = [ordered]@{ profiles = @(ConvertTo-VeroProfileObject $entry); activeProfile = $ProfileName
-               retrySeconds = 10; vm = 'auto'; wifiRecoveryFix = $true; updateCheck = $true; lanAllow = @() } | ConvertTo-Json -Depth 5
+               retrySeconds = 10; vm = $true; wifiRecoveryFix = $true; updateCheck = $true; lanAllow = @() } | ConvertTo-Json -Depth 5
     Save-VeroConfig -Json $json | Out-Null
     Write-Host "config written: $($p.Config)"
 } else {
@@ -239,11 +239,15 @@ $connected  = EventTrigger "<QueryList><Query Id=`"0`" Path=`"System`"><Select P
 # IKEv2 connects log only RasClient 20225 (Application log): a second trigger; the guard checks the tunnel is really up
 $connectedIke = EventTrigger "<QueryList><Query Id=`"0`" Path=`"Application`"><Select Path=`"Application`">*[System[Provider[@Name='RasClient'] and EventID=20225]]</Select></Query></QueryList>"
 $terminated = EventTrigger "<QueryList><Query Id=`"0`" Path=`"Application`"><Select Path=`"Application`">*[System[Provider[@Name='RasClient'] and EventID=20226]]</Select></Query></QueryList>"
+# the network itself dropped (Wi-Fi off, cable out): logged at once - unlike a dead VPN, which RAS reports seconds after the
+# network is back. Blocks Hyper-V Default Switch VMs right away (Invoke-VeroActionNetDown).
+$netDown    = EventTrigger "<QueryList><Query Id=`"0`" Path=`"Microsoft-Windows-NetworkProfile/Operational`"><Select Path=`"Microsoft-Windows-NetworkProfile/Operational`">*[System[EventID=10001]]</Select></Query></QueryList>"
 $everyMin   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 $atLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
 $tasks = @(
     @{ Name = 'Connected';  Action = (Act 'arm');      Trigger = @($connected, $connectedIke);          P = $guard; Desc = 'VPN connected -> arm kill-switch' }
     @{ Name = 'Terminated'; Action = (Act 'on-event'); Trigger = @($terminated);         P = $guard; Desc = 'VPN terminated -> user hung up: disarm / else: reconnect' }
+    @{ Name = 'NetDown';    Action = (Act 'netdown');  Trigger = @($netDown);            P = $guard; Desc = 'network disconnected -> block Hyper-V VMs until the tunnel works again' }
     @{ Name = 'Watchdog';   Action = (Act 'watchdog'); Trigger = @($everyMin, $atLogon); P = $guard; Desc = 'keeps the kill-switch exact every 15 s; restarted within a minute if it stops' }
     @{ Name = 'On';         Action = (Act 'on');       Trigger = @();                    P = $guard; Desc = 'manual: arm + connect' }
     @{ Name = 'OnDisconnect'; Action = (Act 'on-disconnect'); Trigger = @();             P = $guard; Desc = 'tray: end the other connected VPNs (you chose it), then arm + connect' }

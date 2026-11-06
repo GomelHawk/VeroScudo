@@ -234,9 +234,13 @@ def test_bridges_are_in_the_ruleset_when_vm_is_wanted(env, monkeypatch):
     g.arm()
     assert 'iifname { "docker0" } oifname { "docker0" } accept' in calls["apply"][-1]
     assert 'oifname "tun0" accept' in calls["apply"][-1].split("chain forward")[1]
-    monkeypatch.setattr(g, "vm_wanted", lambda: False)                 # "vm": false - containers get nothing
+    monkeypatch.setattr(g, "vm_wanted", lambda: False)                 # "vm": false - VeroScudo leaves them alone
     g.enable_killswitch(True)
-    assert "docker0" not in calls["apply"][-1]
+    fwd = calls["apply"][-1].split("chain forward")[1]
+    assert "policy accept;" in fwd and 'oifname "tun0"' not in fwd       # forwarding not filtered at all
+    assert 'iifname { "docker0" } accept' in calls["apply"][-1]          # their DHCP/DNS from the host still works
+    g.enable_killswitch(False)                                          # blocked: still left alone
+    assert "policy accept;" in calls["apply"][-1].split("chain forward")[1]
 
 
 def test_watchdog_never_removes_a_table_another_process_just_armed(env, monkeypatch):

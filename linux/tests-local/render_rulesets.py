@@ -38,6 +38,10 @@ def main(kind: str, out: Path) -> int:
                                         bridges=("docker0", "virbr0") if kind == "nft" else ())
                 (out / f"{name}-{state}-{dname}.rules").write_text(rs)
                 n += 1
+            if kind == "nft":                          # VMs and containers not protected: forwarding left alone
+                rs = mod.render_ruleset(cfg, ["203.0.113.5"], t, vm_allowed=False, bridges=("docker0",), vms_free=True)
+                (out / f"{name}-{state}-vms-free.rules").write_text(rs)
+                n += 1
     (out / "lockdown.rules").write_text(mod.render_lockdown())
     print(f"{n + 1} rulesets in {out}")
     return 0

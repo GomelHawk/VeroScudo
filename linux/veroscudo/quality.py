@@ -168,7 +168,8 @@ class Quality:
 
 def window_seconds(cfg: CheckConfig) -> float:
     """The look-back: windowMinutes, but never fewer than MIN_CHECKS rounds (100 s rounds in a 1 minute window)."""
-    return max(cfg.window_minutes * 60.0, MIN_CHECKS * cfg.interval_seconds + 1.0)
+    # no "+1": with 20 s rounds and 1 minute it made 61 s, and the first rating came only with the round at 80 s
+    return max(cfg.window_minutes * 60.0, MIN_CHECKS * cfg.interval_seconds * 1.0)
 
 
 def rate(samples, now: float, window_s: float, since: float | None = None) -> Quality:
@@ -257,10 +258,12 @@ class Monitor:
         except OSError:
             pass
 
-    def add_round(self, cfg: CheckConfig, profile: str, results, now: float | None = None) -> Quality:
+    def add_round(self, cfg: CheckConfig, profile: str, results, now: float | None = None, down_at: float = 0.0) -> Quality:
+        """down_at: when the kill-switch last blocked (StateStore.last_down): a Reconnect between two rounds is a new
+        connection too, although no round saw it down (seen live: "unstable" one second after a Reconnect)."""
         now = time.time() if now is None else now
         key = (profile, cfg.interval_seconds, cfg.window_minutes, cfg.targets)
-        if key != self.key:                                  # new connection, other profile or other rules: start over
+        if key != self.key or down_at > self.started:        # new connection, other profile or other rules: start over
             self.samples.clear()
             self.key, self.started, self.last_state = key, now, ""
         for ok, rtt in results:

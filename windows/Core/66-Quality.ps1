@@ -107,7 +107,7 @@ function ConvertFrom-VeroCheckForm {
 function Get-VeroCheckWindow {
     <# The look-back in seconds: windowMinutes, but never fewer than 3 rounds. Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Check)
-    [Math]::Max($Check.WindowMinutes * 60.0, $script:CheckMinChecks * $Check.IntervalSeconds + 1.0)
+    [Math]::Max($Check.WindowMinutes * 60.0, $script:CheckMinChecks * $Check.IntervalSeconds * 1.0)   # no +1: 20 s / 1 min = 60 s, not 80
 }
 
 function Measure-VeroQuality {
@@ -202,7 +202,9 @@ function Update-VeroQuality {
     }
     $now = Get-VeroEpoch
     $key = Get-VeroQualityKey $cfg
-    if ($key -ne $script:QualityKey) {                                   # new connection, other profile or other rules: start over
+    $down = 0.0                                                          # the kill-switch blocked since this rating started: a new connection
+    try { $down = [double]([IO.File]::ReadAllText((Get-VeroPath).LastDown).Trim()) } catch { $down = 0.0 }
+    if ($key -ne $script:QualityKey -or $down -gt $script:QualityStarted) {   # new connection, other profile or other rules: start over
         $script:QualitySamples.Clear(); $script:QualityKey = $key; $script:QualityStarted = $now; $script:QualityLast = ''
     }
     foreach ($r in @(Invoke-VeroProbeRound -Targets $chk.Targets)) { $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs }) }

@@ -137,7 +137,7 @@ def test_set_default_and_options():
         importer.set_default(TWO, "Nope")
     assert json.loads(importer.set_option(TWO, "updateCheck", "false"))["updateCheck"] is False
     assert json.loads(importer.set_option(TWO, "vm", "false"))["vm"] is False
-    assert json.loads(importer.set_option(TWO, "vm", "auto"))["vm"] == "auto"
+    assert json.loads(importer.set_option(TWO, "vm", "auto"))["vm"] is True       # the pre-1.4 value means on
 
 
 @pytest.mark.parametrize("key,value", [("strict", "false"), ("retrySeconds", "1"), ("lanAllow", "0.0.0.0/0"), ("vm", "yes")])

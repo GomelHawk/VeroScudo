@@ -28,7 +28,7 @@ _BASE = [
 
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
-                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = ()) -> str:
+                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False) -> str:
     if tun_iface is not None and not IFNAME.match(tun_iface):
         raise ValueError(f"refusing interface name {tun_iface!r}")
     dns = dns or DnsPolicy()

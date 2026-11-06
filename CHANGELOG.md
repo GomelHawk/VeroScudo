@@ -5,12 +5,34 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security: Hyper-V Default Switch VMs (live test 2026-11-06)
+- **A Default Switch VM leaked while VeroScudo was blocked.** Windows translates its traffic inside the Hyper-V switch,
+  below WFP: while the tunnel was up it went through it, but during a Reconnect or an outage the VM went out through the
+  ISP (seen live). A block on WFP's forwarding layers was tried and did not catch it. Now, while armed and the tunnel is
+  down, every VM on the Default Switch gets Hyper-V port ACLs (deny outbound except Windows itself); removed when the
+  tunnel is back - exactly the rules VeroScudo added (also the broadcast rule, which Hyper-V stores without its /32).
+  Because RAS reports a dead VPN only seconds after the network is back, a new `\VeroScudo\NetDown` task reacts to
+  Windows' "network disconnected" event at once: the VMs are blocked right then and stay blocked until the tunnel is
+  proven to carry traffic again (a redial, or a check through the tunnel).
+- **Default Switch VMs had no network while VeroScudo was on** (no DHCP, no DNS: both come from Windows itself, and the
+  kill-switch blocked them). The Default Switch's adapter is now allowed while the tunnel is up.
+- **WireGuard profiles:** the WireGuard app's own kill-switch (*Block untunneled traffic*) also blocks Windows' DHCP and
+  DNS for Hyper-V VMs - turn it off in the WireGuard app if you use VMs; VeroScudo's kill-switch covers the traffic.
+
+### One meaning for the VM setting (Windows, Linux, macOS)
+- **`vm` is now one on/off setting everywhere** - Settings > Behaviour, *Protect VMs and containers with the kill-switch*.
+  On (default): their traffic follows the kill-switch. Off: VeroScudo leaves them alone. Before, `false` meant "left
+  alone" on Windows but "no network while on" on Linux, and Linux had a third value; `"auto"` is now read as on. Linux:
+  the drop-down became the check box, and `false` no longer cuts containers and VMs off - turn a VM's network off inside
+  the VM for that.
+
 ### Connection check (Windows, Linux, macOS)
 - **Optional connection quality check** (Settings > *Connection*, off by default): while protected, the guard checks up to
   three addresses through the tunnel every 10-100 s (ping, or TCP to a port; 1.1.1.1 TCP 443 by default - an emptied
   first address becomes 1.1.1.1 again) and rates the last 1-10 minutes: under 10 % of the checks lost *good*, 10-50 %
   *unstable*, over 50 % *bad*. The first rating comes only after one full period - after every connect, profile switch
-  and change of the check settings (*checking…* until then). Shown in the tooltip (*VeroScudo - Protected, connection good*), the menu header
+  and change of the check settings (*checking…* until then), also after a Reconnect shorter than one round (every time
+  the kill-switch blocks, the rating starts over). Shown in the tooltip (*VeroScudo - Protected, connection good*), the menu header
   (*VeroScudo - Protected - Unstable*), the status window (the *Redial* card is now **CONNECTION**: the quality while
   protected, the redial while not; Linux/macOS: a *Connection* row) and `status`. Only reports: it never reconnects or
   switches profiles. Nothing in the kill-switch is opened for it. New key `connectionCheck` (docs/ARCHITECTURE.md,

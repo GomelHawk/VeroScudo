@@ -57,12 +57,14 @@ there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel i
 from `systemd-resolved` (or only to the resolvers in `resolv.conf`); the tunnel is allowed only by
 its own virtual interface, never the Wi-Fi/Ethernet card; the ruleset is re-checked every 15 s.
 
-Containers and VMs (Docker, libvirt, LXD, podman - `"vm": "auto"` detects them) follow the same rule: while armed they
+Containers and VMs (Docker, libvirt, LXD, podman) follow the same rule when *Protect VMs and containers* is on (`"vm": true`,
+the default): while armed they
 reach the network **through the tunnel only**. Everything that stays on the machine keeps working in every state:
 host <-> container (published ports on localhost), container <-> container (docker-compose), a VM's DHCP and DNS
 from libvirt's dnsmasq. Qualifying bridges are those whose ports are all virtual (veth, tap); a bridge with your
 Wi-Fi/Ethernet card enslaved is never allowed. Traffic from the LAN to a published port is blocked while armed, as is
-all other inbound traffic. `"vm": false` leaves containers and VMs without any network while armed.
+all other inbound traffic. Off (`"vm": false`): VeroScudo leaves containers and VMs alone - their forwarding is not
+filtered at all (to cut a VM off, turn its network off inside the VM).
 
 **OpenVPN and WireGuard** connections work as ordinary profiles: NetworkManager reports their "user
 disconnected" like any VPN. Set `"protocol"` and `"port"` to what the connection uses (`veroscudo check`

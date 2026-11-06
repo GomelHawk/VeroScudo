@@ -83,7 +83,7 @@ class Config:
     default_profile: str
     active: str
     retry_seconds: int = 10
-    vm: object = "auto"            # "auto" | True | False  (Docker / libvirt forward chain)
+    vm: bool = True                # protect VMs and containers with the kill-switch (True) or leave them alone (False)
     lan_allow: tuple[str, ...] = field(default_factory=tuple)
     update_check: bool = True
     check: quality.CheckConfig = field(default_factory=quality.CheckConfig)   # connectionCheck (optional quality checks)
@@ -166,9 +166,10 @@ class Config:
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ValueError(f"config.json: profile '{min(dupes)}' is listed twice")
-        vm = j.get("vm", "auto")
+        vm = j.get("vm", True)
         if vm not in ("auto", True, False):
-            raise ValueError("config.json: vm must be 'auto', true or false")
+            raise ValueError("config.json: vm must be true or false")
+        vm = vm is not False                                   # "auto" (before 1.4): protected, like true
         retry = int(j.get("retrySeconds", 10))
         if not 3 <= retry <= 3600:
             raise ValueError("config.json: retrySeconds must be 3-3600")

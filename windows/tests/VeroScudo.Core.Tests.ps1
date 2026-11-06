@@ -34,6 +34,11 @@ BeforeAll {
                      'Set-VeroWfpFilter', 'Clear-VeroWfpFilter', 'Invoke-VeroDial', 'Invoke-VeroHangUp') {
         Mock -ModuleName VeroScudo.Core $cmd { }
     }
+    # Hyper-V port ACLs (62-HyperVAcl.ps1): no VM is ever seen or changed by this file unless a test says so
+    Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { }
+    Mock -ModuleName VeroScudo.Core Get-VeroVmAdapterAcl { }
+    Mock -ModuleName VeroScudo.Core Add-VeroVmAdapterAcl { }
+    Mock -ModuleName VeroScudo.Core Remove-VeroVmAdapterAcl { }
     # "nothing found" = no output at all, like the real cmdlets (an explicit $null would be piped on as a value)
     Mock -ModuleName VeroScudo.Core Get-NetFirewallRule { }
     Mock -ModuleName VeroScudo.Core Get-NetFirewallHyperVRule { }
@@ -49,12 +54,12 @@ Describe 'Get-VeroConfig' {
     It 'reads the 1.0 single-profile format and applies defaults' {
         $c = Get-VeroConfig -Raw $script:cfgJson
         $c.Profile | Should -Be 'MyVPN'; $c.Port | Should -Be 443; $c.RetrySeconds | Should -Be 7
-        $c.Vm | Should -Be 'auto'; $c.WifiRecoveryFix | Should -BeTrue; $c.LanAllow.Count | Should -Be 0
+        $c.Vm | Should -BeTrue; $c.WifiRecoveryFix | Should -BeTrue; $c.LanAllow.Count | Should -Be 0
         @($c.Profiles).Count | Should -Be 1
     }
     It 'defaults port, retry, vm and updateCheck when omitted' {
         $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"s","username":"u"}}'
-        $c.Port | Should -Be 443; $c.RetrySeconds | Should -Be 10; $c.Vm | Should -Be 'auto'; $c.UpdateCheck | Should -BeTrue
+        $c.Port | Should -Be 443; $c.RetrySeconds | Should -Be 10; $c.Vm | Should -BeTrue; $c.UpdateCheck | Should -BeTrue
     }
     It 'reads several profiles and picks the configured default' {
         $c = Get-VeroConfig -Raw $script:multiJson
@@ -207,6 +212,166 @@ Describe 'Get-VeroFilterSpec (the allow-list)' {
         $a = Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Sstp')
         $b = Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Sstp')
         ($a -join "`n") | Should -Be ($b -join "`n")
+    }
+}
+
+Describe 'Get-VeroFilterSpec: the Hyper-V Default Switch (its VMs get DHCP and DNS from Windows)' {
+    BeforeAll {
+        $script:cfgF = Get-VeroConfig -Raw $script:cfgJson
+        $script:fDown = Get-VeroFilterSpec -Config $script:cfgF -ServerIps @('203.0.113.5') -SwitchLuid 77 -TunnelType 'Sstp'
+        $script:fUp = Get-VeroFilterSpec -Config $script:cfgF -ServerIps @('203.0.113.5') -TunnelLuid 6473924464345088 -SwitchLuid 77 -TunnelType 'Sstp'
+    }
+    It 'opens the Default Switch adapter only while the tunnel is up, by its interface' {
+        @(Get-SpecText $script:fDown | Where-Object { $_ -like 'Default Switch*' }).Count | Should -Be 0
+        $d = @(Get-SpecText $script:fUp | Where-Object { $_ -like 'Default Switch*' })
+        $d.Count | Should -Be 4
+        foreach ($t in $d) { $t | Should -BeLike "*$($script:F.If)=luid:77*" }
+    }
+    It 'adds no other layer: forwarded VM traffic is not something WFP sees here (live test 2026-11-06)' {
+        $layers = @([VeroScudo.Layer]::ConnectV4, [VeroScudo.Layer]::ConnectV6, [VeroScudo.Layer]::RecvAcceptV4, [VeroScudo.Layer]::RecvAcceptV6)
+        foreach ($x in $script:fUp) { $layers | Should -Contain $x.Layer }
+    }
+}
+
+Describe 'Hyper-V Default Switch VMs: port ACLs while blocked (62-HyperVAcl.ps1, a fake Hyper-V ACL store)' {
+    BeforeAll {
+        $script:vmA = [pscustomobject]@{ VMName = 'VeroTest-Ubuntu'; Id = 'Microsoft:A\1'; SwitchName = 'Default Switch' }
+        $script:vmB = [pscustomobject]@{ VMName = 'Bridged'; Id = 'Microsoft:B\1'; SwitchName = 'External' }
+    }
+    BeforeEach {
+        # what the virtual switch holds: like real Hyper-V, a host address is stored without its /32 (seen live)
+        $script:store = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Test-VeroHyperVTools { $true }
+        Mock -ModuleName VeroScudo.Core Get-VeroSwitchSubnet { '172.20.144.0/20' }
+        Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { $script:vmA; $script:vmB }
+        Mock -ModuleName VeroScudo.Core Get-VeroVmAdapterAcl { @($script:store | Where-Object { $_.AdapterId -eq $Adapter.Id }) }
+        Mock -ModuleName VeroScudo.Core Add-VeroVmAdapterAcl { [void]$script:store.Add([pscustomobject]@{ AdapterId = $Adapter.Id; RemoteAddress = ($Remote -replace '/32$', ''); Action = $Action; Direction = 'Outbound' }) }
+        Mock -ModuleName VeroScudo.Core Remove-VeroVmAdapterAcl {
+            $hit = @($script:store | Where-Object { $_.AdapterId -eq $Adapter.Id -and $_.RemoteAddress -eq $Remote -and $_.Action -eq $Action })
+            foreach ($h in $hit) { $script:store.Remove($h) }                 # an address in another form matches nothing - like Hyper-V
+        }
+    }
+    AfterEach { Remove-TestFile @((Get-VeroPath).VmAcl) }
+    It 'computes the switch network from the host address' {
+        ConvertTo-VeroNetworkPrefix -Address '172.20.152.1' -PrefixLength 20 | Should -Be '172.20.144.0/20'
+        ConvertTo-VeroNetworkPrefix -Address '192.168.137.1' -PrefixLength 24 | Should -Be '192.168.137.0/24'
+    }
+    It 'denies everything first and opens only the switch, broadcast and IPv6 link-local/multicast' {
+        $r = @(Get-VeroVmAclRule -Subnet '172.20.144.0/20')
+        $r[0].Remote | Should -Be '0.0.0.0/0'; $r[0].Action | Should -Be 'Deny'
+        @($r | Where-Object Action -eq 'Deny' | ForEach-Object Remote) | Should -Be @('0.0.0.0/0', '::/0')
+        @($r | Where-Object Action -eq 'Allow' | ForEach-Object Remote) | Sort-Object | Should -Be (@('172.20.144.0/20', '255.255.255.255', 'fe80::/10', 'ff00::/8') | Sort-Object)
+    }
+    It 'blocks every VM on the Default Switch, none elsewhere, and records what it added' {
+        Set-VeroVmBlock -Block $true | Should -Be 1
+        @($script:store | Where-Object AdapterId -eq 'Microsoft:A\1').Count | Should -Be 6
+        @($script:store | Where-Object AdapterId -eq 'Microsoft:B\1').Count | Should -Be 0
+        $j = Get-Content (Get-VeroPath).VmAcl -Raw | ConvertFrom-Json; @($j | ForEach-Object { $_ }).Count | Should -Be 6
+    }
+    It 'adds nothing twice (it runs every sync while blocked)' {
+        Set-VeroVmBlock -Block $true | Out-Null
+        Set-VeroVmBlock -Block $true | Out-Null
+        $script:store.Count | Should -Be 6
+    }
+    It 'unblocking removes every rule it added - also the broadcast one Hyper-V stores without /32' {
+        Set-VeroVmBlock -Block $true | Out-Null
+        Set-VeroVmBlock -Block $false | Out-Null
+        $script:store.Count | Should -Be 0
+        Test-Path (Get-VeroPath).VmAcl | Should -BeFalse
+    }
+    It 'a rule the user set is neither recorded nor removed' {
+        [void]$script:store.Add([pscustomobject]@{ AdapterId = 'Microsoft:A\1'; RemoteAddress = '0.0.0.0/0'; Action = 'Deny'; Direction = 'Outbound' })
+        Set-VeroVmBlock -Block $true | Out-Null
+        $script:store.Count | Should -Be 6                                  # 5 added + the user's own
+        Set-VeroVmBlock -Block $false | Out-Null
+        @($script:store | ForEach-Object RemoteAddress) | Should -Be @('0.0.0.0/0')
+    }
+    It 'keeps what it could not remove, to retry' {
+        Set-VeroVmBlock -Block $true | Out-Null
+        Mock -ModuleName VeroScudo.Core Remove-VeroVmAdapterAcl { throw 'busy' } -ParameterFilter { $Remote -eq '::/0' }
+        Set-VeroVmBlock -Block $false | Out-Null
+        $j = Get-Content (Get-VeroPath).VmAcl -Raw | ConvertFrom-Json; @($j | ForEach-Object { $_.Remote }) | Should -Be @('::/0')
+    }
+    It 'without the Hyper-V tools it changes nothing' {
+        Mock -ModuleName VeroScudo.Core Test-VeroHyperVTools { $false }
+        Set-VeroVmBlock -Block $true | Should -Be 0
+        $script:store.Count | Should -Be 0
+    }
+}
+
+Describe 'fix B: the network dropped - Hyper-V VMs stay blocked until the tunnel is proven (mocked)' {
+    BeforeAll {
+        $script:cfgB = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":true}'
+        $script:cfgBoff = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":false}'
+        Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { '203.0.113.5' }
+        Mock -ModuleName VeroScudo.Core Get-VeroDnsServer { @('192.168.1.1') }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelType { 'Sstp' }
+        Mock -ModuleName VeroScudo.Core Set-VeroWfpFilter { }
+        Mock -ModuleName VeroScudo.Core Get-VeroWfpCount { 0 }
+        Mock -ModuleName VeroScudo.Core Remove-VeroLegacyFirewall { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $false }            # WSL: not this test's subject
+    }
+    BeforeEach {
+        Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { 1 }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]555 }
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelCarries { $false }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Remove-TestFile @((Get-VeroPath).NetSuspect, (Get-VeroPath).WfpState)
+    }
+    AfterAll { Remove-TestFile @((Get-VeroPath).NetSuspect, (Get-VeroPath).WfpState) }
+    It 'netdown blocks the VMs at once and remembers the tunnel it saw' {
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 1 -Exactly -ParameterFilter { $Block -eq $true }
+        (Get-Content (Get-VeroPath).NetSuspect -Raw | ConvertFrom-Json).Tunnel | Should -Be '555'
+    }
+    It 'netdown does nothing while off, or when VMs are not protected' {
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Invoke-VeroAction -Action netdown -Config $script:cfgBoff
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 0 -Exactly
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
+    }
+    It 'the same tunnel that does not carry traffic (RAS has not noticed yet): VMs stay blocked' {
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Sync-VeroKillSwitch -Config $script:cfgB -Action test -NoRefresh
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 0 -Exactly -ParameterFilter { $Block -eq $false }
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeTrue
+    }
+    It 'the tunnel carries traffic again: VMs back through it' {
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelCarries { $true }
+        Sync-VeroKillSwitch -Config $script:cfgB -Action test -NoRefresh
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 1 -Exactly -ParameterFilter { $Block -eq $false }
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
+    }
+    It 'a new tunnel (a redial) counts as proven without a check' {
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]777 }
+        Sync-VeroKillSwitch -Config $script:cfgB -Action test -NoRefresh
+        Should -Invoke -ModuleName VeroScudo.Core Test-VeroTunnelCarries -Times 0 -Exactly
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
+    }
+    It 'Off clears it' {
+        Invoke-VeroAction -Action netdown -Config $script:cfgB
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        Disable-VeroKillSwitch -Action test
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
+    }
+}
+
+Describe 'Get-VeroConfig: vm is one on/off setting on every platform' {
+    It '<raw> -> <want>' -ForEach @(
+        @{ raw = ''; want = $true }, @{ raw = ',"vm":"auto"'; want = $true }, @{ raw = ',"vm":true'; want = $true }, @{ raw = ',"vm":false'; want = $false }
+    ) {
+        (Get-VeroConfig -Raw ('{"profiles":[{"profile":"W","server":"vpn.example.com","username":"u"}]' + $raw + '}')).Vm | Should -Be $want
+    }
+    It 'refuses anything else' { { Get-VeroConfig -Raw '{"profiles":[{"profile":"W","server":"vpn.example.com","username":"u"}],"vm":"maybe"}' } | Should -Throw }
+    It 'not protected: the Default Switch stays open for its VMs even while blocked; protected: only while up' {
+        $off = Get-VeroConfig -Raw '{"profiles":[{"profile":"W","server":"vpn.example.com","username":"u"}],"vm":false}'
+        $on = Get-VeroConfig -Raw '{"profiles":[{"profile":"W","server":"vpn.example.com","username":"u"}],"vm":true}'
+        @(Get-SpecText (Get-VeroFilterSpec -Config $off -ServerIps @('203.0.113.5') -SwitchLuid 77 -TunnelType 'Sstp') | Where-Object { $_ -like 'Default Switch*' }).Count | Should -Be 4
+        @(Get-SpecText (Get-VeroFilterSpec -Config $on -ServerIps @('203.0.113.5') -SwitchLuid 77 -TunnelType 'Sstp') | Where-Object { $_ -like 'Default Switch*' }).Count | Should -Be 0
     }
 }
 
@@ -1833,7 +1998,8 @@ Describe 'Connection check: the rating' {
         (Measure-VeroQuality -Samples $s -Now 1300 -WindowSeconds 300 -Since 1000).State | Should -Be 'good'
     }
     It 'the window holds at least three rounds' {
-        Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 100; WindowMinutes = 1 }) | Should -BeGreaterThan 300
+        Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 100; WindowMinutes = 1 }) | Should -Be 300
+        Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 20; WindowMinutes = 1 }) | Should -Be 60
         Get-VeroCheckWindow ([pscustomobject]@{ IntervalSeconds = 10; WindowMinutes = 2 }) | Should -Be 120
     }
     It 'the short texts match Linux and macOS' {
@@ -1852,6 +2018,7 @@ Describe 'Connection check: the watchdog (mocked checks)' {
         Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
         Mock -ModuleName VeroScudo.Core Invoke-VeroProbeRound { [pscustomobject]@{ Ok = $true; RttMs = 20 } }
         InModuleScope VeroScudo.Core { $script:QualitySamples.Clear(); $script:QualityKey = ''; $script:QualityLast = '' }   # each test starts fresh
+        Remove-TestFile @((Get-VeroPath).LastDown)                         # earlier sync tests leave a "blocked just now" mark
     }
     AfterEach { Remove-TestFile @((Get-VeroPath).Config, (Get-VeroPath).Quality) }
     It 'checks while protected, writes the rating for the tray and waits the interval' {
@@ -1895,6 +2062,17 @@ Describe 'Connection check: the watchdog (mocked checks)' {
         Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
         Update-VeroQuality | Out-Null
         (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
+    }
+    It 'a Reconnect between two rounds starts the rating over (no round saw the tunnel down)' {
+        Update-VeroQuality | Out-Null; Update-VeroQuality | Out-Null
+        InModuleScope VeroScudo.Core { $script:QualityStarted -= 3600 }
+        Update-VeroQuality | Out-Null
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'good'
+        # the kill-switch blocked a moment ago (Sync-VeroKillSwitchCore writes this on every blocked set)
+        [IO.File]::WriteAllText((Get-VeroPath).LastDown, [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 2))
+        Update-VeroQuality | Out-Null
+        (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
+        Remove-TestFile @((Get-VeroPath).LastDown)
     }
     It 'an old rating is not shown' {
         Update-VeroQuality | Out-Null

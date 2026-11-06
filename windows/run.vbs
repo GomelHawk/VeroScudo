@@ -10,7 +10,7 @@ If WScript.Arguments.Count <> 1 Then WScript.Quit 2
 a = WScript.Arguments(0)
 If a = "tray" Then
   sh.Run ps & " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & dir & "\VeroScudoTray.ps1""", 0, False
-ElseIf InStr(1, "|arm|disarm|on|on-disconnect|on-force|off|on-event|reconnect|watchdog|check|switch|openvpn|", "|" & a & "|", vbBinaryCompare) > 0 Then
+ElseIf InStr(1, "|arm|disarm|on|on-disconnect|on-force|off|on-event|netdown|reconnect|watchdog|check|switch|openvpn|", "|" & a & "|", vbBinaryCompare) > 0 Then
   ' wait for the guard: Task Scheduler then sees the task as running and its IgnoreNew setting prevents a second copy
   sh.Run ps & " -NoProfile -NonInteractive -ExecutionPolicy Bypass -File """ & dir & "\VeroScudo.ps1"" -Action " & a, 0, True
 Else

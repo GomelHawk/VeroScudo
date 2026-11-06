@@ -68,8 +68,8 @@ class Guard:
 
     # ---- firewall ------------------------------------------------------------
     def vm_wanted(self) -> bool:
-        if self.cfg.vm == "auto":
-            return Path("/var/run/docker.sock").exists() or Path("/run/libvirt").exists() or bool(nm.vm_bridges())
+        """Settings > Behaviour, "Protect VMs and containers": their traffic follows the kill-switch (through the tunnel
+        only, nothing while blocked) - or, off, VeroScudo leaves them alone."""
         return bool(self.cfg.vm)
 
     def server_ips(self, cfg: Config) -> list[str]:
@@ -99,9 +99,10 @@ class Guard:
         cfg = self.cfg
         tun = nm.iface(cfg.profile) if tunnel_up else None
         dns = None if tun else firewall.DnsPolicy(nm.resolver_uid(), tuple(nm.nameservers() or nm.nm_dns()))
-        vm = self.vm_wanted()                                   # re-evaluated on every pass: a bridge created later is picked up within 15 s
-        bridges = tuple(nm.vm_bridges()) if vm else ()
-        return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and vm, dns=dns, bridges=bridges), tun
+        vm = self.vm_wanted()
+        bridges = tuple(nm.vm_bridges())                       # re-read on every pass: a bridge created later is picked up within 15 s
+        return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and vm, dns=dns, bridges=bridges,
+                                       vms_free=not vm), tun
 
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
         """Applies the ruleset when it differs from what is in force or when it is no longer in force (a `nft flush ruleset`
@@ -114,6 +115,8 @@ class Guard:
             why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
             self._applied = rs
             self.store.set_applied(self.cfg.profile, tun)
+            if not tun:
+                self.store.mark_down()                          # the connection check's rating starts over (quality.py)
             log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
 
     def disable_killswitch(self, unless_armed: bool = False) -> None:
@@ -314,7 +317,7 @@ class Guard:
             if self.quality.samples or self.quality.path.exists():
                 self.quality.reset()
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
-        q = self.quality.add_round(chk, cfg.profile, quality.run_round(chk.targets))
+        q = self.quality.add_round(chk, cfg.profile, quality.run_round(chk.targets), down_at=self.store.last_down())
         if q.state != "checking" and q.state != self.quality.last_state:
             log.info("connection quality: %s (%s of %s checks lost, %s)", q.state, q.lost, q.checks,
                      f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")

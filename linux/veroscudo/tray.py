@@ -220,21 +220,28 @@ class Windows:
 
         # -- Behaviour
         bp = page("Behaviour")
-        strict = Gtk.CheckButton(label="Strict kill-switch (always on - cannot be disabled)")
+
+        def option(label: str, about: str, show: bool = True):
+            """A short label and one grey line saying what it does - the same texts as the Windows tray."""
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            cb = Gtk.CheckButton(label=label)
+            box.pack_start(cb, False, False, 0)
+            d = self._label(about, dim=True)
+            d.set_margin_start(26)
+            box.pack_start(d, False, False, 0)
+            if show:
+                bp.pack_start(box, False, False, 0)
+            return cb
+
+        strict = option("Strict kill-switch (always on)",
+                        "When the VPN drops, nothing leaves this computer until it is back or you turn the VPN off.")
         strict.set_active(True)
         strict.set_sensitive(False)
-        bp.pack_start(strict, False, False, 0)
-        upd = Gtk.CheckButton(label="Check for a new release when the tray starts")
-        bp.pack_start(upd, False, False, 0)
-        vmrow = Gtk.Box(spacing=10)
-        vmrow.pack_start(self._label("Containers and VMs (Docker, libvirt)", wrap=False), False, False, 0)
-        vm = Gtk.ComboBoxText()
-        for key, text in (("auto", "through the tunnel when found"), ("true", "always through the tunnel"),
-                          ("false", "no network while on")):
-            vm.append(key, text)
-        vmrow.pack_start(vm, False, False, 0)
-        if sys.platform != "darwin":
-            bp.pack_start(vmrow, False, False, 0)
+        vm = option("Protect VMs and containers",
+                    "Docker, libvirt and other VMs follow the kill-switch too. Off: VeroScudo leaves them alone.",
+                    show=sys.platform != "darwin")                       # macOS: not filtered yet (alpha)
+        upd = option("Check for updates when the tray starts",
+                     "Asks GitHub for the latest version, never while blocked. Nothing is installed automatically.")
         bp.pack_start(self._label("Each change asks for an administrator's password and takes effect within 15 seconds.",
                                   dim=True), False, False, 0)
 
@@ -295,7 +302,7 @@ class Windows:
         self._se = {"lb": lb, "upd": upd, "vm": vm, "busy": False, "nb": nb, "en": en, "more": more, "every": every,
                     "over": over, "rows": rows}
         upd.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "updateCheck", "true" if b.get_active() else "false"]))
-        vm.connect("changed", lambda c: self._se["busy"] or self.app.admin(["set", "vm", c.get_active_id()]))
+        vm.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "vm", "true" if b.get_active() else "false"]))
         save.connect("clicked", lambda _b: self._save_check())
         w.connect("destroy", lambda *_: setattr(self, "settings", None))
         self.update_settings()
@@ -344,7 +351,7 @@ class Windows:
                 se["lb"].add(r)
             se["lb"].show_all()
             se["upd"].set_active(bool(cfg.update_check) if cfg else True)
-            se["vm"].set_active_id({True: "true", False: "false"}.get(cfg.vm, "auto") if cfg else "auto")
+            se["vm"].set_active(bool(cfg.vm) if cfg else True)
             chk = cfg.check if cfg else quality.CheckConfig()
             se["en"].set_active(chk.enabled)
             se["more"].set_visible(chk.enabled)
