@@ -3,14 +3,16 @@
 # Needs VeroScudo installed with a NetworkManager VPN profile that connects. Runs everything itself, about 6 minutes:
 #   1 On          -> protected; the exit address must be the VPN's, not your real one
 #   2 Reconnect   -> blocked while it redials, protected again
-#   3 Network drop: the network card goes down for DROP_SECONDS -> blocked all the time, protected again after it
-#   4 You hang up the VPN (nmcli connection down) -> VeroScudo turns off, network normal
-#   5 On, then Off -> the kill-switch table is gone, network normal
+#   3 The VPN dies (its process is killed) -> blocked within 10 s, redialed, protected again
+#   4 Network drop: the network card goes down for DROP_SECONDS -> nothing gets out; afterwards the tunnel carries again
+#     (a VPN over TCP may survive a short drop - then VeroScudo rightly stays protected)
+#   5 You hang up the VPN (nmcli connection down) -> VeroScudo turns off, network normal
+#   6 On, then Off -> the kill-switch table is gone, network normal
 # A probe runs every 2 s the whole time: the exit address (https://ifconfig.me), a direct ping and a direct DNS query to
 # 1.1.1.1. LEAK = your real address while armed, or anything at all getting out while blocked.
 #     sudo linux/tests-local/live.sh             in the machine's own window (armed, inbound SSH is blocked)
 #     sudo -b linux/tests-local/live.sh          over SSH: runs on when SSH drops; read the log afterwards
-# Log: ~/veroscudo-live.log of the user who ran sudo. Exit code 0 = PASS.
+# Log: ~/veroscudo-live.log of the user who ran sudo, with VeroScudo's own log lines of the test. Exit code 0 = PASS.
 set -u
 DROP_SECONDS="${DROP_SECONDS:-30}"
 [ "$(id -u)" -eq 0 ] || { echo "run it with sudo: sudo $0"; exit 2; }
@@ -26,8 +28,17 @@ NIC=""
 PROBE_PID=""
 
 say() { echo "$(date +%T) $*" | tee -a "$LOG"; }
-state() { veroscudo status 2>/dev/null | awk '/^state/{print $3}'; }
+field() { veroscudo status 2>/dev/null | awk -F' *: ' -v k="$1" '$1 == k {print $2; exit}'; }   # one line of the status
+state() { field state; }
 exit_ip() { curl -s --max-time 3 https://ifconfig.me || true; }
+carries() {      # the tunnel carries traffic: an exit address that is not the real one, within 20 s
+  local i x
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    x=$(exit_ip); [ -n "$x" ] && [ "$x" != "$REAL_IP" ] && return 0
+    sleep 1; : "$i"
+  done
+  return 1
+}
 fail() { FAILS+=("$PHASE: $*"); say "FAIL $PHASE: $*"; }
 
 wait_state() {   # $1 wanted state, $2 timeout s -> prints the seconds it took; 1 = timeout
@@ -61,8 +72,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'say "interrupted - VeroScudo is left as it is (sudo veroscudo off for normal network)"; exit 3' INT TERM
 
-PROFILE=$(veroscudo status 2>/dev/null | awk -F': ' '/^profile/{print $2}' | sed 's/ (.*//')
+PROFILE=$(field profile | sed 's/ ([^)]*)$//')
 [ -n "$PROFILE" ] || { echo "no VeroScudo profile configured"; exit 2; }
+nmcli -g NAME connection show | grep -Fxq "$PROFILE" || { echo "NetworkManager has no connection '$PROFILE'"; exit 2; }
+START=$(date '+%F %T')
 say "VeroScudo live test - profile '$PROFILE', network drop ${DROP_SECONDS} s"
 
 # ---- prep: off, VPN down, learn the network card and the real address
@@ -96,32 +109,55 @@ veroscudo reconnect >/dev/null 2>&1                               # blocks, hang
 if wait_state protected 120 >/dev/null; then say "protected again after $((SECONDS - t0)) s"; else fail "not protected again within 120 s"; fi
 sleep 10
 
-# ---- 3 Network drop
-phase 3-drop
+# ---- 3 The VPN dies
+phase 3-vpn-dies
+TUN=$(field tunnel)
+case "$TUN" in
+  ppp*) VPNPROC=pppd ;;
+  tun*) VPNPROC=$(pgrep -x openvpn >/dev/null && echo openvpn || echo openconnect) ;;
+  *) VPNPROC="" ;;
+esac
+if [ -z "$VPNPROC" ]; then
+  say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"
+else
+  pkill -KILL -x "$VPNPROC"
+  say "killed $VPNPROC (tunnel $TUN)"
+  if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
+  if t=$(wait_state protected 120); then say "protected again after $t s"; else fail "not protected again within 120 s"; fi
+  carries || fail "protected, but the tunnel carries nothing"
+fi
+sleep 10
+
+# ---- 4 Network drop
+phase 4-drop
 ip link set dev "$NIC" down
 say "network card $NIC down"
-sleep 5
-[ "$(state)" = blocked ] || fail "state is '$(state)' with the network down, expected blocked"
-sleep $((DROP_SECONDS - 5))
+seen=""
+for _ in $(seq 1 "$DROP_SECONDS"); do
+  [ -z "$seen" ] && [ "$(state)" = blocked ] && seen=$((SECONDS))
+  sleep 1
+done
 ip link set dev "$NIC" up
 say "network card $NIC up"
+if [ -n "$seen" ]; then say "VeroScudo saw the drop (blocked during it)"; else say "VeroScudo stayed protected: the VPN survived the drop"; fi
 sleep 10
 if ! ip -o -4 addr show dev "$NIC" | grep -q inet; then              # NetworkManager did not reconnect the card by itself
   say "no address on $NIC after 10 s - asking NetworkManager to connect it"
   nmcli device connect "$NIC" >/dev/null 2>&1
 fi
-if t=$(wait_state protected 180); then say "protected again $t s after the network came back"; else fail "not protected within 180 s after the network came back"; fi
+if t=$(wait_state protected 180); then say "protected $t s after the network came back"; else fail "not protected within 180 s after the network came back"; fi
+carries || fail "protected, but the tunnel carries nothing"
 sleep 10
 
-# ---- 4 You hang up
-phase 4-hangup
+# ---- 5 You hang up
+phase 5-hangup
 nmcli connection down "$PROFILE" >/dev/null 2>&1
 if t=$(wait_state off 30); then say "VeroScudo off $t s after you hung up"; else fail "still '$(state)' 30 s after you hung up (expected off)"; fi
 sleep 5
 ip=$(exit_ip); [ "$ip" = "$REAL_IP" ] || fail "network not normal after hanging up (exit address '${ip:-none}')"
 
-# ---- 5 On, then Off
-phase 5-off
+# ---- 6 On, then Off
+phase 6-off
 veroscudo on >/dev/null 2>&1
 if ! wait_state protected 90 >/dev/null; then fail "not protected within 90 s"; fi
 veroscudo off >/dev/null 2>&1
@@ -144,11 +180,13 @@ while read -r tm ph s1 s2 ipx p d; do
   esac
   if [ -n "$why" ]; then leaks=$((leaks + 1)); say "LEAK $tm [$ph] $why: ip=$ipx $p $d"; fi
 done < "$SAMPLES"
-[ "$blocked" -gt 0 ] || fail "no probe ran while blocked - the drop was not seen"
+[ "$blocked" -gt 0 ] || fail "no probe ran while blocked"
+say "=== VeroScudo log during the test"
+awk -v s="$START" '($1 " " substr($2, 1, 8)) >= s' /var/log/veroscudo.log 2>/dev/null | tee -a "$LOG"
 say "=== Result"
 say "probes $n (blocked $blocked), leaks $leaks, real $REAL_IP, VPN ${VPN_IP:-none}"
 [ "$leaks" -eq 0 ] || FAILS+=("leaks: $leaks")
 if [ ${#FAILS[@]} -eq 0 ]; then say "PASS"; exit 0; fi
 for f in "${FAILS[@]}"; do say "  - $f"; done
-say "FAIL - send the last 30 lines of $LOG and: sudo tail -n 60 /var/log/veroscudo.log"
+say "FAIL - send the whole log: cat $LOG"
 exit 1
