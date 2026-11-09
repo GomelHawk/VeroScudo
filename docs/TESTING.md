@@ -10,7 +10,7 @@
 | Install (Linux) | `linux/tests-local/container-test.sh` (systemd + NetworkManager container, Ubuntu 22.04, 24.04 and 26.04) | yes | install, sudo rule scope, On blocks everything, the daemon redials, config reload, upgrade while armed, Off, uninstall, `--purge` |
 | Install (macOS) | the `macos` CI job | yes | install with Apple's python3, guard running, menu-bar app starts (screenshot artifact), uninstall leaves nothing - never armed |
 | Lint | PSScriptAnalyzer, ruff, shellcheck | yes | |
-| Real machine | `windows/tests-local/`, `linux/tests-local/README.md` (VM walk-through) | **no** | the actual firewall, VPN and scheduled tasks / services |
+| Real machine | `windows/tests-local/`, `linux/tests-local/live.sh` (automated, best in a VM) | **no** | the actual firewall, VPN and scheduled tasks / services |
 
 CI cannot dial a real VPN; only the container's own firewall is changed there. The real-machine scripts are the proof; run them
 on your laptop with the guard installed and paste the verdict into your PR.
@@ -101,6 +101,23 @@ Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
 ```
 
 (Phase numbering in the current script differs slightly from that run; the content is the same.)
+
+### Linux run
+
+Ubuntu 24.04 in a Hyper-V VM, SSTP profile (`network-manager-sstp`), `sudo linux/tests-local/live.sh`:
+
+```
+1-on           protected after 0 s, exit through the VPN
+2-reconnect    protected again after 4 s
+3-vpn-dies     pppd killed -> blocked after 0 s, redialed, protected again (tunnel ppp1)
+4-drop         network card down 30 s -> blocked during it, protected 1 s after it came back
+5-hangup       nmcli connection down -> VeroScudo off after 0 s
+6-off          kill-switch table gone, network normal
+probes 51 (blocked 26), leaks 0 -> PASS
+```
+
+Still by hand on Linux: the tray (colours, windows, profile switch), a reboot while armed, uninstall; other VPN types
+(OpenVPN, WireGuard, L2TP).
 
 ## Things that bit us, so you don't have to
 

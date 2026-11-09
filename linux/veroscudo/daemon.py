@@ -39,6 +39,7 @@ class Guard:
         self._hiddify_hosts: dict = {}           # Hiddify server host name -> (addresses, when looked up)
         self._hiddify_good: dict = {}            # profile id -> the last good permit set (a broken file keeps it)
         self._hiddify_said: dict = {}            # what was logged last per topic - each problem is logged once
+        self._lookup_next = False                # look the server name up after the next block (a redial failed)
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -78,12 +79,19 @@ class Guard:
         return bool(self.cfg.vm)
 
     def server_ips(self, cfg: Config) -> list[str]:
-        """Pinned addresses win. Otherwise resolve and merge with the cache (newest first, at most 8): a moved VPN host keeps
-        working and a lookup that fails while blocked still leaves the last known addresses."""
+        """The server addresses the rules allow: pinned ones, else the cached ones - building the rules never waits for DNS
+        (a VPN that died abruptly leaves the resolver pointed at its DNS behind the dead tunnel: a lookup then hangs for
+        ~20 s, and the redial with it). Only with nothing cached yet is the name looked up here (enable_killswitch looks
+        it up afterwards)."""
         if cfg.server_ips:
             return list(cfg.server_ips)
         if cfg.current.vpn_type == hiddify.KIND:
             return []                                          # its servers are endpoints (hiddify_endpoints)
+        return self.cached_server_ips(cfg) or self.lookup_server_ips(cfg)
+
+    def lookup_server_ips(self, cfg: Config) -> list[str]:
+        """Resolve and merge with the cache (newest first, at most 8): a moved VPN host keeps working and a lookup that
+        fails while blocked still leaves the last known addresses."""
         cache = self.store.server_cache(cfg.profile)
         cached = self.cached_server_ips(cfg)
         merged = list(dict.fromkeys(nm.resolve(cfg.server) + cached))[:8]
@@ -155,18 +163,33 @@ class Guard:
 
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
         """Applies the ruleset when it differs from what is in force or when it is no longer in force (a `nft flush ruleset`
-        or `pfctl -d` by another tool). Atomic: nft -f replaces the table in one transaction."""
+        or `pfctl -d` by another tool). Atomic: nft -f replaces the table in one transaction. The rules are built from the
+        cached server addresses; the name is looked up afterwards, outside the lock, while the tunnel is allowed (DNS goes
+        through it) or after a failed redial - and the rules are applied again if the addresses changed."""
         with self.store.firewall_lock():
-            rs, tun = self.desired_ruleset(tunnel_up)
-            if not force and rs == self._applied and firewall.is_active():
-                return
-            firewall.apply(rs)
-            why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
-            self._applied = rs
-            self.store.set_applied(self.cfg.profile, tun)
-            if not tun:
-                self.store.mark_down()                          # the connection check's rating starts over (quality.py)
-            log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
+            tun = self._apply(tunnel_up, force)
+        cfg = self.cfg
+        if not (tun or self._lookup_next) or cfg.server_ips or cfg.current.vpn_type == hiddify.KIND or not cfg.server:
+            return
+        self._lookup_next = False
+        before = self.cached_server_ips(cfg)
+        if self.lookup_server_ips(cfg) != before:
+            with self.store.firewall_lock():
+                self._apply(tunnel_up, False)
+
+    def _apply(self, tunnel_up: bool, force: bool) -> str | None:
+        """Under the firewall lock: the ruleset for this state, applied if needed. Returns the tunnel it allows."""
+        rs, tun = self.desired_ruleset(tunnel_up)
+        if not force and rs == self._applied and firewall.is_active():
+            return tun
+        firewall.apply(rs)
+        why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
+        self._applied = rs
+        self.store.set_applied(self.cfg.profile, tun)
+        if not tun:
+            self.store.mark_down()                          # the connection check's rating starts over (quality.py)
+        log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
+        return tun
 
     def disable_killswitch(self, unless_armed: bool = False) -> None:
         """-unless_armed: the watchdog's tidy-up of a leftover table - re-checked under the lock, because another process
@@ -374,6 +397,7 @@ class Guard:
                         log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
                     break
                 log.info("attempt %d failed", attempt)
+                self._lookup_next = True                     # the server may have moved: look it up with the next block
                 if self.attempts is not None and attempt >= self.attempts:
                     log.info("still not connected - traffic stays blocked; the VeroScudo service keeps redialing every %d s",
                              self.cfg.retry_seconds)

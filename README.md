@@ -27,7 +27,7 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 | Platform | Status |
 | :-- | :-- |
 | Windows 10/11 | **stable** - verified with the live leak tests |
-| Linux (Ubuntu 22.04+, NetworkManager) | **beta** - unit-tested, install/on/off/uninstall tested in a container in CI, no real-machine leak log yet |
+| Linux (Ubuntu 22.04+, NetworkManager) | **beta** - unit-tested, install/on/off/uninstall tested in a container in CI, real-machine leak test passed with SSTP |
 | macOS (pf + scutil) | **alpha** - unit-tested, install/uninstall checked in CI, never run with a real VPN |
 
 ## What you get
@@ -151,8 +151,8 @@ To update, run `Install.ps1` again; it keeps your config (a 1.0 single-profile c
 3. Connect the VPN - as usual, or with the tray's **Turn VPN on**. The shield turns green. Done.
 
 Uninstall: tray > **About** > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (add `--purge` to also delete the
-config). See [`linux/README.md`](linux/README.md). CI installs, uses and uninstalls it in a container; it has not yet
-been through the real-machine leak tests - treat it as a preview.
+config). See [`linux/README.md`](linux/README.md). CI installs, uses and uninstalls it in a container; the real-machine
+leak test passed with an SSTP profile (`linux/tests-local/live.sh`).
 
 ### macOS - alpha
 

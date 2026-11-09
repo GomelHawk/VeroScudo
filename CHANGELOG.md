@@ -11,6 +11,10 @@ All notable changes to VeroScudo are recorded here. The format follows
   VeroScudo rightly refused the card and stayed blocked. Now, when that happens, the tunnel is the virtual interface that
   holds the connection's own IPv4 address - exactly one, never a physical card; otherwise it stays blocked as before.
 - The address reader now understands point-to-point links (`inet 192.0.2.7 peer 192.0.2.1/32`).
+- Linux, macOS: **after a VPN died abruptly, the redial started ~20 s late.** Every rebuild of the rules looked the server
+  name up first, and the resolver still asked the dead tunnel's DNS. The rules are now built from the cached server
+  addresses; the name is looked up afterwards - while the tunnel is up, or after a failed redial (a server that moved is
+  still picked up) - as on Windows.
 - `linux/tests-local/live.sh`: the real-machine test runs by itself - On, Reconnect, a network drop, your own hang-up,
   On and Off, with a leak probe every 2 s; ends with PASS or FAIL.
 

@@ -235,10 +235,12 @@ filters. The loop ends only when the tunnel is up or the state becomes DISARMED.
 - **Linux**: `nmcli connection up`; NetworkManager keeps the secrets (keyring / `psk-flags`).
 - **macOS**: `scutil --nc start`; the keychain keeps the secrets.
 
-Server addresses: `serverIps` in the profile pins them (nothing resolved). Otherwise each sync
-resolves the name and merges the result with the cache (newest first, at most 8), so a host
-that moves keeps working and a lookup that fails while blocked still leaves the last known
-addresses.
+Server addresses: `serverIps` in the profile pins them (nothing resolved). Otherwise the rules are built from the
+cached addresses - never waiting for DNS (after a VPN dies abruptly the resolver can still ask the dead tunnel's DNS
+and hang) - and the name is looked up afterwards: while the tunnel is up (through it), after a failed redial, and before
+arming when nothing is cached yet. The result is merged with the cache (newest first, at most 8), so a host that moves
+keeps working and a lookup that fails while blocked still leaves the last known addresses; changed addresses are
+applied at once. Windows and Linux/macOS work the same way.
 
 ## Profiles
 

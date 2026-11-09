@@ -1,6 +1,8 @@
 """The guard's event handling and profile switching, with the VPN control and the firewall replaced by fakes - run once per
 backend pair: nftables + NetworkManager (Linux) and pf + scutil (macOS). The tests read the applied rulesets only through
 `calls["allows_tunnel"]`, so they know nothing about either syntax."""
+import threading
+
 import pytest
 
 from veroscudo import daemon, firewall, nm, pf, scutil
@@ -125,11 +127,46 @@ def test_watchdog_reapplies_a_flushed_table(env, monkeypatch):
 
 def test_server_cache_merges_and_survives_a_failed_lookup(env, monkeypatch):
     g, calls, _ = env
-    assert g.server_ips(g.cfg) == ["203.0.113.5"]
+    assert g.lookup_server_ips(g.cfg) == ["203.0.113.5"]
     monkeypatch.setattr(calls["nm"], "resolve", lambda s: [])
-    assert g.server_ips(g.cfg) == ["203.0.113.5"]           # blocked + DNS failing: the last known address still works
+    assert g.lookup_server_ips(g.cfg) == ["203.0.113.5"]    # blocked + DNS failing: the last known address still works
     monkeypatch.setattr(calls["nm"], "resolve", lambda s: ["203.0.113.77"])
-    assert g.server_ips(g.cfg) == ["203.0.113.77", "203.0.113.5"]
+    assert g.lookup_server_ips(g.cfg) == ["203.0.113.77", "203.0.113.5"]
+
+
+def test_blocking_never_waits_for_dns(env, monkeypatch):
+    """A VPN that died abruptly leaves the resolver on its DNS behind the dead tunnel - a lookup hangs. Blocked, the rules
+    come from the cache and nothing is looked up; the first rules of all (nothing cached) still resolve."""
+    g, calls, _ = env
+    looked = []
+    me = threading.get_ident()                              # a redial thread left by another test calls the same fake
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: (threading.get_ident() == me and looked.append(s)) or ["203.0.113.5"])
+    g.arm()
+    assert looked == ["vpn.example.com"] and "203.0.113.5" in calls["apply"][-1]     # first arm: nothing cached yet
+    looked.clear()
+    g.reconnect_async = lambda: None                        # no background thread outliving the fakes
+    g.enable_killswitch(tunnel_up=False, force=True)
+    g.watchdog()
+    assert looked == []                                                               # blocked: the cache only
+
+
+def test_lookup_after_the_tunnel_is_allowed_and_after_a_failed_redial(env, monkeypatch):
+    g, calls, connected = env
+    g.arm()
+    looked = []
+    me = threading.get_ident()
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: (threading.get_ident() == me and looked.append(s)) or ["203.0.113.77"])
+    connected.add("Work")
+    g.enable_killswitch(tunnel_up=True)
+    assert looked == ["vpn.example.com"]                                              # through the tunnel, after it is allowed
+    assert "203.0.113.77" in calls["apply"][-1] and calls["allows_tunnel"](calls["apply"][-1])   # moved: applied again
+    connected.clear()
+    looked.clear()
+    monkeypatch.setattr(calls["nm"], "up", lambda p: False)                           # the redial fails
+    monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
+    g.attempts = 2
+    g.reconnect()
+    assert looked == ["vpn.example.com"]                    # only once: with the block after the failed attempt
 
 
 def test_lock_is_exclusive(env):
