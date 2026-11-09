@@ -2230,7 +2230,7 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
     BeforeAll {
         $script:cfgH = Get-VeroConfig -Raw '{"profiles":[{"profile":"Hiddify","type":"hiddify"},{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}],"activeProfile":"Hiddify"}'
         $script:cfgR = Get-VeroConfig -Raw '{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}]}'
-        $script:tun = [pscustomobject]@{ Name = 'tun0'; Description = 'sing-tun Tunnel'; NetworkInterfaceType = 'Unknown'; OperationalStatus = 'Up'; Id = '{0DCCC63E-5622-3880-1E09-7CC9C46AD7B4}' }
+        $script:tun = [pscustomobject]@{ Name = 'tun0'; Description = 'sing-tun Tunnel'; NetworkInterfaceType = 'Unknown'; OperationalStatus = 'Up'; Id = '{00000000-0000-0000-0000-0000000000D4}' }
         $script:apps = @('C:\Program Files\Hiddify\Hiddify.exe', 'C:\Program Files\Hiddify\HiddifyCli.exe')
     }
     It 'a profile needs no server, username or password, and is stored as type hiddify' {
@@ -2256,10 +2256,21 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         $p.Kind | Should -Be 'program'; @($p.Apps).Count | Should -Be 2; @($p.Ips).Count | Should -Be 0
     }
     It 'connected = Hiddify runs and its sing-tun adapter is up; the tunnel is that adapter' {
-        Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:tun }
+        # the LUID comes from the real ConvertInterfaceGuidToLuid: give the fake adapter the GUID of an interface this machine
+        # has (a GUID from another PC fails with 87 - it did on the CI runner)
+        $real = InModuleScope VeroScudo.Core {
+            Import-VeroNative
+            foreach ($n in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+                $g = [guid]::Empty
+                if ([guid]::TryParse($n.Id, [ref]$g)) { try { [pscustomobject]@{ Id = "{$g}"; Luid = [VeroScudo.Iface]::LuidFromGuid($g) }; break } catch { $null = $_ } }
+            }
+        }
+        $real | Should -Not -BeNullOrEmpty
+        $script:tunReal = $script:tun.PSObject.Copy(); $script:tunReal.Id = $real.Id
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:tunReal }
         Mock -ModuleName VeroScudo.Core Get-Process { [pscustomobject]@{ Name = 'Hiddify'; Id = 1 } }
         Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeTrue
-        Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Not -Be 0
+        Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be $real.Luid
         Mock -ModuleName VeroScudo.Core Get-Process { }
         Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeFalse          # adapter left behind, app gone: not a tunnel
         Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be 0
