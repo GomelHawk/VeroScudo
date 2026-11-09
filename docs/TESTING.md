@@ -109,11 +109,11 @@ Ubuntu 26.04 in a Hyper-V VM, SSTP profile (`network-manager-sstp`), `sudo linux
 ```
 1-on           protected after 0 s, exit through the VPN
 2-reconnect    protected again after 4 s
-3-vpn-dies     pppd killed -> blocked after 0 s, redialed, protected again (tunnel ppp1)
-4-drop         network card down 30 s -> blocked during it, protected 1 s after it came back
+3-vpn-dies     pppd killed -> blocked after 1 s, redialed, protected again after 5 s (tunnel ppp1)
+4-drop         network card down 30 s -> blocked during it, protected 0 s after it came back
 5-hangup       nmcli connection down -> VeroScudo off after 0 s
 6-off          kill-switch table gone, network normal
-probes 51 (blocked 26), leaks 0 -> PASS
+probes 44 (blocked 20), leaks 0 -> PASS
 ```
 
 Still by hand on Linux: the tray (colours, windows, profile switch), a reboot while armed, uninstall; other VPN types

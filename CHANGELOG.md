@@ -18,8 +18,9 @@ All notable changes to VeroScudo are recorded here. The format follows
   Windows.
 - Linux installer: on Ubuntu 26.04 the tray-icon extension is part of `gnome-shell-ubuntu-extensions`; the installer
   asked for `gnome-shell-extension-appindicator` on every run and told you to enable it.
-- `linux/tests-local/live.sh`: the real-machine test runs by itself - On, Reconnect, a network drop, your own hang-up,
-  On and Off, with a leak probe every 2 s; ends with PASS or FAIL.
+- `linux/tests-local/live.sh`: the real-machine test runs by itself - On, Reconnect, the VPN dying, a network drop, your
+  own hang-up, On and Off, with a leak probe every 2 s; ends with PASS or FAIL. SSTP/L2TP/PPTP, OpenVPN and WireGuard need
+  nothing from you; for Hiddify it tells you when to connect or disconnect in Hiddify.
 
 ### Security: Hyper-V Default Switch VMs
 - **A Default Switch VM leaked while VeroScudo was blocked.** Windows translates its traffic inside the Hyper-V switch,

@@ -23,10 +23,13 @@ A VM keeps the kill-switch away from the machine you work on: blocking the VM bl
    `sudo apt install network-manager-sstp-gnome`; OpenVPN / WireGuard configs import there too.
 3. **Install**: copy the release archive (or the repo) into the VM, `cd VeroScudo-linux && sudo ./install.sh`, pick the
    connection. The shield appears in the top bar.
-4. **Run the automated test**: `sudo linux/tests-local/live.sh` in the VM's own window (while armed, inbound SSH is
-   blocked; over SSH use `sudo -b linux/tests-local/live.sh` and read `~/veroscudo-live.log` afterwards). About 6 minutes,
-   nothing to do: On, Reconnect, the network card down for 30 s (`DROP_SECONDS`), your own hang-up, On and Off - with a
-   probe every 2 s (exit address, direct ping and DNS). It ends with PASS or FAIL and the leaks it found.
+4. **Run the automated test** for the active profile (`sudo veroscudo use <profile>` first): `sudo linux/tests-local/live.sh`
+   in the VM's own window (while armed, inbound SSH is blocked; over SSH use `sudo -b linux/tests-local/live.sh` and read
+   `~/veroscudo-live.log` afterwards). About 6 minutes: On, Reconnect, the VPN dying (its process killed; WireGuard: its
+   interface removed), the network card down for 30 s (`DROP_SECONDS`), your own hang-up, On and Off - with a probe every
+   2 s (exit address, direct ping and DNS to an address the kill-switch does not allow). NetworkManager VPNs need nothing
+   from you. A Hiddify profile needs you in Hiddify: the script says `>>> DO NOW: ...` (connect, disconnect, start it
+   again) and waits until it sees the result - run that one in the VM's window. It ends with PASS or FAIL and the leaks.
 5. **By hand** (what the script cannot see; each line: what you do -> what you must see):
    - tray > Turn VPN on -> *Connecting* notification, then green shield, *VPN protected*; red while blocked, grey when off
    - tray > VPN profile > another profile (if you have two) -> stays red until the new one is up

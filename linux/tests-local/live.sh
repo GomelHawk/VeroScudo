@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Automated kill-switch test on a real Linux machine with a real VPN (best in a VM: blocking it blocks nothing else).
-# Needs VeroScudo installed with a NetworkManager VPN profile that connects. Runs everything itself, about 6 minutes:
-#   1 On          -> protected; the exit address must be the VPN's, not your real one
-#   2 Reconnect   -> blocked while it redials, protected again
-#   3 The VPN dies (its process is killed) -> blocked within 10 s, redialed, protected again
+# Kill-switch test on a real Linux machine with a real VPN (best in a VM: blocking it blocks nothing else). Tests the
+# ACTIVE profile - switch first with `sudo veroscudo use <profile>`. About 6 minutes:
+#   1 On          -> protected; the exit address must be the VPN's
+#   2 Reconnect   -> protected again                      (Hiddify: you disconnect in Hiddify -> stays blocked; you connect)
+#   3 The VPN dies (its process killed; WireGuard: its interface removed) -> blocked within 10 s, protected again
+#                                                          (Hiddify: Hiddify is killed -> blocked; you start it again)
 #   4 Network drop: the network card goes down for DROP_SECONDS -> nothing gets out; afterwards the tunnel carries again
-#     (a VPN over TCP may survive a short drop - then VeroScudo rightly stays protected)
-#   5 You hang up the VPN (nmcli connection down) -> VeroScudo turns off, network normal
-#   6 On, then Off -> the kill-switch table is gone, network normal
+#     (a VPN may survive a short drop - then VeroScudo rightly stays protected)
+#   5 You hang up the VPN (nmcli connection down) -> VeroScudo turns off, network normal        (Hiddify: step 2)
+#   6 On, then Off -> the kill-switch table is gone, the network answers
+# NetworkManager VPNs (SSTP, L2TP, PPTP, OpenVPN, WireGuard) run without you. VeroScudo never connects Hiddify, so for a
+# Hiddify profile the script says ">>> DO NOW: ..." when you have to act in Hiddify, and waits until it sees the result.
 # A probe runs every 2 s the whole time: the exit address (https://ifconfig.me), a direct ping and a direct DNS query to
-# 1.1.1.1. LEAK = while protected, an address seen while VeroScudo was off (behind NAT or another VPN there can be
-# several); while blocked, anything at all getting out.
+# an address the kill-switch does not allow. LEAK = while protected, an address seen without any VPN; while blocked,
+# anything at all getting out.
 #     sudo linux/tests-local/live.sh             in the machine's own window (armed, inbound SSH is blocked)
-#     sudo -b linux/tests-local/live.sh          over SSH: runs on when SSH drops; read the log afterwards
+#     sudo -b linux/tests-local/live.sh          over SSH (not for Hiddify): runs on when SSH drops; read the log afterwards
 # Log: ~/veroscudo-live.log of the user who ran sudo, with VeroScudo's own log lines of the test. Exit code 0 = PASS.
 set -u
 DROP_SECONDS="${DROP_SECONDS:-30}"
@@ -29,22 +32,12 @@ NIC=""
 PROBE_PID=""
 
 say() { echo "$(date +%T) $*" | tee -a "$LOG"; }
+todo() { printf '\a'; say ">>> DO NOW: $*"; }                    # Hiddify: what you do in Hiddify
 field() { veroscudo status 2>/dev/null | awk -F' *: ' -v k="$1" '$1 == k {print $2; exit}'; }   # one line of the status
 state() { field state; }
 exit_ip() { curl -s --max-time 3 https://ifconfig.me || true; }
-off_addr() {     # $1 was seen as the exit address while VeroScudo was off
-  { echo "$REAL_IP"; awk '$3 == "off" && $4 == "off" && $5 != "BLOCKED" {print $5}' "$SAMPLES"; } | grep -Fxq -- "$1"
-}
-carries() {      # the tunnel carries traffic: an exit address not seen while off, within 20 s
-  local i x
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    x=$(exit_ip); [ -n "$x" ] && ! off_addr "$x" && return 0
-    sleep 1; : "$i"
-  done
-  return 1
-}
-off_list() { { echo "$REAL_IP"; awk '$3 == "off" && $4 == "off" && $5 != "BLOCKED" {print $5}' "$SAMPLES"; } | sort -u | paste -sd' '; }
 fail() { FAILS+=("$PHASE: $*"); say "FAIL $PHASE: $*"; }
+phase() { PHASE=$1; echo "$1" > "$SAMPLES.phase"; say "=== $1"; }
 
 wait_state() {   # $1 wanted state, $2 timeout s -> prints the seconds it took; 1 = timeout
   local t0=$SECONDS
@@ -54,81 +47,152 @@ wait_state() {   # $1 wanted state, $2 timeout s -> prints the seconds it took; 
   done
   return 1
 }
+wait_connected() {   # $1 True|False (the active profile's tunnel), $2 timeout s
+  local t0=$SECONDS
+  while [ $((SECONDS - t0)) -lt "$2" ]; do
+    [ "$(field connected)" = "$1" ] && return 0
+    sleep 1
+  done
+  return 1
+}
 
-probe_loop() {   # one line per probe: phase state-before state-after ip ping dns
+# addresses seen with no VPN at all: in prep, and - NetworkManager VPNs only - while off after the hang-up and after Off
+# (with Hiddify, VeroScudo off still leaves Hiddify's tunnel up)
+off_addrs() {
+  cat "$SAMPLES.real"
+  [ "$TYPE" = hiddify ] || awk '($2 == "5-hangup" || $2 == "6-off") && $3 == "off" && $4 == "off" && $5 != "BLOCKED" {print $5}' "$SAMPLES"
+}
+off_addr() { off_addrs | grep -Fxq -- "$1"; }
+off_list() { off_addrs | sort -u | paste -sd' '; }
+carries() {      # the tunnel carries traffic: an exit address not seen without VPN, within 20 s
+  local i x
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    x=$(exit_ip); [ -n "$x" ] && ! off_addr "$x" && return 0
+    sleep 1; : "$i"
+  done
+  return 1
+}
+
+probe_loop() {   # one line per probe: time phase state-before state-after ip ping dns
+  local tgt s1 ip p d s2
+  tgt=$(cat "$SAMPLES.target")
   while true; do
-    local s1 ip p d s2
     s1=$(state); s1=${s1:-none}; ip=$(exit_ip); [ -n "$ip" ] || ip=BLOCKED
-    if ping -c1 -W1 1.1.1.1 >/dev/null 2>&1; then p=ping-ok; else p=ping-blocked; fi
-    if dig +time=1 +tries=1 @1.1.1.1 example.com >/dev/null 2>&1; then d=dns-ok; else d=dns-blocked; fi
+    if ping -c1 -W1 "$tgt" >/dev/null 2>&1; then p=ping-ok; else p=ping-blocked; fi
+    if dig +time=1 +tries=1 "@$tgt" example.com >/dev/null 2>&1; then d=dns-ok; else d=dns-blocked; fi
     s2=$(state); s2=${s2:-none}
-    echo "$(date +%T) $(cat "$SAMPLES.phase" 2>/dev/null || echo prep) $s1 $s2 $ip $p $d" >> "$SAMPLES"
+    echo "$(date +%T) $(cat "$SAMPLES.phase") $s1 $s2 $ip $p $d" >> "$SAMPLES"
     sleep 1
   done
 }
-phase() { PHASE=$1; echo "$1" > "$SAMPLES.phase"; say "=== $1"; }
 
 # shellcheck disable=SC2329  # called by the EXIT trap
 cleanup() {
   [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null
   if [ -n "$NIC" ] && ! ip link show dev "$NIC" | grep -q '[<,]UP[,>]'; then ip link set dev "$NIC" up; say "network card $NIC brought back up"; fi
-  rm -f "$SAMPLES" "$SAMPLES.phase"
+  rm -f "$SAMPLES" "$SAMPLES.phase" "$SAMPLES.target" "$SAMPLES.real"
 }
 trap cleanup EXIT
 trap 'say "interrupted - VeroScudo is left as it is (sudo veroscudo off for normal network)"; exit 3' INT TERM
 
-PROFILE=$(field profile | sed 's/ ([^)]*)$//')
+P=$(field profile)                                               # "Work (WireGuard)"
+PROFILE=${P% (*}
+case "${P##* (}" in
+  "Hiddify VPN mode)") TYPE=hiddify ;;
+  "WireGuard)") TYPE=wireguard ;;
+  "OpenVPN)") TYPE=openvpn ;;
+  *) TYPE=vpn ;;
+esac
 [ -n "$PROFILE" ] || { echo "no VeroScudo profile configured"; exit 2; }
-nmcli -g NAME connection show | grep -Fxq "$PROFILE" || { echo "NetworkManager has no connection '$PROFILE'"; exit 2; }
+if [ "$TYPE" != hiddify ]; then
+  nmcli -g NAME connection show | grep -Fxq "$PROFILE" || { echo "NetworkManager has no connection '$PROFILE'"; exit 2; }
+fi
 START=$(date '+%F %T')
-say "VeroScudo live test - profile '$PROFILE', network drop ${DROP_SECONDS} s"
+: > "$SAMPLES.real"
+say "VeroScudo live test - profile '$PROFILE' ($TYPE), network drop ${DROP_SECONDS} s"
 
-# ---- prep: off, VPN down, learn the network card and the real address
+# ---- prep: off, VPN down, learn the network card and the address without VPN
 phase prep
 veroscudo off >/dev/null 2>&1
-nmcli connection down "$PROFILE" >/dev/null 2>&1
+if [ "$TYPE" = hiddify ]; then
+  if [ "$(field connected)" = True ]; then
+    todo "disconnect Hiddify (the test needs the address without any VPN first)"
+    wait_connected False 180 || { say "Hiddify is still connected - stopped"; exit 2; }
+  fi
+else
+  nmcli connection down "$PROFILE" >/dev/null 2>&1
+fi
 sleep 3
 NIC=$(ip -o route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
 [ -n "$NIC" ] || { say "no default route - is the network up?"; NIC=""; exit 2; }
 case "$NIC" in ppp*|tun*|wg*) say "the default route is still on $NIC - turn the VPN off first"; NIC=""; exit 2 ;; esac
 say "network card: $NIC"
-REAL_IP=$(exit_ip)
+for _ in 1 2 3; do exit_ip >> "$SAMPLES.real"; echo >> "$SAMPLES.real"; done   # it can change (NAT, another VPN outside)
+sed -i '/^$/d' "$SAMPLES.real"
+REAL_IP=$(head -n1 "$SAMPLES.real")
 [ -n "$REAL_IP" ] || { say "no internet without the VPN - nothing to test"; exit 2; }
-say "real address (without VPN): $REAL_IP"
-probe_loop & PROBE_PID=$!
+say "address without VPN: $(off_list)"
 
 # ---- 1 On
 phase 1-on
 veroscudo on >/dev/null 2>&1
-if t=$(wait_state protected 90); then say "protected after $t s"; else fail "not protected within 90 s"; fi
+TARGET=""
+for t in 1.1.1.1 9.9.9.9 208.67.222.222 8.8.4.4; do              # a probe target the kill-switch does not allow
+  nft list table inet veroscudo 2>/dev/null | grep -Fq -- "$t" || { TARGET=$t; break; }
+done
+[ -n "$TARGET" ] || { fail "every probe address is allowed by the kill-switch"; TARGET=1.1.1.1; }
+echo "$TARGET" > "$SAMPLES.target"
+say "probe target for ping and DNS: $TARGET"
+probe_loop & PROBE_PID=$!
+if [ "$TYPE" = hiddify ]; then
+  todo "connect Hiddify (VPN mode)"
+  if t=$(wait_state protected 180); then say "protected $t s after the request"; else fail "not protected within 180 s"; fi
+else
+  if t=$(wait_state protected 90); then say "protected after $t s"; else fail "not protected within 90 s"; fi
+fi
 sleep 15
 VPN_IP=$(exit_ip)
 say "exit address while protected: ${VPN_IP:-none}"
 [ -n "$VPN_IP" ] || fail "no answer through the tunnel"
-[ -z "$VPN_IP" ] || ! off_addr "$VPN_IP" || fail "exit address is the real one - traffic does not go through the VPN"
+[ -z "$VPN_IP" ] || ! off_addr "$VPN_IP" || fail "exit address is the one without VPN - traffic does not go through the VPN"
 
-# ---- 2 Reconnect
-phase 2-reconnect
-t0=$SECONDS
-veroscudo reconnect >/dev/null 2>&1                               # blocks, hangs up, dials once, returns
-if wait_state protected 120 >/dev/null; then say "protected again after $((SECONDS - t0)) s"; else fail "not protected again within 120 s"; fi
+# ---- 2 Reconnect (Hiddify: you disconnect and connect in Hiddify)
+if [ "$TYPE" = hiddify ]; then
+  phase 2-disconnect
+  todo "disconnect in Hiddify"
+  if t=$(wait_state blocked 120); then say "blocked $t s after the request"; else fail "not blocked within 120 s (state '$(state)')"; fi
+  sleep 10
+  [ "$(state)" = blocked ] || fail "state '$(state)' 10 s after you disconnected Hiddify (expected: stays blocked)"
+  todo "connect Hiddify again"
+  if t=$(wait_state protected 180); then say "protected $t s after the request"; else fail "not protected within 180 s"; fi
+else
+  phase 2-reconnect
+  t0=$SECONDS
+  veroscudo reconnect >/dev/null 2>&1                             # blocks, hangs up, dials once, returns
+  if wait_state protected 120 >/dev/null; then say "protected again after $((SECONDS - t0)) s"; else fail "not protected again within 120 s"; fi
+fi
+carries || fail "protected, but the tunnel carries nothing"
 sleep 10
 
 # ---- 3 The VPN dies
 phase 3-vpn-dies
 TUN=$(field tunnel)
-case "$TUN" in
-  ppp*) VPNPROC=pppd ;;
-  tun*) VPNPROC=$(pgrep -x openvpn >/dev/null && echo openvpn || echo openconnect) ;;
-  *) VPNPROC="" ;;
+case "$TYPE:$TUN" in
+  hiddify:*) pkill -KILL -i hiddify; say "killed Hiddify (tunnel $TUN)" ;;
+  wireguard:*) ip link delete dev "$TUN"; say "removed the WireGuard interface $TUN" ;;
+  openvpn:?*) pkill -KILL -x openvpn; say "killed openvpn (tunnel $TUN)" ;;
+  *:ppp*) pkill -KILL -x pppd; say "killed pppd (tunnel $TUN)" ;;
+  *:tun*|*:vpn*) pkill -KILL -x openconnect; say "killed openconnect (tunnel $TUN)" ;;
+  *) say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"; TUN="" ;;
 esac
-if [ -z "$VPNPROC" ]; then
-  say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"
-else
-  pkill -KILL -x "$VPNPROC"
-  say "killed $VPNPROC (tunnel $TUN)"
+if [ -n "$TUN" ]; then
   if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
-  if t=$(wait_state protected 120); then say "protected again after $t s"; else fail "not protected again within 120 s"; fi
+  if [ "$TYPE" = hiddify ]; then
+    todo "start Hiddify again and connect (VPN mode)"
+    if t=$(wait_state protected 240); then say "protected $t s after the request"; else fail "not protected within 240 s"; fi
+  else
+    if t=$(wait_state protected 120); then say "protected again after $t s"; else fail "not protected again within 120 s"; fi
+  fi
   carries || fail "protected, but the tunnel carries nothing"
 fi
 sleep 10
@@ -139,7 +203,7 @@ ip link set dev "$NIC" down
 say "network card $NIC down"
 seen=""
 for _ in $(seq 1 "$DROP_SECONDS"); do
-  [ -z "$seen" ] && [ "$(state)" = blocked ] && seen=$((SECONDS))
+  [ -z "$seen" ] && [ "$(state)" = blocked ] && seen=yes
   sleep 1
 done
 ip link set dev "$NIC" up
@@ -150,16 +214,23 @@ if ! ip -o -4 addr show dev "$NIC" | grep -q inet; then              # NetworkMa
   say "no address on $NIC after 10 s - asking NetworkManager to connect it"
   nmcli device connect "$NIC" >/dev/null 2>&1
 fi
-if t=$(wait_state protected 180); then say "protected $t s after the network came back"; else fail "not protected within 180 s after the network came back"; fi
+if [ "$TYPE" = hiddify ] && ! wait_state protected 60 >/dev/null; then
+  todo "connect Hiddify again if it dropped"
+fi
+if t=$(wait_state protected 180); then say "protected $t s later"; else fail "not protected within 180 s after the network came back"; fi
 carries || fail "protected, but the tunnel carries nothing"
 sleep 10
 
 # ---- 5 You hang up
 phase 5-hangup
-nmcli connection down "$PROFILE" >/dev/null 2>&1
-if t=$(wait_state off 30); then say "VeroScudo off $t s after you hung up"; else fail "still '$(state)' 30 s after you hung up (expected off)"; fi
-sleep 5
-[ -n "$(exit_ip)" ] || fail "no network after hanging up"
+if [ "$TYPE" = hiddify ]; then
+  say "Hiddify: your own disconnect keeps the block (step 2) - nothing more to do here"
+else
+  nmcli connection down "$PROFILE" >/dev/null 2>&1
+  if t=$(wait_state off 30); then say "VeroScudo off $t s after you hung up"; else fail "still '$(state)' 30 s after you hung up (expected off)"; fi
+  sleep 5
+  [ -n "$(exit_ip)" ] || fail "no network after hanging up"
+fi
 
 # ---- 6 On, then Off
 phase 6-off
@@ -171,6 +242,7 @@ sleep 3
 nft list table inet veroscudo >/dev/null 2>&1 && fail "kill-switch table still present after Off"
 [ -n "$(exit_ip)" ] || fail "no network after Off"
 kill "$PROBE_PID" 2>/dev/null; PROBE_PID=""
+[ "$TYPE" = hiddify ] && say "Hiddify stays connected - VeroScudo never disconnects it"
 
 # ---- verdict from the probes
 leaks=0; n=0; blocked=0
@@ -181,7 +253,7 @@ while read -r tm ph s1 s2 ipx p d; do
   case "$s1" in
     blocked) blocked=$((blocked + 1))
              if [ "$ipx" != BLOCKED ] || [ "$p" = ping-ok ] || [ "$d" = dns-ok ]; then why="got out while blocked"; fi ;;
-    protected) [ "$ipx" != BLOCKED ] && off_addr "$ipx" && why="an address seen while off, while protected" ;;
+    protected) [ "$ipx" != BLOCKED ] && off_addr "$ipx" && why="an address without VPN, while protected" ;;
   esac
   if [ -n "$why" ]; then leaks=$((leaks + 1)); say "LEAK $tm [$ph] $why: ip=$ipx $p $d"; fi
 done < "$SAMPLES"
