@@ -11,8 +11,8 @@ All notable changes to VeroScudo are recorded here. The format follows
   VeroScudo rightly refused the card and stayed blocked. Now, when that happens, the tunnel is the virtual interface that
   holds the connection's own IPv4 address - exactly one, never a physical card; otherwise it stays blocked as before.
 - The address reader now understands point-to-point links (`inet 192.0.2.7 peer 192.0.2.1/32`).
-- `linux/tests-local/probe.sh`: a leak probe for the real-machine test (state, exit address, direct ping and DNS every
-  3 s; a summary on Ctrl-C).
+- `linux/tests-local/live.sh`: the real-machine test runs by itself - On, Reconnect, a network drop, your own hang-up,
+  On and Off, with a leak probe every 2 s; ends with PASS or FAIL.
 
 ### Security: Hyper-V Default Switch VMs
 - **A Default Switch VM leaked while VeroScudo was blocked.** Windows translates its traffic inside the Hyper-V switch,

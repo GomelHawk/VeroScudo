@@ -23,18 +23,14 @@ A VM keeps the kill-switch away from the machine you work on: blocking the VM bl
    `sudo apt install network-manager-sstp-gnome`; OpenVPN / WireGuard configs import there too.
 3. **Install**: copy the release archive (or the repo) into the VM, `cd VeroScudo-linux && sudo ./install.sh`, pick the
    connection. The shield appears in the top bar.
-4. **Start the leak probe** in a terminal of its own and leave it running: `linux/tests-local/probe.sh` (every 3 s the
-   state, the exit address, a direct ping and DNS query; `<<< LEAK` marks a leak; Ctrl-C prints the summary; log in
-   `~/veroscudo-probe.log`). Run it in the VM's own window, not over SSH - while armed, inbound SSH is blocked.
-5. **Walk through it** (each line: what you do -> what you must see):
-   - tray > Turn VPN on -> *Connecting* notification, then green shield, *VPN protected*
-   - `curl -s https://ifconfig.me` -> the VPN's address
-   - pull the VM's network cable (VM settings) for a minute -> red shield, *VPN connection lost - traffic blocked*;
-     `curl --max-time 5 https://example.com`, `ping -c2 1.1.1.1`, `dig @1.1.1.1 example.com` all fail; plug it back -> green
-   - tray > Reconnect VPN -> red while it redials, green again
+4. **Run the automated test**: `sudo linux/tests-local/live.sh` in the VM's own window (while armed, inbound SSH is
+   blocked; over SSH use `sudo -b linux/tests-local/live.sh` and read `~/veroscudo-live.log` afterwards). About 6 minutes,
+   nothing to do: On, Reconnect, the network card down for 30 s (`DROP_SECONDS`), your own hang-up, On and Off - with a
+   probe every 2 s (exit address, direct ping and DNS). It ends with PASS or FAIL and the leaks it found.
+5. **By hand** (what the script cannot see; each line: what you do -> what you must see):
+   - tray > Turn VPN on -> *Connecting* notification, then green shield, *VPN protected*; red while blocked, grey when off
    - tray > VPN profile > another profile (if you have two) -> stays red until the new one is up
-   - disconnect the VPN in Settings > Network -> grey shield, *VPN turned off*, normal network (the "you hung up" reason)
-   - tray > Status… / Open log / Settings… (import, make default - asks for your password) / About
+   - tray > Status… / Open log / Statistics… / Settings… (import, make default - asks for your password) / About
    - reboot while on with the VPN server unreachable -> blocked from the first second (`sudo nft list table inet veroscudo`)
    - tray > About > Uninstall… -> everything gone, network normal
-6. Paste `veroscudo status`, the end of `/var/log/veroscudo.log`, the probe's summary and what you saw into the pull request.
+6. Paste the end of `~/veroscudo-live.log`, the end of `/var/log/veroscudo.log` and what you saw into the pull request.
