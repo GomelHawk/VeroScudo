@@ -293,11 +293,12 @@ def parse_ifconfig(text: str) -> dict[str, list[str]]:
     return out
 
 
-def pick_iface(addrs: dict[str, list[str]], tun_v4: list[str], name: str | None, platform: str = sys.platform,
+def pick_iface(addrs: dict[str, list[str]], tun_v4: list[str], name: str | None, platform: str | None = None,
                is_tun=None) -> str | None:
     """The interface that holds the tun inbound's IPv4 address (fallback: the configured interface_name, if it is up).
     Only a tunnel device counts: on Linux a docker bridge may well hold 172.19.0.1 too (is_tun: /sys/.../tun_flags), on
     macOS only utunN. Pure apart from is_tun."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     def ok(ifc: str) -> bool:
         if not IFNAME.match(ifc):
             return False
@@ -376,9 +377,10 @@ def tun_of(path: str) -> tuple[list[str], str | None]:
 _PROC_NAME = re.compile(r"hiddify", re.IGNORECASE)
 
 
-def running(platform: str = sys.platform, proc: Path = Path("/proc")) -> bool:
+def running(platform: str | None = None, proc: Path = Path("/proc")) -> bool:
     """A Hiddify process (Hiddify, hiddify, HiddifyCli ...) is running. Linux: /proc/*/comm or the exe's name; macOS:
     pgrep -i."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     if platform == "darwin":
         try:
             r = subprocess.run(["pgrep", "-i", "hiddify"], check=False, capture_output=True, text=True, timeout=5)
@@ -403,8 +405,9 @@ def running(platform: str = sys.platform, proc: Path = Path("/proc")) -> bool:
     return False
 
 
-def interfaces(platform: str = sys.platform) -> dict[str, list[str]]:
+def interfaces(platform: str | None = None) -> dict[str, list[str]]:
     """Interfaces that are up -> their IPv4 addresses."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     argv = ["ifconfig"] if platform == "darwin" else ["ip", "-o", "-4", "addr", "show", "up"]
     try:
         r = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=5)
@@ -417,9 +420,10 @@ def _is_tun(ifc: str) -> bool:
     return (Path("/sys/class/net") / ifc / "tun_flags").exists()
 
 
-def tunnel(path: str, platform: str = sys.platform) -> str | None:
+def tunnel(path: str, platform: str | None = None) -> str | None:
     """Hiddify's tunnel interface for this config file - None unless a Hiddify process runs AND an up tunnel interface
     holds the tun inbound's IPv4 address (or has its interface_name)."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     v4, name = tun_of(path)
     if not v4 and not name:
         return None
@@ -438,10 +442,11 @@ def connected(profile: str) -> bool:
 
 
 # ---------------------------------------------------------------- import / other-VPN detection / check
-def user_home(env=None, platform: str = sys.platform) -> Path:
+def user_home(env=None, platform: str | None = None) -> Path:
     """The invoking user's home: SUDO_USER's with sudo (`sudo veroscudo import`), PKEXEC_UID's with pkexec (the Linux tray's
     Import), the console user's when root on macOS (the macOS tray's Import runs through osascript), else the current
     user's."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     env = os.environ if env is None else env
     try:
         who = env.get("SUDO_USER")
@@ -459,24 +464,27 @@ def user_home(env=None, platform: str = sys.platform) -> Path:
         return Path.home()
 
 
-def candidates(home: Path, platform: str = sys.platform) -> list[Path]:
+def candidates(home: Path, platform: str | None = None) -> list[Path]:
     """Hiddify data folders to look in, in order (DATA_DIRS, each also with a nested hiddify/). Pure."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     out = []
     for rel in DATA_DIRS.get("darwin" if platform == "darwin" else "linux", ()):
         out += [home / rel, home / rel / "hiddify"]
     return out
 
 
-def find(home: Path, platform: str = sys.platform) -> Path | None:
+def find(home: Path, platform: str | None = None) -> Path | None:
     """The data folder whose data/current-config.json exists."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     for d in candidates(home, platform):
         if (d / "data" / CONFIG_NAME).is_file():
             return d
     return None
 
 
-def discover(home: Path | None = None, platform: str = sys.platform) -> list[dict]:
+def discover(home: Path | None = None, platform: str | None = None) -> list[dict]:
     """Hiddify for `veroscudo import` (the import entry of the trays): one entry when its live config exists."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     d = find(home or user_home(), platform)
     if d is None:
         return []
@@ -494,9 +502,10 @@ def discover(home: Path | None = None, platform: str = sys.platform) -> list[dic
     return [out]
 
 
-def owners(configured: list[str] | None = None, platform: str = sys.platform) -> dict[str, str]:
+def owners(configured: list[str] | None = None, platform: str | None = None) -> dict[str, str]:
     """Up Hiddify tunnels -> LABEL, for the configured Hiddify profiles and the current user's Hiddify (imported or not),
     so another VPN check names it instead of showing an anonymous tun."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
     paths = list(configured if configured is not None else _profiles.values())
     d = find(user_home(), platform)
     if d is not None:

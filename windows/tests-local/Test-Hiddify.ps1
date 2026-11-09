@@ -34,7 +34,7 @@ $real = if (Test-Path -LiteralPath $realFile) { (Get-Content -LiteralPath $realF
 if (-not $real) { Write-Host 'Run once with -LearnRealIp first (Hiddify disconnected, VeroScudo off) - otherwise a leak cannot be told apart.' -ForegroundColor Yellow; exit 1 }
 
 $log = Join-Path $dir ('hiddify-test-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
-function Write-Log([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color; Add-Content -LiteralPath $log -Value $text }
+function Write-TestLog([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color; Add-Content -LiteralPath $log -Value $text }
 
 function Get-State {
     $armed = Test-Path -LiteralPath (Join-Path $env:ProgramData 'VeroScudo\state\armed.flag')
@@ -46,10 +46,10 @@ function Get-State {
 
 $results = [ordered]@{}
 function Watch-Step([string]$name, [string]$todo, [string]$expect, [int]$seconds = $script:Step, [switch]$UntilVpn) {
-    Write-Log ''
-    Write-Log "=== $name" 'Cyan'
-    Write-Log "Do now: $todo" 'White'
-    Write-Log "Expected: $expect" 'White'
+    Write-TestLog ''
+    Write-TestLog "=== $name" 'Cyan'
+    Write-TestLog "Do now: $todo" 'White'
+    Write-TestLog "Expected: $expect" 'White'
     Read-Host 'Press Enter when you are ready to start watching' | Out-Null
     $r = @{ VPN = 0; BLOCKED = 0; LEAK = 0; FirstVpnAfter = $null }
     $start = Get-Date
@@ -59,19 +59,19 @@ function Watch-Step([string]$name, [string]$todo, [string]$expect, [int]$seconds
         $r[$kind]++
         if ($kind -eq 'VPN' -and $null -eq $r.FirstVpnAfter) { $r.FirstVpnAfter = [int]((Get-Date) - $start).TotalSeconds }
         $color = switch ($kind) { 'LEAK' { 'Red' } 'BLOCKED' { 'Yellow' } default { 'Green' } }
-        Write-Log ('{0:HH:mm:ss}  {1,-7} {2,-16} VeroScudo {3,-3} profile {4,-10} Hiddify {5,-3} tunnel {6}' -f (Get-Date), $kind, $(if ($ip) { $ip } else { '-' }),
+        Write-TestLog ('{0:HH:mm:ss}  {1,-7} {2,-16} VeroScudo {3,-3} profile {4,-10} Hiddify {5,-3} tunnel {6}' -f (Get-Date), $kind, $(if ($ip) { $ip } else { '-' }),
                    $(if ($s.Armed) { 'on' } else { 'off' }), $s.Active, $(if ($s.App) { 'run' } else { '-' }), $(if ($s.Tun) { 'up' } else { 'down' })) $color
         if ($UntilVpn -and $kind -eq 'VPN') { break }
         Start-Sleep -Seconds 2
     }
     $results[$name] = $r
-    Write-Log ('-> VPN {0}, BLOCKED {1}, LEAK {2}{3}' -f $r.VPN, $r.BLOCKED, $r.LEAK, $(if ($null -ne $r.FirstVpnAfter) { ", first VPN answer after $($r.FirstVpnAfter) s" } else { '' }))
+    Write-TestLog ('-> VPN {0}, BLOCKED {1}, LEAK {2}{3}' -f $r.VPN, $r.BLOCKED, $r.LEAK, $(if ($null -ne $r.FirstVpnAfter) { ", first VPN answer after $($r.FirstVpnAfter) s" } else { '' }))
 }
 
 $s = Get-State
-Write-Log "Hiddify kill-switch test $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - real address $real" 'Cyan'
-Write-Log ('Start: VeroScudo {0}, active profile {1}, Hiddify {2}, tunnel {3}' -f $(if ($s.Armed) { 'ON' } else { 'OFF' }), $s.Active, $(if ($s.App) { 'running' } else { 'not running' }), $(if ($s.Tun) { 'up' } else { 'down' }))
-if (-not $s.Armed -or -not $s.Tun) { Write-Log 'Before starting: connect Hiddify (VPN mode) and turn VeroScudo on with the Hiddify profile.' 'Yellow' }
+Write-TestLog "Hiddify kill-switch test $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - real address $real" 'Cyan'
+Write-TestLog ('Start: VeroScudo {0}, active profile {1}, Hiddify {2}, tunnel {3}' -f $(if ($s.Armed) { 'ON' } else { 'OFF' }), $s.Active, $(if ($s.App) { 'running' } else { 'not running' }), $(if ($s.Tun) { 'up' } else { 'down' }))
+if (-not $s.Armed -or -not $s.Tun) { Write-TestLog 'Before starting: connect Hiddify (VPN mode) and turn VeroScudo on with the Hiddify profile.' 'Yellow' }
 
 Watch-Step '1 baseline' 'nothing - Hiddify connected, VeroScudo on' 'VPN only' 20
 Watch-Step '2 disconnect in Hiddify' 'press Disconnect in Hiddify (leave the app open)' 'BLOCKED only - never LEAK'
@@ -84,8 +84,8 @@ Watch-Step '7 VeroScudo off' 'Turn VPN off in VeroScudo (Hiddify stays connected
 $leaks = 0; foreach ($r in $results.Values) { $leaks += [int]$r['LEAK'] }            # hashtables: no properties for Measure-Object
 $recon = $results['3 reconnect in Hiddify'].FirstVpnAfter
 $restart = $results['6 start Hiddify again'].FirstVpnAfter
-Write-Log ''
-Write-Log '=== Result' 'Cyan'
-Write-Log ("leaks: $leaks; reconnect while on: " + $(if ($null -ne $recon) { "$recon s" } else { 'NO' }) + '; restart while on: ' + $(if ($null -ne $restart) { "$restart s" } else { 'NO' }))
-if ($leaks -eq 0 -and $null -ne $recon -and $null -ne $restart) { Write-Log 'PASS' 'Green' } else { Write-Log 'FAIL - send me the log' 'Red' }
-Write-Log "Log: $log"
+Write-TestLog ''
+Write-TestLog '=== Result' 'Cyan'
+Write-TestLog ("leaks: $leaks; reconnect while on: " + $(if ($null -ne $recon) { "$recon s" } else { 'NO' }) + '; restart while on: ' + $(if ($null -ne $restart) { "$restart s" } else { 'NO' }))
+if ($leaks -eq 0 -and $null -ne $recon -and $null -ne $restart) { Write-TestLog 'PASS' 'Green' } else { Write-TestLog 'FAIL - send me the log' 'Red' }
+Write-TestLog "Log: $log"
