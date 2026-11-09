@@ -169,13 +169,18 @@ class Guard:
         with self.store.firewall_lock():
             tun = self._apply(tunnel_up, force)
         cfg = self.cfg
-        if not (tun or self._lookup_next) or cfg.server_ips or cfg.current.vpn_type == hiddify.KIND or not cfg.server:
+        if not (tun or self._lookup_next) or not self._looks_up(cfg):
             return
         self._lookup_next = False
         before = self.cached_server_ips(cfg)
         if self.lookup_server_ips(cfg) != before:
             with self.store.firewall_lock():
                 self._apply(tunnel_up, False)
+
+    @staticmethod
+    def _looks_up(cfg: Config) -> bool:
+        """The profile's server is known by name (not pinned with serverIps, not Hiddify's endpoints)."""
+        return bool(cfg.server) and not cfg.server_ips and cfg.current.vpn_type != hiddify.KIND
 
     def _apply(self, tunnel_up: bool, force: bool) -> str | None:
         """Under the firewall lock: the ruleset for this state, applied if needed. Returns the tunnel it allows."""
@@ -221,6 +226,10 @@ class Guard:
     # ---- actions -------------------------------------------------------------
     def arm(self) -> None:
         self.off_marker.unlink(missing_ok=True)            # a stale Off must never turn a later real drop into a disarm
+        if not self.store.armed and self._looks_up(self.cfg):
+            # nothing is blocked yet: look the name up now, so the address the VPN client dials (a name can answer with
+            # changing addresses) is allowed from the first rule on
+            self.lookup_server_ips(self.cfg)
         with self.store.firewall_lock():                   # flag and filters change together, never interleaved with another process
             if self.store.set_armed(True):
                 log.info("ARMED")

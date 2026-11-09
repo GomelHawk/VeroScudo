@@ -150,6 +150,22 @@ def test_blocking_never_waits_for_dns(env, monkeypatch):
     assert looked == []                                                               # blocked: the cache only
 
 
+def test_on_from_off_looks_up_before_the_first_block(env, monkeypatch):
+    """The name may answer with changing addresses: turned on from off (nothing blocked yet), it is looked up first, so the
+    address the VPN client dials is allowed. Already armed (a restart, a second On) it is not - DNS may hang then."""
+    g, calls, _ = env
+    g.lookup_server_ips(g.cfg)                                                       # an old address in the cache
+    order = []
+    me = threading.get_ident()
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: (threading.get_ident() == me and order.append("lookup")) or ["203.0.113.88"])
+    monkeypatch.setattr(calls["fw"], "apply", lambda rs: order.append("apply") or calls["apply"].append(rs))
+    g.arm()
+    assert order[:2] == ["lookup", "apply"] and "203.0.113.88" in calls["apply"][0]
+    order.clear()
+    g.arm()
+    assert "lookup" not in order
+
+
 def test_lookup_after_the_tunnel_is_allowed_and_after_a_failed_redial(env, monkeypatch):
     g, calls, connected = env
     g.arm()

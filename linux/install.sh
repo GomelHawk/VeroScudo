@@ -42,7 +42,8 @@ command -v pgrep >/dev/null || need+=(procps)
 command -v wg >/dev/null || need+=(wireguard-tools)                     # WireGuard: a dead link is judged by its handshakes
 # GNOME shows tray icons only with the AppIndicator extension (Ubuntu ships it; plain GNOME does not)
 if command -v gnome-shell >/dev/null && command -v dpkg >/dev/null \
-   && ! dpkg -s gnome-shell-extension-appindicator >/dev/null 2>&1 && ! dpkg -s gnome-shell-extension-ubuntu-appindicators >/dev/null 2>&1; then
+   && ! dpkg -s gnome-shell-extension-appindicator >/dev/null 2>&1 && ! dpkg -s gnome-shell-extension-ubuntu-appindicators >/dev/null 2>&1 \
+   && ! dpkg -s gnome-shell-ubuntu-extensions >/dev/null 2>&1; then      # Ubuntu 26.04: part of gnome-shell-ubuntu-extensions
   need+=(gnome-shell-extension-appindicator)
 fi
 if [ ${#need[@]} -gt 0 ]; then

@@ -13,8 +13,11 @@ All notable changes to VeroScudo are recorded here. The format follows
 - The address reader now understands point-to-point links (`inet 192.0.2.7 peer 192.0.2.1/32`).
 - Linux, macOS: **after a VPN died abruptly, the redial started ~20 s late.** Every rebuild of the rules looked the server
   name up first, and the resolver still asked the dead tunnel's DNS. The rules are now built from the cached server
-  addresses; the name is looked up afterwards - while the tunnel is up, or after a failed redial (a server that moved is
-  still picked up) - as on Windows.
+  addresses; the name is looked up before arming (nothing blocked yet - a name with changing addresses gets the one the
+  VPN client dials), while the tunnel is up, and after a failed redial (a server that moved is still picked up) - as on
+  Windows.
+- Linux installer: on Ubuntu 26.04 the tray-icon extension is part of `gnome-shell-ubuntu-extensions`; the installer
+  asked for `gnome-shell-extension-appindicator` on every run and told you to enable it.
 - `linux/tests-local/live.sh`: the real-machine test runs by itself - On, Reconnect, a network drop, your own hang-up,
   On and Off, with a leak probe every 2 s; ends with PASS or FAIL.
 

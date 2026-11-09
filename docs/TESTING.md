@@ -104,7 +104,7 @@ Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
 
 ### Linux run
 
-Ubuntu 24.04 in a Hyper-V VM, SSTP profile (`network-manager-sstp`), `sudo linux/tests-local/live.sh`:
+Ubuntu 26.04 in a Hyper-V VM, SSTP profile (`network-manager-sstp`), `sudo linux/tests-local/live.sh`:
 
 ```
 1-on           protected after 0 s, exit through the VPN
