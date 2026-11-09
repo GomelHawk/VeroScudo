@@ -41,7 +41,7 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
    Run it once per profile type you use (switch with the tray first). Until it has passed on a real
    machine, OpenVPN and WireGuard stay **beta**.
 
-**Still to verify live after the 2026-11-02 security review** (not provable in CI):
+**Still to verify live** (not provable in CI):
 - SSTP redial when the CRL cache has expired: the log must show `SSTP could not check the server certificate revocation`
   and the next attempt must connect. The window opens only on the `RasDial` return code (`0x80092013` / `0x80092012`,
   assumed, not observed). If the live run shows a generic code instead, take the signal from the System log
@@ -58,7 +58,7 @@ throughout, all phases `PASS`.
 
 ## Record of the last full run
 
-2026-10-26, Windows 11 (26200), SSTP profile, 1.1.0 (WFP engine) installed over 1.0.0, through the real tasks:
+Windows 11 (26200), SSTP profile, 1.1.0 (WFP engine) installed over 1.0.0, through the real tasks:
 
 ```
 Pester (Windows PowerShell 5.1)                  90 passed
@@ -89,7 +89,7 @@ always-on watchdog and were rewritten to drive the scheduled tasks.
 
 ### 1.0.0 run
 
-2026-10-23, Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
+Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
 
 ```
 === VERDICT

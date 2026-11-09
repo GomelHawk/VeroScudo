@@ -190,7 +190,7 @@ Describe 'Get-VeroFilterSpec (the allow-list)' {
         $s | Should -Match "$($script:F.RPort)=500"; $s | Should -Match "$($script:F.RPort)=4500"; $s | Should -Match "$($script:F.Proto)=50"
         $s | Should -Not -Match "$($script:F.RPort)=443"
     }
-    It 'lets the IKEv2 tunnel data through (IP-in-IP to the server, live 2026-11-03)' {
+    It 'lets the IKEv2 tunnel data through (IP-in-IP to the server)' {
         # Windows shows each packet of an IKEv2 tunnel to the firewall as protocol 4 (41 for IPv6 inside) to the server
         $s = (Get-SpecText (Get-VeroFilterSpec -Config $script:cfg -ServerIps @('203.0.113.5') -TunnelType 'Ikev2') | Where-Object { $_ -like 'VPN server*' }) -join "`n"
         $s | Should -Match "$($script:F.Proto)=4\b"; $s | Should -Match "$($script:F.Proto)=41\b"
@@ -227,7 +227,7 @@ Describe 'Get-VeroFilterSpec: the Hyper-V Default Switch (its VMs get DHCP and D
         $d.Count | Should -Be 4
         foreach ($t in $d) { $t | Should -BeLike "*$($script:F.If)=luid:77*" }
     }
-    It 'adds no other layer: forwarded VM traffic is not something WFP sees here (live test 2026-11-06)' {
+    It 'adds no other layer: forwarded VM traffic is not something WFP sees here' {
         $layers = @([VeroScudo.Layer]::ConnectV4, [VeroScudo.Layer]::ConnectV6, [VeroScudo.Layer]::RecvAcceptV4, [VeroScudo.Layer]::RecvAcceptV6)
         foreach ($x in $script:fUp) { $layers | Should -Contain $x.Layer }
     }
@@ -239,7 +239,7 @@ Describe 'Hyper-V Default Switch VMs: port ACLs while blocked (62-HyperVAcl.ps1,
         $script:vmB = [pscustomobject]@{ VMName = 'Bridged'; Id = 'Microsoft:B\1'; SwitchName = 'External' }
     }
     BeforeEach {
-        # what the virtual switch holds: like real Hyper-V, a host address is stored without its /32 (seen live)
+        # what the virtual switch holds: like real Hyper-V, a host address is stored without its /32
         $script:store = New-Object System.Collections.ArrayList
         Mock -ModuleName VeroScudo.Core Test-VeroHyperVTools { $true }
         Mock -ModuleName VeroScudo.Core Get-VeroSwitchSubnet { '172.20.144.0/20' }
@@ -1038,7 +1038,7 @@ Describe 'rejected password pauses the redial' {
     }
 }
 
-# ======================================================================== regressions from the review of the reserve types
+# ======================================================================== regressions: reserve types
 Describe 'Test-VeroOpenVpnConf is an allow-list that reads lines like OpenVPN' {
     It 'refuses <what>' -ForEach @(
         @{ what = 'a quoted option name';          line = '"plugin" C:\Users\me\x.dll' }
@@ -1189,7 +1189,7 @@ Describe 'another VPN connected (Turn on asks, never decides)' {
         $f.Count | Should -Be 1; $f[0].Kind | Should -Be 'app'; $f[0].CanDisconnect | Should -BeFalse
         Mock -ModuleName VeroScudo.Core Get-VeroNic { }
     }
-    It "does not list VeroScudo's own OpenVPN adapter as a VPN app (live 2026-11-04, tray in another session)" {
+    It "does not list VeroScudo's own OpenVPN adapter as a VPN app (tray in another session)" {
         $script:ras = @()
         $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"Ovpn","type":"openvpn","username":"u"},{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}],"activeProfile":"Ovpn"}'
         $own = [pscustomobject]@{ Name = 'PrivateVPN'; Description = 'TAP-Windows Adapter V9'; NetworkInterfaceType = 'Ethernet'; OperationalStatus = 'Up'; Id = '{00000000-0000-0000-0000-0000000000A1}' }
@@ -1316,7 +1316,6 @@ Describe 'On while already on, and vendor tunnels' {
     }
 }
 
-# review of 2026-11-02
 Describe 'executables by full System32 path, and the CRL window' {
     It 'resolves rasdial, schtasks and svchost to System32, not by name' {
         InModuleScope VeroScudo.Core { $script:Rasdial } | Should -Match 'System32\\rasdial\.exe$'
@@ -1334,7 +1333,6 @@ Describe 'executables by full System32 path, and the CRL window' {
     }
 }
 
-# review of 2026-11-02, second pass
 Describe 'CRL window from the RasDial result only; a 631 by connection id; no Hyper-V cmdlets without Hyper-V' {
     It 'a forged 20227 in the Application log cannot open the CRL window (only the RasDial result decides)' {
         Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
@@ -1435,7 +1433,7 @@ Describe 'Update-VeroRasWatch: any Windows VPN type arms, whatever Windows logge
     }
 }
 
-# seen live 2026-11-03: the server changed address, the cache kept the old one
+# the server changed address, the cache kept the old one
 Describe 'a VPN server that moved: fresh lookup before arming and after a failed redial' {
     BeforeAll { $script:cfgM = Get-VeroConfig -Raw '{"profiles":[{"profile":"CorporateVPN","server":"vpn.corp.example.com","username":"u"}]}' }
     AfterEach { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).Lock }
@@ -1466,7 +1464,6 @@ Describe 'a VPN server that moved: fresh lookup before arming and after a failed
     }
 }
 
-# seen live 2026-11-03
 Describe 'switching hangs up the old tunnel first; nothing re-arms right after Off' {
     BeforeAll {
         Set-Content (Get-VeroPath).Config '{"profiles":[{"profile":"CorporateVPN","server":"a.example.com","username":"u"},{"profile":"PrivateVPN","server":"b.example.com","username":"u"}],"activeProfile":"CorporateVPN"}'
@@ -1510,7 +1507,6 @@ Describe 'Off during a redial' {
     }
 }
 
-# seen live 2026-11-03
 Describe 'Get-VeroRasConnected takes the newest connect record' {
     It 'takes the newer connect record: IKEv2 PrivateVPN (RasClient only) over the older SSTP CorporateVPN (RasMan)' {
         Mock -ModuleName VeroScudo.Core Get-WinEvent { [pscustomobject]@{ TimeCreated = (Get-Date).AddSeconds(-25); Properties = @([pscustomobject]@{ Value = '{A}' }, [pscustomobject]@{ Value = 'u' }, [pscustomobject]@{ Value = 'CorporateVPN' }) } }
@@ -1521,7 +1517,7 @@ Describe 'Get-VeroRasConnected takes the newest connect record' {
     }
 }
 
-# seen live 2026-11-03: status showed "server -> , , ,"
+# status showed "server -> , , ,"
 Describe 'Resolve-VeroServerIp cache returns plain strings' {
     It 'returns plain strings, so wfp.json and the status list the addresses themselves' {
         $f = Join-Path $TestDrive 'server.ip'
@@ -1575,7 +1571,6 @@ Describe "VeroScudo's own OpenVPN adapter" {
     }
 }
 
-# seen live 2026-11-04
 Describe 'a profile you choose wins over a running redial' {
     BeforeAll {
         Set-Content (Get-VeroPath).Config $script:multiJson
@@ -1628,7 +1623,7 @@ Describe 'install folder: no ancestor a user can rename or replace (B8)' {
                    (Rule 'BUILTIN\Users' 'ReadAndExecute, Synchronize'), (Rule 'CREATOR OWNER' 'FullControl' 'Allow' 'InheritOnly'))
         Test-VeroAdminOnlyRules $rules | Should -BeTrue
     }
-    It 'the C:\ root is fine: users may create folders there but not rename Program Files (rules as seen live; a localized name is trusted by its SID)' {
+    It 'the C:\ root is fine: users may create folders there but not rename Program Files (real-world rules; a localized name is trusted by its SID)' {
         $rules = @((Rule 'NT AUTHORITY\Authenticated Users' 4), (Rule 'NT AUTHORITY\Authenticated Users' -536805376 'Allow' 'InheritOnly'), (Rule 'BUILTIN\Users' 1179817),
                    (Rule 'S-1-5-18' 2032127), (Rule 'S-1-5-32-544' 2032127), (Rule 'S-1-15-3-65536-1888954469-739942743-1668119174-2468466756-4239452838-1296943325-355587736-700089176' 1048737))
         Test-VeroAdminOnlyRules $rules | Should -BeTrue
@@ -2280,7 +2275,7 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         { Invoke-VeroDial -Config $script:cfgH -Action 'test' } | Should -Not -Throw
         InModuleScope VeroScudo.Core { & (Get-VeroTypeHandler 'hiddify').HangUp 'Hiddify' } | Should -BeNullOrEmpty
     }
-    It "is detected as 'Hiddify (VPN mode)' when another profile is active (live: sing-tun was not recognised at all)" {
+    It "is detected as 'Hiddify (VPN mode)' when another profile is active (sing-tun was not recognised at all)" {
         Mock -ModuleName VeroScudo.Core Get-VeroWindowsVpn { }
         Mock -ModuleName VeroScudo.Core Get-Service { }
         Mock -ModuleName VeroScudo.Core Get-Process { }
@@ -2295,7 +2290,7 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         @(Select-VeroForeignWfp -Type 'hiddify' -Providers @('sing-box')).Count | Should -Be 0
         @(Select-VeroForeignWfp -Type 'ras' -Providers @('sing-box')).Count | Should -Be 1
     }
-    It 'Off leaves Hiddify as it is and does not claim to have disconnected it (live: it logged "disconnected")' {
+    It 'Off leaves Hiddify as it is and does not claim to have disconnected it (it logged "disconnected")' {
         Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
         Mock -ModuleName VeroScudo.Core Invoke-VeroHangUp { throw 'must not hang up Hiddify' }
         Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }

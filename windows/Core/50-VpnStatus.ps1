@@ -53,15 +53,15 @@ function Get-VeroRasTermination {
 
 function Get-VeroRasConnected {
     <# Profile name of the newest "connected" event: RasMan 20267 (System log - not writable by ordinary users), else
-       RasClient 20225 (Application log): an IKEv2 connect logs ONLY that one (seen live 2026-11-03). The Application log is
+       RasClient 20225 (Application log): an IKEv2 connect logs ONLY that one. The Application log is
        user-writable, so the caller arms only when that profile really is connected - a forged record can at most turn
        VeroScudo on (the strict direction), never off. -Names: the configured profiles (to find the name in a 20225). #>
     [CmdletBinding()] param([int]$WithinMinutes = 2, [string[]]$Names = @())
     $ev = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'RasMan'; Id = 20267
                                             StartTime = (Get-Date).AddMinutes(-$WithinMinutes) } -MaxEvents 1 -ErrorAction SilentlyContinue
     $r = Get-VeroRasClientConnect -WithinMinutes $WithinMinutes -Names $Names | Select-Object -First 1
-    # the NEWER of the two: after a switch the System log still holds the old profile's connect (seen live 2026-11-03:
-    # SSTP CorporateVPN in RasMan, then IKEv2 PrivateVPN only in RasClient - the old one was taken, the new one ignored)
+    # the NEWER of the two: after a switch the System log still holds the old profile's connect (e.g.
+    # SSTP CorporateVPN in RasMan, then IKEv2 PrivateVPN only in RasClient - else the old one is taken, the new one ignored)
     $rm = if ($ev -and $ev.Properties.Count -ge 3) { [pscustomobject]@{ Profile = [string]$ev.Properties[2].Value; Time = $ev.TimeCreated } } else { $null }
     if ($rm -and $r) { return $(if ($r.Time -gt $rm.Time) { $r.Profile } else { $rm.Profile }) }
     if ($rm) { return $rm.Profile }
@@ -142,8 +142,8 @@ function Invoke-VeroArmConnected {
 
 function Update-VeroServerIpBeforeArm {
     <# Look the server name up NOW, while no filters are in force yet (not armed): the kill-switch then allows the address the
-       tunnel really uses. A server that moved (seen live 2026-11-03: vpn.corp.example.com changed address, the cache still had
-       the old one - the tunnel was cut 5 s after arming and every redial was refused) is picked up before it can bite. #>
+       tunnel really uses. A server that moved (the cache still has the old address - the
+       tunnel would be cut 5 s after arming and every redial refused) is picked up before it can bite. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
     if ((Test-VeroArmed) -or @($Config.ServerIps).Count -gt 0) { return }
     $before = @(Resolve-VeroServerIp -Config $Config -CacheOnly)

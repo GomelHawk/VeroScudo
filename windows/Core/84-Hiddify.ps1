@@ -2,7 +2,7 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 #
 # Hiddify (a GUI around hiddify-core, a sing-box fork) runs its proxies inside Hiddify.exe and, in VPN mode, a Wintun
-# adapter described "sing-tun Tunnel" that carries the default route and DNS (seen live, Hiddify 4.1.1). Its servers are
+# adapter described "sing-tun Tunnel" that carries the default route and DNS. Its servers are
 # many (selector/balancer groups), change with each subscription update and use TCP and UDP (VLESS, Hysteria, QUIC) - so
 # the permit is not "these servers" but "this program": Hiddify.exe and HiddifyCli.exe from the Hiddify folder may reach
 # anything, everything else only goes through the tunnel. The folder must be administrators-only (Program Files): a

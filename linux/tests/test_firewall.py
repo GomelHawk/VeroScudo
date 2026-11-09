@@ -118,7 +118,7 @@ def test_lockdown_ruleset_has_no_permit_beyond_loopback_dhcp_and_nd():
 
 
 def test_bridge_local_traffic_is_allowed_in_every_state_but_never_out_of_the_machine():
-    """B5 (review 2026-11-05): with policy drop in all three chains, host <-> container, container <-> container on a
+    """B5: with policy drop in all three chains, host <-> container, container <-> container on a
     Docker bridge (br_netfilter) and a VM's DHCP/DNS from dnsmasq were dropped - even with the tunnel up. Bridge-local
     traffic stays on the machine, so it is allowed like loopback; the bridges' way out is still the tunnel only."""
     for tun, vm in (("tun0", True), (None, False)):

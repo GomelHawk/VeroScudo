@@ -442,7 +442,7 @@ def test_statistics_and_the_connection_check_while_connected(hid, monkeypatch):
 
 
 def test_with_hiddify_connected_and_veroscudo_off_the_button_says_turn_on():
-    """Seen live on Windows: the status button said Turn VPN off (Hiddify connected, VeroScudo off) and Off did nothing."""
+    """Regression: the status button said Turn VPN off (Hiddify connected, VeroScudo off) and Off did nothing."""
     from veroscudo import traymodel as tm
     v = tm.tray_state(tm.Facts(name="Hiddify", kind="hiddify", armed=False, up=True))
     assert not tm.offers_off(v, "hiddify") and tm.menu_state(v, "hiddify").on

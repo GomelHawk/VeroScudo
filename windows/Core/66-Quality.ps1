@@ -153,7 +153,7 @@ function Format-VeroQuality {
 function Invoke-VeroProbeRound {
     <# Every address once, in parallel: ping (ICMP echo) or a TCP connection. Returns one @{ Ok; RttMs } per target.
        -Tls (Hiddify profiles): a TLS handshake instead, on the target's TCP port (443 for a ping target). Hiddify's TUN answers
-       pings and completes TCP handshakes itself, locally, also when none of its servers works (seen live: <1 ms to a
+       pings and completes TCP handshakes itself, locally, also when none of its servers works (<1 ms to a
        fake-DNS address) - only a real server can answer a TLS handshake. A certificate that does not match (a bare IP, a
        private name) still proves the server answered: that counts as reached; a closed or reset connection does not. #>
     [CmdletBinding()] param([object[]]$Targets, [int]$TimeoutMs = 3000, [switch]$Tls)

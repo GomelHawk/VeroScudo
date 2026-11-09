@@ -47,7 +47,7 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 - **Hyper-V Default Switch VMs - covered, with a short window when only the VPN dies.** Windows translates their
   traffic inside the Hyper-V switch, below WFP (WFP's forwarding layers never see it), so VeroScudo stops it there with
   Hyper-V port ACLs while the tunnel is down, and blocks them as soon as Windows logs "network disconnected" until the
-  tunnel is proven again (docs/ARCHITECTURE.md, *VMs and containers*). Live test 2026-11-06: before the fix a Default
+  tunnel is proven again (docs/ARCHITECTURE.md, *VMs and containers*). Measured: before the fix a Default
   Switch VM left through the ISP for 2-7 s per Reconnect or Wi-Fi drop; after it, two Reconnects and a 30 s Wi-Fi outage
   showed only the VPN's exit address (VMs blocked 1 s after the Wi-Fi went away). Remaining: a VPN that dies while the
   network itself stays up is caught when Windows reports it (~1-2 s, like WSL). Not tested: Windows Sandbox and Docker in
@@ -61,7 +61,7 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   any address (by program, from an administrators-only folder), so whatever the app itself sends outside its tunnel
   (its update check, error reports) is not covered. Linux/macOS: only the servers in its live config (see ARCHITECTURE).
   Any drop - also your own disconnect in Hiddify - keeps everything blocked until its tunnel is back or VeroScudo is off.
-  Live test 2026-11-09 (Windows, Hiddify 4.1.1, `windows/tests-local/Test-Hiddify.ps1`): disconnect in Hiddify, quit
+  Measured with `windows/tests-local/Test-Hiddify.ps1`: disconnect in Hiddify, quit
   Hiddify -> only BLOCKED; reconnect, restart and server changes while VeroScudo stayed on -> through Hiddify at once;
   0 of 61 samples showed the real address.
 - **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, NordVPN ...) -

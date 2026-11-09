@@ -7,7 +7,7 @@ function Get-VeroStatusServer {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, $Applied)
     $named = & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ServerText $Config
     $allowed = if ($Applied -and $Applied.PSObject.Properties['Servers']) {
-        # wfp.json of 1.2 held objects with a .value here; since 1.3 plain strings - both are read (seen live 2026-11-03)
+        # wfp.json of 1.2 held objects with a .value here; since 1.3 plain strings - both are read
         @($Applied.Servers | ForEach-Object { if ($_ -is [string]) { $_ } else { [string]$_.value } }) -join ', '
     } else { @(Resolve-VeroServerIp -Config $Config -CacheOnly) -join ', ' }
     "$named -> $allowed"

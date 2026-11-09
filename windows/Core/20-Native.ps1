@@ -7,7 +7,7 @@ function Import-VeroNative {
     $dll = Join-Path $script:ModuleRoot 'VeroScudo.Native.dll'
     try {
         # loaded from its BYTES, not as a file: Smart App Control refuses to map the locally compiled, unsigned DLL as an
-        # image (Code Integrity 3077, seen live 2026-11-03), while an assembly loaded from memory is not checked that way -
+        # image (Code Integrity 3077), while an assembly loaded from memory is not checked that way -
         # the same way the tray's own Add-Type helpers load. It also leaves the file unlocked, so a reinstall can replace it.
         # The file sits in Program Files (administrators only), so its bytes are as trusted as the file was.
         if (Test-Path $dll) { [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($dll)) }

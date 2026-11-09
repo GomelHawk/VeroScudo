@@ -212,8 +212,8 @@ RECONNECT_HIDDIFY = "Connect and reconnect in Hiddify"     # = hiddify.RECONNECT
 
 def offers_off(v: View, kind: str | None = None) -> bool:
     """Turn off is offered while armed, or while a tunnel is up that Off would hang up - never Hiddify's: VeroScudo does not
-    disconnect it, so with VeroScudo off and Hiddify connected the button says Turn VPN on (seen live on Windows: it said
-    Turn VPN off, and Off did nothing). Pure (as on Windows)."""
+    disconnect it, so with VeroScudo off and Hiddify connected the button says Turn VPN on (not Turn VPN off,
+    which would do nothing). Pure (as on Windows)."""
     return v.armed or (v.connected and kind != "hiddify")
 
 

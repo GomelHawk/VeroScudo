@@ -5,10 +5,19 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
-### Security: Hyper-V Default Switch VMs (live test 2026-11-06)
+### Fixed: Linux - SSTP, L2TP and PPTP connections stayed blocked
+- **The VPN connected, but VeroScudo kept blocking everything.** For pppd-based NetworkManager plugins (SSTP, L2TP,
+  PPTP) NetworkManager reports the card underneath (`eth0`) as the connection's interface, not the tunnel (`ppp0`).
+  VeroScudo rightly refused the card and stayed blocked. Now, when that happens, the tunnel is the virtual interface that
+  holds the connection's own IPv4 address - exactly one, never a physical card; otherwise it stays blocked as before.
+- The address reader now understands point-to-point links (`inet 192.0.2.7 peer 192.0.2.1/32`).
+- `linux/tests-local/probe.sh`: a leak probe for the real-machine test (state, exit address, direct ping and DNS every
+  3 s; a summary on Ctrl-C).
+
+### Security: Hyper-V Default Switch VMs
 - **A Default Switch VM leaked while VeroScudo was blocked.** Windows translates its traffic inside the Hyper-V switch,
   below WFP: while the tunnel was up it went through it, but during a Reconnect or an outage the VM went out through the
-  ISP (seen live). A block on WFP's forwarding layers was tried and did not catch it. Now, while armed and the tunnel is
+  ISP. A block on WFP's forwarding layers was tried and did not catch it. Now, while armed and the tunnel is
   down, every VM on the Default Switch gets Hyper-V port ACLs (deny outbound except Windows itself); removed when the
   tunnel is back - exactly the rules VeroScudo added (also the broadcast rule, which Hyper-V stores without its /32).
   Because RAS reports a dead VPN only seconds after the network is back, a new `\VeroScudo\NetDown` task reacts to
@@ -167,14 +176,14 @@ All notable changes to VeroScudo are recorded here. The format follows
   container on Ubuntu 22.04, 24.04 and 26.04; a macOS job runs the unit tests on Apple's python3, installs, checks the guard and the
   menu-bar app, and uninstalls (it never turns the VPN on - that would cut the runner off).
 
-### Security (manual test on a real machine, 2026-11-05)
+### Security
 - Windows: **the lock files were open to every program of the account again after a reinstall.** `Install.ps1` resets
   everything under the state folder to its rules ("Users: read"), `state\locks` included, and the folder was locked down
   only when it was created. Read is enough to open `watchdog.lock` with no sharing while the watchdog restarts and keep it:
   every later watchdog start then ends at once and self-repair stops - reproduced live from a non-elevated window. The
   installer locks the folder down again after the reset, and every elevated caller checks it and repairs it.
 
-### Security (review 2026-11-05 of 1.3.0, read-only; the install surface this time)
+### Security: the install surface
 - Windows: **`PSModulePath` pinned to the system module folders** in every script that runs elevated (`VeroScudo.ps1`,
   `Install.ps1`, `Uninstall.ps1`, `Set-VpnCredential.ps1`, the tray's elevated save). The guard tasks run elevated as
   the signed-in user, and PowerShell auto-loads modules such as VpnClient from the user's writable
@@ -197,7 +206,7 @@ All notable changes to VeroScudo are recorded here. The format follows
 - macOS: `pfctl -d` was not noticed - the anchor's rules stayed listed, status said *active*, nothing was enforced until
   reboot. `is_active` now requires pf to be enabled, and the watchdog enables it again within 15 s.
 
-### Security (issue #5, second review of 1.3.0)
+### Security (issue #5)
 - Linux, macOS: **a `veroscudo on` racing the daemon's watchdog could lose its filters.** The watchdog read "disarmed",
   then cleared the table; an `on` in another process that armed in between was undone - armed but open until the next
   pass (15 s). Every "read the armed flag, then apply or clear" now runs under one cross-process `flock` in
@@ -349,7 +358,7 @@ covered by unit tests only.
   profile's protocol/port with NetworkManager; the profile type is shown in status, `profiles` and the tray; a notice
   on every switch to a WireGuard profile; `veroscudo status` reports other tunnels next to VeroScudo.
 
-### Fixed (review of the import / other-VPN changes)
+### Fixed: import and other-VPN detection
 - Windows: the elevated guard took Program Files / ProgramData / System32 from environment variables a non-admin process
   can plant; they now come from the OS and HKLM.
 - Windows: Teredo, IP-HTTPS, 6to4 and ISATAP no longer count as "another VPN" (On refused every time).
@@ -360,7 +369,7 @@ covered by unit tests only.
 - Linux: `veroscudo import` undoes nmcli's escaping (`host\:4443`, URLs, IPv6); policy-based IPsec (strongSwan,
   libreswan) is refused - it has no tunnel interface, so it could only stay blocked.
 
-### Fixed (live tests 2026-11-03)
+### Fixed
 - **IKEv2 profiles carried no traffic while armed** (and *Automatic* profiles that chose IKEv2): Windows hands IKEv2
   tunnel data to the firewall as an IP-in-IP flow (protocol 4, 41 for IPv6 inside) to the VPN server, which the
   kill-switch dropped - the tunnel connected and nothing went through. Now allowed to the profile's server addresses only.
@@ -407,7 +416,7 @@ covered by unit tests only.
 - `-Preview` now captures every status state, every dialog and message (each answers Cancel/No, nothing is saved) and
   lists the balloon texts.
 
-### Security (review 2026-11-02)
+### Security
 - Windows: TCP 80 from `svchost.exe` is no longer open to anywhere while blocked (BITS / Delivery Optimization could send
   through it); it opens for 2 minutes only after an SSTP dial failed on the certificate revocation check.
 - Windows: a "you hung up" (631) counts only for the connection id VeroScudo saw connect in the System log, and the
@@ -420,7 +429,7 @@ covered by unit tests only.
   is now "Set as default" and never switches a running connection (see below).
 - Windows: **a VPN server that moved was blocked forever** (since 1.0): while down VeroScudo used only cached addresses.
   It now looks the server up before arming (no filters yet) and again after a failed redial (DNS is allowed then), and
-  lets a new address through. Seen live: vpn.corp.example.com moved, the tunnel was cut 5 s after arming, every redial refused.
+  lets a new address through. Before, a server that moved had its tunnel cut 5 s after arming, and every redial was refused.
 - Windows: the native helper is loaded from its bytes instead of as a file: Smart App Control blocked the locally
   compiled, unsigned DLL (Code Integrity 3077) and with it On/Off/redial in the affected process. A signed release DLL
   remains the proper fix. Side effect: the DLL is no longer locked, so reinstalling never hits "file in use".

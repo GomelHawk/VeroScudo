@@ -204,7 +204,7 @@ Their packets are forwarded, not sent by the host, so they need their own contro
   `vEthernet (Default Switch)`. That adapter is allowed by interface only while the tunnel is up (the DNS proxy then
   resolves through the tunnel); while blocked the VMs get nothing from Windows. `vm: false`: always open (left alone).
   The VMs' own internet traffic is translated inside the Hyper-V switch, below WFP (WFP's forwarding layers do not see
-  it - live test 2026-11-06), so it is stopped there: while armed and the tunnel is down, every VM on the Default Switch
+  it), so it is stopped there: while armed and the tunnel is down, every VM on the Default Switch
   gets Hyper-V port ACLs (outbound deny all; allow the switch's subnet, broadcast, IPv6 link-local/multicast), applied
   right after the WFP set and removed when the tunnel is back. VeroScudo records the rules it added
   (`state\vm-acl.json`) and removes exactly those. A dead VPN is reported late (RAS: seen ~4 s after the Wi-Fi came
@@ -343,7 +343,7 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
   check, 5 s for TLS. Each address's own losses are kept and listed in the CONNECTION tooltip ("api.anthropic.com
   (HTTPS): 3 of 18 lost").
 - **Hiddify profiles:** Hiddify's TUN answers pings and completes TCP handshakes itself, locally, also when none of its
-  servers works (seen live: <1 ms to a fake-DNS address). For them every check is a TLS handshake (ping targets on port
+  servers works (<1 ms to a fake-DNS address). For them every check is a TLS handshake (ping targets on port
   443); only a real server answers it.
 - **Only while armed and connected:** the checks go through the tunnel like any other traffic; nothing in the
   kill-switch is opened for them. While blocked, off or redialing there is no rating - the samples are dropped, and a

@@ -294,7 +294,7 @@ def test_connection_row(facts, text):
 
 
 def test_a_reconnect_between_two_rounds_starts_the_rating_over(tmp_path):
-    """Seen live: "unstable" one second after a Reconnect - the tunnel was down for ~6 s between two 10 s rounds, so no
+    """Regression: "unstable" one second after a Reconnect - the tunnel was down for ~6 s between two 10 s rounds, so no
     round saw it, and the old period went on with the check that failed during the Reconnect."""
     m = quality.Monitor(tmp_path / "quality.json")
     c = CheckConfig(True, 10, 1)

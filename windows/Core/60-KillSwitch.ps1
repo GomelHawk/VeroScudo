@@ -50,8 +50,8 @@ function Get-VeroFilterSpec {
     if ($PermitKind -in 'endpoints', 'program') { $ServerIps = @() }        # reserve types: their own permits below
     $fam = Split-Family $ServerIps
     # IKEv2 data: Windows hands each packet of the tunnel to the firewall as an IP-in-IP flow to the server (protocol 4,
-    # protocol 41 for IPv6 inside) before IPsec encrypts it. Without these the tunnel connects and carries nothing (seen live
-    # 2026-11-03: 614 drops of protocol 4 to the server in a few seconds, every IKEv2 profile dead while armed).
+    # protocol 41 for IPv6 inside) before IPsec encrypts it. Without these the tunnel connects and carries nothing
+    # (hundreds of protocol-4 drops to the server within seconds, every IKEv2 profile dead while armed).
     $ipInIp = @(@{ P = 4; Ports = @(); App = $false }, @{ P = 41; Ports = @(); App = $false })
     $parts = switch ($TunnelType) {
         'Sstp'  { @(@{ P = 6; Ports = @($Config.Port); App = $true }) }
@@ -309,7 +309,7 @@ function Set-VeroVmAccess {
         @{ DefaultOutboundAction = $orig } | ConvertTo-Json | Set-Content $p.VmBackup
     }
     # the allow rule first, the default Block after it: turning on while the tunnel is up never leaves WSL a moment without
-    # network (seen live: Block, then 1 s later allowed - a connection open in WSL at that moment could hang)
+    # network (the other order - Block, then 1 s later allowed - could hang a connection open in WSL at that moment)
     $want = if ($Allow) { 'True' } else { 'False' }
     $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
     if (-not $r) {
@@ -333,7 +333,7 @@ function Restore-VeroVmAccess {
     $restored = $true
     if (Test-Path $p.VmBackup) {
         $orig = [string](Get-Content $p.VmBackup -Raw | ConvertFrom-Json).DefaultOutboundAction
-        # a saved Block came from VeroScudo itself (seen live: WSL stayed offline whenever VeroScudo was off)
+        # a saved Block came from VeroScudo itself (restoring it would leave WSL offline whenever VeroScudo is off)
         if (-not $orig -or $orig -eq 'Block') { $orig = 'NotConfigured' }
         try {
             Set-NetFirewallHyperVVMSetting -Name $script:WslCreator -DefaultOutboundAction $orig
@@ -432,7 +432,7 @@ function Sync-VeroKillSwitch {
        filters went missing). Atomic: one WFP transaction replaces the previous set. Re-run every 15 s by the watchdog, so a
        recreated WSL adapter, a new tunnel interface or a moved VPN server are picked up without a manual toggle.
        The filters are applied with the cached server addresses first and the name is re-resolved only afterwards, while the
-       tunnel is up: a lookup made before the switch would hang on the filters still in force (seen live: 23 s after a drop,
+       tunnel is up: a lookup made before the switch would hang on the filters still in force (23 s after a drop,
        12 s after a reconnect, all traffic blocked meanwhile). One sync at a time (watchdog and event tasks run in parallel). #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Force, [switch]$NoRefresh, [switch]$ForceDown)
     # -ForceDown: apply the set without the tunnel even while it is still up (Reconnect: block first, then hang up)
@@ -441,8 +441,8 @@ function Sync-VeroKillSwitch {
 }
 
 function Invoke-VeroLocked([scriptblock]$Script, [object[]]$Arguments = @()) {
-    <# Applying and removing filters never overlap (watchdog, event tasks and On/Off run in parallel processes). Seen live:
-       a slow disarm finished after a re-arm had applied its filters and left an armed machine without any. #>
+    <# Applying and removing filters never overlap (watchdog, event tasks and On/Off run in parallel processes). Otherwise
+       a slow disarm can finish after a re-arm applied its filters and leave an armed machine without any. #>
     $held = Enter-VeroSingleton -Name 'sync' -WaitMs 60000                 # after a minute: go ahead anyway (as before)
     try {
         & $Script @Arguments                       # values passed explicitly, not read from the caller's scope
@@ -503,7 +503,7 @@ function Sync-VeroKillSwitchCore {
             throw
         }
         # a blocked set (a drop, a Reconnect, a switch): the connection check starts its rating over from here, however short
-        # the gap - its own rounds every 10-100 s can miss a Reconnect of a few seconds (seen live: "unstable" 1 s after one)
+        # the gap - its own rounds every 10-100 s can miss a Reconnect of a few seconds (otherwise "unstable" 1 s after one)
         if (-not $tun) { try { [IO.File]::WriteAllText($p.LastDown, [string](Get-VeroEpoch)) } catch { Write-Verbose 'last-down not written' } }
         @{ Fingerprint = $fp; Count = $specs.Count; Profile = $Config.Profile; Type = $type; Tunnel = [string]$tun; Wsl = [string]$wsl; Switch = [string]$sw; Servers = $ips; Time = (Get-Date).ToString('o') } |
             ConvertTo-Json | Set-Content $p.WfpState
@@ -514,7 +514,7 @@ function Sync-VeroKillSwitchCore {
         if (Test-Path $p.Emergency) { Remove-VeroLegacyFirewall -Action $Action }
     }
     # Hyper-V Default Switch VMs: their traffic never reaches these filters (62-HyperVAcl.ps1). Protected: port ACLs while
-    # the tunnel is down - right after the filters, before the slower WSL step (seen live: they came 3 s after the filters).
+    # the tunnel is down - right after the filters, before the slower WSL step (after it they would come 3 s later).
     # On every change; while blocked also every sync, so a VM created meanwhile is covered. Not protected: none at all.
     # fix B: after Windows logged "network disconnected" (NetDown task) they stay blocked until the tunnel is proven: a new
     # tunnel (a redial), or traffic through it - RAS reports a dead tunnel only seconds after the network is back

@@ -82,7 +82,7 @@ try {
             while (((Get-Date) - $sw).TotalSeconds -lt 90 -and -not ((Get-VeroConfig).Profile -eq $target -and (Up))) {
                 # a leak = 1.1.1.1 reachable while NEITHER tunnel is up, checked before and after the probe: the old tunnel stays
                 # allowed until the new profile's filters are in (by design), and a tunnel can come up while a probe runs.
-                # `-not (Up)` alone counted traffic through the old tunnel as a leak (2026-11-05, CorporateVPN -> PrivateVPN).
+                # `-not (Up)` alone counted traffic through the old tunnel as a leak (on a profile switch).
                 if (-not (TunnelUp $from, $target)) {
                     $at = Get-Date; $hit = (Tcp 1.1.1.1 443) -or (Tcp 1.1.1.1 80)
                     if ($hit -and -not (TunnelUp $from, $target)) {

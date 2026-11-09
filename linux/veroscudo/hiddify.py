@@ -26,7 +26,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .netutil import IFNAME
+from .netutil import IFNAME, parse_ip_addr
 
 KIND = "hiddify"
 LABEL = "Hiddify (VPN mode)"                         # how another (not active) Hiddify tunnel is named in the tray
@@ -41,7 +41,7 @@ NOT_CONNECTED = "Hiddify is not connected - connect it in Hiddify (VPN mode); tr
 RECONNECT_HINT = "Connect and reconnect in Hiddify"
 
 # Hiddify's data folder, relative to the user's home. UNVERIFIED on Linux and macOS: only the Windows layout
-# (%APPDATA%\Hiddify\hiddify\data\current-config.json) was seen live. Each entry is also tried with a nested "hiddify/".
+# (%APPDATA%\Hiddify\hiddify\data\current-config.json) is confirmed. Each entry is also tried with a nested "hiddify/".
 DATA_DIRS = {
     "linux": (".local/share/app.hiddify.com", ".local/share/hiddify", ".local/share/Hiddify"),
     "darwin": ("Library/Application Support/app.hiddify.com", "Library/Application Support/Hiddify"),
@@ -264,16 +264,6 @@ def service_mode(prefs_text: str) -> str | None:
         return None
     v = j.get("flutter.service-mode") if isinstance(j, dict) else None
     return v if isinstance(v, str) else None
-
-
-def parse_ip_addr(text: str) -> dict[str, list[str]]:
-    """`ip -o -4 addr show up` -> {interface: [IPv4 addresses]}. Pure."""
-    out: dict[str, list[str]] = {}
-    for line in text.splitlines():
-        m = re.match(r"^\d+:\s+(\S+?)(?:@\S+)?\s+inet\s+([0-9.]+)/\d+", line)
-        if m:
-            out.setdefault(m.group(1), []).append(m.group(2))
-    return out
 
 
 def parse_ifconfig(text: str) -> dict[str, list[str]]:

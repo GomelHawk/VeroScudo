@@ -103,7 +103,7 @@ public class VeroTheme {
 }
 
 // Combo box in the theme's colours. With FlatStyle.Flat WinForms paints the drop-down button itself, in the light system
-// colour with a tiny arrow - on the dark theme the boxes did not read as drop-downs at all (seen 2026-11-05). This paints
+// colour with a tiny arrow - on the dark theme the boxes did not read as drop-downs at all. This paints
 // over WinForms after every paint: the button in the box's own colour with a clear chevron, and an outline like an input.
 public class VeroCombo : ComboBox {
     public Color Arrow = SystemColors.ControlText, ArrowDisabled = SystemColors.GrayText, Frame = SystemColors.ControlDark;
@@ -122,7 +122,7 @@ public class VeroCombo : ComboBox {
                 if (Enabled) g.FillRectangle(b, btn);
                 else {
                     // disabled (a locked field in Edit): Windows draws its own disabled style - a bright inner frame that stops at
-                    // the button (seen 2026-11-05). Paint the whole box, so a locked field looks like an open one, chevron dimmed.
+                    // the button. Paint the whole box, so a locked field looks like an open one, chevron dimmed.
                     g.FillRectangle(b, 1, 1, Width - 2, Height - 2);
                     TextRenderer.DrawText(g, Text, Font, new Rectangle(3, 1, Width - bw - 6, Height - 2), ForeColor, BackColor,
                         TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);

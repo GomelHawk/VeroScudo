@@ -11,7 +11,7 @@ function Test-VeroTunnelAdapter($Nic) {
     if (-not $Nic) { return $false }
     if ([string]$Nic.Description -match 'Teredo|ISATAP|6to4|IP-HTTPS|IPHTTPS|Microsoft Kernel Debug') { return $false }   # Windows' own tunnels
     if ([string]$Nic.NetworkInterfaceType -in 'Ppp', 'Tunnel') { return $true }
-    [string]$Nic.Description -match 'TAP-Windows|Wintun|WireGuard|OpenVPN|Data Channel Offload|ovpn-dco|TAP-|sing-box|sing-tun|Hiddify|NordLynx|PrivateVPN'   # sing-tun: Hiddify's VPN mode (seen live)
+    [string]$Nic.Description -match 'TAP-Windows|Wintun|WireGuard|OpenVPN|Data Channel Offload|ovpn-dco|TAP-|sing-box|sing-tun|Hiddify|NordLynx|PrivateVPN'   # sing-tun: Hiddify's VPN mode
 }
 
 function Write-VeroSecretFile {

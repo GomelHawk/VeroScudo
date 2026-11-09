@@ -143,7 +143,7 @@ function Test-VeroTrayFileChanged {
 function Get-VeroTrayPref {
     <# The per-user tray choices (tray.json) with defaults for whatever is missing or unreadable. #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
-    # every key the tray reads must be listed here - unknown keys are dropped (seen live: statusPage was saved but read as off)
+    # every key the tray reads must be listed here - unknown keys are dropped (otherwise e.g. statusPage is saved but read back as off)
     $o = @{ keepAwake = $false; lastProfile = ''; eventsClearedAt = ''; showExit = $true; exitInfo = $null; statusPage = $false; statusPageUrl = '' }
     try { if (Test-Path -LiteralPath $Path) { $j = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json; foreach ($k in @($o.Keys)) { if ($j.PSObject.Properties[$k]) { $o[$k] = $j.$k } } } } catch { Write-Verbose 'tray.json unreadable' }
     $o

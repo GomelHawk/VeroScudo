@@ -2,7 +2,7 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 #
 # Windows translates a Default Switch VM's traffic inside the Hyper-V virtual switch, below the host's IP stack: none of
-# the WFP filters see it, and while the tunnel is down it leaves through the normal network (live test 2026-11-06). The
+# the WFP filters see it, and while the tunnel is down it leaves through the normal network. The
 # virtual switch enforces port ACLs on each VM's port before that translation, so while armed and blocked every VM on the
 # Default Switch gets: outbound deny everything, allow the switch's own subnet (Windows is its DHCP server and DNS proxy),
 # broadcast and IPv6 link-local/multicast. While the tunnel is up the rules are removed (the VM's traffic then follows
@@ -106,8 +106,8 @@ function Set-VeroVmBlock {
             $a = $adapters | Where-Object { [string]$_.Id -eq [string]$e.AdapterId } | Select-Object -First 1
             if (-not $a) { continue }                                  # the VM or its adapter is gone: nothing left to remove
             try {
-                # removed in the form Hyper-V stored it (seen live: '255.255.255.255/32' did not match its '255.255.255.255'
-                # and the rule stayed), then checked
+                # removed in the form Hyper-V stored it ('255.255.255.255/32' does not match its '255.255.255.255'
+                # and the rule would stay), then checked
                 foreach ($m in @(Find-VeroVmAcl $a ([string]$e.Remote) ([string]$e.Action))) { Remove-VeroVmAdapterAcl $a (Format-VeroAclAddress (Get-VeroAclRemote $m)) ([string]$e.Action) }
                 if (@(Find-VeroVmAcl $a ([string]$e.Remote) ([string]$e.Action)).Count -gt 0) { throw 'still there after removal' }
             } catch { $left.Add($e); Write-VeroLog "ERROR: port ACL $($e.Remote) $($e.Action) on VM '$($e.VMName)' not removed: $($_.Exception.Message) - will retry" $Action }
@@ -149,7 +149,7 @@ function Set-VeroVmBlock {
 
 # ---------------------------------------------------------------- fix B: the network dropped
 # Windows reports a dead VPN late: after a Wi-Fi drop RAS said so ~4 s after the Wi-Fi was back, and until then the
-# Default Switch VMs left through the ISP (live test 2026-11-06). Windows logs the drop itself at once (NetworkProfile
+# Default Switch VMs left through the ISP. Windows logs the drop itself at once (NetworkProfile
 # 10001, the \VeroScudo\NetDown task): the VMs are blocked right then, and stay blocked until the tunnel is proven to carry
 # traffic again - a new tunnel (a redial), or a check through it. Windows itself needs none of this: WFP lets it out only
 # through the tunnel interface anyway.

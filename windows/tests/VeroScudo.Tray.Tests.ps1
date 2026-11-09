@@ -219,7 +219,7 @@ Describe 'ConvertTo-VeroStatusPageView: a service status page line' {
 }
 
 Describe 'Get-VeroTrayPref: every key the tray uses survives a read' {
-    It 'keeps the status page switch and address (live: saved, but read back as off)' {
+    It 'keeps the status page switch and address (was saved, but read back as off)' {
         $f = Join-Path $script:TrayTestDir 'tray-pref.json'
         Set-VeroTrayPref -Path $f -Key 'statusPage' -Value $true
         Set-VeroTrayPref -Path $f -Key 'statusPageUrl' -Value 'https://status.example.com/api/v2/status.json'

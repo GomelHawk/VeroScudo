@@ -90,7 +90,7 @@ function Get-VeroForeignVpn {
     # vendor apps: a tunnel adapter that is up and belongs to none of the above (and is not ours)
     $ownRunner = ($type -eq 'openvpn') -and (Test-VeroOpenVpnRunnerAlive)
     # VeroScudo's own OpenVPN tunnels, by the adapter that holds the address OpenVPN reported: the runner's lock above is
-    # per session and invisible to the tray (seen live: the tray listed VeroScudo's own TAP adapter as "a VPN app")
+    # per session and invisible to the tray (it would list VeroScudo's own TAP adapter as "a VPN app")
     $ownNics = @(foreach ($pr in @($Config.Profiles | Where-Object Type -eq 'openvpn')) { $n = Get-VeroOpenVpnNic $pr.Profile; if ($n) { [string]$n.Id } })
     foreach ($nic in @(Get-VeroNic | Where-Object { [string]$_.OperationalStatus -eq 'Up' -and (Test-VeroTunnelAdapter $_) })) {
         if ([string]$nic.NetworkInterfaceType -eq 'Ppp') { continue }                                       # Windows VPN: listed by name above

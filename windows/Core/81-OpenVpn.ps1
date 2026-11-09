@@ -177,7 +177,7 @@ function Get-VeroOpenVpnRemote {
 }
 
 $script:OvpnExe = $null
-# VeroScudo's own TAP adapter for OpenVPN profiles (without DCO OpenVPN otherwise takes ANY free TAP adapter - seen live:
+# VeroScudo's own TAP adapter for OpenVPN profiles (without DCO OpenVPN otherwise takes ANY free TAP adapter - e.g.
 # the one the PrivateVPN app installed and named "PrivateVPN", which also clashes when that app runs at the same time).
 $script:OvpnAdapter = 'VeroScudo OpenVPN'
 $script:OvpnAdapterNoted = $false
@@ -393,8 +393,8 @@ function Read-VeroMgmt($M, [int]$TimeoutMs = 1000) {
 
 function New-VeroMgmtQueue {
     <# One command at a time on the management connection: the next goes out only once OpenVPN answered the previous one
-       (a SUCCESS: or ERROR: line). OpenVPN 2.7.8 on Windows was seen (2026-11-05) running the first of two commands that
-       arrived together twice and dropping the second - 'password' was lost that way and the start sat waiting until the 45 s
+       (a SUCCESS: or ERROR: line). OpenVPN 2.7.8 on Windows can run the first of two commands that
+       arrived together twice and drop the second - 'password' was lost that way and the start sat waiting until the 45 s
        guard killed it. The queue starts with the management password in flight (sent by Connect-VeroMgmt, never re-sent). #>
     [pscustomobject]@{
         Pending  = New-Object System.Collections.Generic.Queue[string]
@@ -487,7 +487,7 @@ function Invoke-VeroOpenVpnSession {
             $lines = Read-VeroMgmt $m 1000
             if ($null -eq $lines) { break }
             # no progress for 45 s before CONNECTED (no new state, no password asked): restart it instead of waiting for ever
-            # (seen live twice: a start sat in STARTING, OpenVPN never asked for the password; the next start took 7 s)
+            # (a start can sit in STARTING with OpenVPN never asking for the password; the next start takes 7 s)
             if (-not $stopping -and -not $waitingOtp -and $curState -ne 'CONNECTED' -and ((Get-Date) - $progress).TotalSeconds -gt 45) {
                 Write-VeroLog ("OpenVPN '{0}' made no progress for 45 s (state {1}) - restarting it. Last from OpenVPN: {2}" -f $name, $curState, ((@($trace) | Select-Object -Last 8) -join ' | ')) $Action
                 Add-VeroMgmtCommand $q 'signal SIGTERM' -First; $stopping = 'no progress for 45 s'; $deadline = (Get-Date).AddSeconds(10); $reason = $stopping; $restart = $true

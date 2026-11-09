@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import hiddify
 from .netutil import IFNAME as _IFNAME
-from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's contract)
+from .netutil import ipv4_by_iface, nameservers, resolve  # noqa: F401  (nameservers, resolve: part of this backend's contract)
 
 SYS_NET = Path("/sys/class/net")
 
@@ -52,9 +52,23 @@ def iface(profile: str) -> str | None:
         t = hiddify.iface(profile)
         return t if t and is_virtual(t) else None
     v = _nmcli("-g", "GENERAL.IP-IFACE", "connection", "show", profile)
-    if v and v != "--" and is_virtual(v):
+    if not v or v == "--":
+        return None                                             # not active
+    if is_virtual(v):
         return v
-    return None
+    return _iface_by_address(profile)
+
+
+def _iface_by_address(profile: str) -> str | None:
+    """pppd-based VPN plugins (SSTP, L2TP, PPTP): NetworkManager reports the card underneath as GENERAL.IP-IFACE (eth0
+    for an SSTP connection on ppp0). The tunnel is then the virtual interface that holds the
+    connection's own IPv4 address - exactly one such interface, never a physical card; anything else = None (blocked)."""
+    raw = _nmcli("-g", "IP4.ADDRESS", "connection", "show", profile)
+    own = {a.strip().split("/")[0] for a in raw.split("|") if a.strip() and a.strip() != "--"}
+    if not own:
+        return None
+    hits = sorted(i for i, ips in ipv4_by_iface().items() if own & set(ips) and is_virtual(i))
+    return hits[0] if len(hits) == 1 else None
 
 
 WG_STALE_SECONDS = 180          # a live WireGuard link re-handshakes every 2 minutes

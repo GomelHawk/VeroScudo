@@ -23,7 +23,10 @@ A VM keeps the kill-switch away from the machine you work on: blocking the VM bl
    `sudo apt install network-manager-sstp-gnome`; OpenVPN / WireGuard configs import there too.
 3. **Install**: copy the release archive (or the repo) into the VM, `cd VeroScudo-linux && sudo ./install.sh`, pick the
    connection. The shield appears in the top bar.
-4. **Walk through it** (each line: what you do -> what you must see):
+4. **Start the leak probe** in a terminal of its own and leave it running: `linux/tests-local/probe.sh` (every 3 s the
+   state, the exit address, a direct ping and DNS query; `<<< LEAK` marks a leak; Ctrl-C prints the summary; log in
+   `~/veroscudo-probe.log`). Run it in the VM's own window, not over SSH - while armed, inbound SSH is blocked.
+5. **Walk through it** (each line: what you do -> what you must see):
    - tray > Turn VPN on -> *Connecting* notification, then green shield, *VPN protected*
    - `curl -s https://ifconfig.me` -> the VPN's address
    - pull the VM's network cable (VM settings) for a minute -> red shield, *VPN connection lost - traffic blocked*;
@@ -34,6 +37,4 @@ A VM keeps the kill-switch away from the machine you work on: blocking the VM bl
    - tray > Status… / Open log / Settings… (import, make default - asks for your password) / About
    - reboot while on with the VPN server unreachable -> blocked from the first second (`sudo nft list table inet veroscudo`)
    - tray > About > Uninstall… -> everything gone, network normal
-5. Paste `veroscudo status`, the end of `/var/log/veroscudo.log` and what you saw into the pull request.
-
-Still to write: a `live.sh` that automates the leak probes of step 4, as `windows/tests-local/Test-Live.ps1` does.
+6. Paste `veroscudo status`, the end of `/var/log/veroscudo.log`, the probe's summary and what you saw into the pull request.

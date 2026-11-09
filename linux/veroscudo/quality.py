@@ -263,7 +263,7 @@ def _https(t: Target, start: float) -> bool:
 def check(t: Target, tls: bool = False) -> tuple[bool, int | None]:
     """One check: (answered, round trip in ms). https: see _https. tls (Hiddify profiles): a TLS handshake on the target's
     TCP port (443 for a ping target) instead of ping/TCP - Hiddify's TUN answers pings and completes TCP handshakes itself,
-    locally, also when none of its servers works (seen live on Windows: <1 ms to a fake-DNS address); only a real server
+    locally, also when none of its servers works (<1 ms to a fake-DNS address); only a real server
     answers a TLS handshake. HTTPS targets stay HTTPS. A certificate that does not match still proves the server
     answered; a closed or reset connection does not."""
     start = time.monotonic()
@@ -334,7 +334,7 @@ class Monitor:
 
     def add_round(self, cfg: CheckConfig, profile: str, results, now: float | None = None, down_at: float = 0.0) -> Quality:
         """down_at: when the kill-switch last blocked (StateStore.last_down): a Reconnect between two rounds is a new
-        connection too, although no round saw it down (seen live: "unstable" one second after a Reconnect)."""
+        connection too, although no round saw it down (otherwise "unstable" one second after a Reconnect)."""
         now = time.time() if now is None else now
         key = (profile, cfg.interval_seconds, cfg.window_minutes, cfg.targets)
         if key != self.key or down_at > self.started:        # new connection, other profile or other rules: start over

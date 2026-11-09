@@ -147,7 +147,7 @@ function Start-ExitFetch {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $e1 = ''; $e2 = ''
         try {
-            # bytes decoded as UTF-8 here: Windows PowerShell reads an answer without a charset as Latin-1 (seen live: a Polish city name came out garbled)
+            # bytes decoded as UTF-8 here: Windows PowerShell reads an answer without a charset as Latin-1 (a Polish city name comes out garbled)
             $w = Invoke-WebRequest -Uri 'https://ipinfo.io/json' -TimeoutSec 6 -UseBasicParsing -Headers @{ Accept = 'application/json' }
             $r = [Text.Encoding]::UTF8.GetString($w.RawContentStream.ToArray()) | ConvertFrom-Json
             if ($r.ip) { return @{ Ip = [string]$r.ip; City = [string]$r.city; Country = [string]$r.country; Org = [string]$r.org; Source = 'ipinfo.io' } }

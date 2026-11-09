@@ -23,12 +23,12 @@ function Get-VeroKeyPassphrase {
 $script:EventSettleSeconds = 3              # on-event waits this long before reading the termination records (tests: 0)
 $script:RasAuthCodes = @(691)              # "the user name and password combination is not recognized"
 # SSTP could not check the server certificate's revocation (CRL/OCSP offline): CRYPT_E_REVOCATION_OFFLINE / _NO_REVOCATION_CHECK
-# + WSAEACCES (0x8007271D): seen live 2026-11-03 - with no TCP 80 permit, SSTP's revocation fetch is refused by the filters
+# + WSAEACCES (0x8007271D): with no TCP 80 permit, SSTP's revocation fetch is refused by the filters
 # and RasDial returns "access forbidden" instead of a revocation code
 $script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012, -2147014883, 10013)
 function Open-VeroCrlWindow {
     <# Allow svchost TCP 80 for 2 minutes so SSTP can fetch the CRL: after a dial failed on the revocation check, and right
-       after an SSTP tunnel came up (it may still be checking when the filters arrive - seen live: RAS 829 ~5 s after arm). #>
+       after an SSTP tunnel came up (it may still be checking when the filters arrive - RAS can report 829 ~5 s after arm). #>
     [CmdletBinding()] param([string]$Action = 'core', [string]$Reason = 'SSTP could not check the server certificate revocation')
     @{ Until = (Get-Date).AddMinutes(2).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).CrlWindow
     Write-VeroLog "$Reason - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can" $Action
@@ -204,8 +204,8 @@ function Invoke-VeroReconnect {
             if (Test-VeroVpnConnected $Config.Profile -Type $type) { Write-VeroLog "WARNING: '$($Config.Profile)' did not hang up within 15 s - keeping it" $Action }
         }
         while ((Test-VeroArmed) -and -not (Test-VeroVpnConnected $Config.Profile)) {
-            # you picked another profile while this one is being redialed: yours wins (seen live: the tray's switch to WireGuard
-            # was dropped because this loop kept the Switch task busy redialing OpenVPN)
+            # you picked another profile while this one is being redialed: yours wins (otherwise
+            # a switch from the tray is lost while this loop keeps the Switch task busy redialing)
             if (Get-VeroPendingSwitch) {
                 $want = Read-VeroSwitchRequest                                   # taken by this loop (the Switch task may take it first: then it switches)
                 if ($want -and $want -ne $Config.Profile -and @((Get-VeroConfig).Profiles | ForEach-Object Profile) -contains $want) {
@@ -274,7 +274,7 @@ function Invoke-VeroCheck {
         try { if (Update-VeroWgWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: WireGuard watch: $($_.Exception.Message)" $Action }
     }
     # about once a minute: other VPNs / kill-switches - every pass (15 s) while one is reported, so the tray's warning goes
-    # away soon after you stop the other VPN (seen live: it stayed up to a minute after WireGuard was turned off)
+    # away soon after you stop the other VPN (not up to a minute later)
     if (-not (Test-VeroLockAlive) -and (Get-VeroPendingSwitch -MinAgeSeconds 5)) {
         $want = Read-VeroSwitchRequest
         if ($want -and @($cfg.Profiles | ForEach-Object Profile) -contains $want) {
@@ -315,7 +315,7 @@ function Invoke-VeroSwitch {
         Sync-VeroKillSwitch -Config $new -Action $Action
         # ALWAYS hang the old tunnel up and wait until it is really gone before dialing the new one: once blocked it can look
         # "not connected" while RAS still holds it (and its routes) - the new dial then fails until RAS gives up on it
-        # (seen live 2026-11-03: CorporateVPN -> PrivateVPN, IKEv2 attempts failed for ~1 minute until RAS logged 829)
+        # (e.g. SSTP -> IKEv2: the IKEv2 attempts fail for ~1 minute until RAS logs 829)
         Invoke-VeroHangUp $old.Profile $oldType
         $t = Get-Date
         while ((Test-VeroVpnConnected $old.Profile -Type $oldType) -and ((Get-Date) - $t).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500 }
