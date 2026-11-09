@@ -270,10 +270,13 @@ def test_mac_exit_location_is_your_own_setting(mac):
     assert mac.exit.enabled() is True
 
 
-def test_stats_week_reads_the_guards_folder(mac):
-    assert mac.stats_week()[0][1].vpn_minutes == 0
+def test_stats_week_reads_the_guards_folder_per_profile(mac):
+    assert mac.stats_week("w")[0][1].vpn_minutes == 0
     d = stats.stats_dir(mac.store.state)
     d.mkdir(parents=True, exist_ok=True)
     from datetime import datetime
-    (d / f"{datetime.now().date().isoformat()}.jsonl").write_text('{"m":0}\n{"m":1,"sent":3,"lost":0}\n')
-    assert mac.stats_week()[0][1].vpn_minutes == 2
+    (d / f"{datetime.now().date().isoformat()}.jsonl").write_text('{"m":0,"id":"w","p":"Work"}\n'
+                                                                  '{"m":1,"id":"w","p":"Work","sent":3,"lost":0}\n'
+                                                                  '{"m":2,"id":"h","p":"Home"}\n')
+    assert mac.stats_week("w")[0][1].vpn_minutes == 2 and mac.stats_week("h")[0][1].vpn_minutes == 1
+    assert ("h", "Home (removed)") in mac.stats_choices()

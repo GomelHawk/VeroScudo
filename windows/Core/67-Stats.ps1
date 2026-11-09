@@ -1,30 +1,52 @@
 ﻿# ---------------------------------------------------------------- statistics: 7 days of VPN time and connection quality
-# The watchdog notes, minute by minute, whether VeroScudo's VPN was up and - when the connection check is on - how many of
+# The watchdog notes, minute by minute, which VeroScudo profile was up and - when the connection check is on - how many of
 # its checks were sent and lost in that minute. One file per local day, state\stats\yyyy-MM-dd.jsonl, one line per minute
-# with the VPN up: {"m":605} (up, check off) or {"m":605,"sent":3,"lost":1}. A minute with no line = VPN off, PC asleep or
-# VeroScudo off. Raw counts, not colours: the window can group them into any bar width, and a later change of the rating
-# thresholds re-rates old days correctly. Files older than $script:StatsKeepDays are removed by the watchdog.
-# The tray reads them (Read-VeroStatsDay) and draws one row per day (ConvertTo-VeroStatsDay). Same format on Linux/macOS.
+# and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1.
+# Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
+# profile's lasting id (Get-VeroProfileId), so a renamed profile keeps its history; "p" is its name at that minute, so a
+# removed profile is still shown by its last name. A minute without a line = VPN off, PC asleep or VeroScudo off. JSON with
+# ASCII escapes. Raw counts, not colours: the window groups them into bars, and a later change of the rating thresholds
+# re-rates old days. Files older than $script:StatsKeepDays are removed by the watchdog. Same format on Linux/macOS.
 
 $script:StatsKeepDays = 8                                                # 7 full days + today
-$script:StatsMinute = $null                                              # the minute being collected: @{ Date; M; Up; Sent; Lost }
+$script:StatsMinute = $null                                              # the minute being collected: @{ Date; M; P = @{ id = @{ Up; Sent; Lost; Name } } }
 $script:StatsPruned = ''                                                 # the date old files were last removed
 
 function Get-VeroStatsDir { Join-Path (Get-VeroPath).State 'stats' }
 
+function ConvertTo-VeroJsonString([string]$Text) {
+    <# A JSON string with ASCII escapes - byte for byte what Python's json.dumps(ensure_ascii=True) writes. Pure. #>
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in $Text.ToCharArray()) {
+        $c = [int]$ch
+        if ($ch -eq '"') { [void]$sb.Append('\"') }
+        elseif ($ch -eq '\') { [void]$sb.Append('\\') }
+        elseif ($c -eq 10) { [void]$sb.Append('\n') } elseif ($c -eq 13) { [void]$sb.Append('\r') } elseif ($c -eq 9) { [void]$sb.Append('\t') }
+        elseif ($c -eq 8) { [void]$sb.Append('\b') } elseif ($c -eq 12) { [void]$sb.Append('\f') }
+        elseif ($c -lt 32 -or $c -gt 126) { [void]$sb.Append(('\u{0:x4}' -f $c)) }
+        else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append('"')
+    $sb.ToString()
+}
+
 function Format-VeroStatsLine {
-    <# One minute -> its line. Pure. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [int]$Sent = 0, [int]$Lost = 0)
-    if ($Sent -gt 0) { '{{"m":{0},"sent":{1},"lost":{2}}}' -f $Minute, $Sent, $Lost } else { '{{"m":{0}}}' -f $Minute }
+    <# One minute of one profile -> its line. Pure. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0)
+    $head = '{{"m":{0},"id":{1},"p":{2}' -f $Minute, (ConvertTo-VeroJsonString $Id), (ConvertTo-VeroJsonString $Name)
+    if ($Sent -gt 0) { '{0},"sent":{1},"lost":{2}}}' -f $head, $Sent, $Lost } else { $head + '}' }
 }
 
 function Save-VeroStatsMinute {
-    <# Appends the collected minute to its day's file (only when the VPN was up in it). #>
+    <# Appends the collected minute to its day's file: one line per profile that was up in it. #>
     $s = $script:StatsMinute
-    if (-not $s -or -not $s.Up) { return }
+    if (-not $s) { return }
+    $lines = @(foreach ($id in $s.P.Keys) { $v = $s.P[$id]; if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost } })
+    if ($lines.Count -eq 0) { return }
     $dir = Get-VeroStatsDir
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [IO.File]::AppendAllText((Join-Path $dir "$($s.Date).jsonl"), (Format-VeroStatsLine -Minute $s.M -Sent $s.Sent -Lost $s.Lost) + "`n")
+    [IO.File]::AppendAllText((Join-Path $dir "$($s.Date).jsonl"), (($lines -join "`n") + "`n"))
 }
 
 function Select-VeroStatsMinute([datetime]$Now) {
@@ -34,24 +56,30 @@ function Select-VeroStatsMinute([datetime]$Now) {
     $s = $script:StatsMinute
     if (-not $s -or $s.Date -ne $date -or $s.M -ne $m) {
         Save-VeroStatsMinute
-        $script:StatsMinute = @{ Date = $date; M = $m; Up = $false; Sent = 0; Lost = 0 }
+        $script:StatsMinute = @{ Date = $date; M = $m; P = [ordered]@{} }
     }
     $script:StatsMinute
 }
 
+function Get-VeroStatsSlot($Minute, [string]$Id, [string]$Name) {
+    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Sent = 0; Lost = 0; Name = $Name } }
+    $Minute.P[$Id].Name = $Name
+    $Minute.P[$Id]
+}
+
 function Update-VeroStats {
-    <# The watchdog's 15-second pass: was VeroScudo's VPN up right now? Also removes old files once a day. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Up, [datetime]$Now = (Get-Date))
+    <# The watchdog's 15-second pass: was VeroScudo's VPN up right now, on which profile? Also removes old files once a day. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Up, [string]$Id = '', [string]$Name = '', [datetime]$Now = (Get-Date))
     $s = Select-VeroStatsMinute $Now
-    if ($Up) { $s.Up = $true }
+    if ($Up -and $Id) { (Get-VeroStatsSlot $s $Id $Name).Up = $true }
     if ($script:StatsPruned -ne $s.Date) { Remove-VeroOldStats -Now $Now; $script:StatsPruned = $s.Date }
 }
 
 function Add-VeroStatsChecks {
-    <# One round of the connection check: its checks count in this minute (and the minute was up - the checks need the tunnel). #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Sent, [Parameter(Mandatory)][int]$Lost, [datetime]$Now = (Get-Date))
-    $s = Select-VeroStatsMinute $Now
-    $s.Up = $true; $s.Sent += $Sent; $s.Lost += $Lost
+    <# One round of the connection check: its checks count in this minute for this profile (and it was up - the checks need the tunnel). #>
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Sent, [Parameter(Mandatory)][int]$Lost, [Parameter(Mandatory)][string]$Id, [string]$Name = '', [datetime]$Now = (Get-Date))
+    $v = Get-VeroStatsSlot (Select-VeroStatsMinute $Now) $Id $Name
+    $v.Up = $true; $v.Sent += $Sent; $v.Lost += $Lost
 }
 
 function Remove-VeroOldStats {
@@ -68,32 +96,60 @@ function Remove-VeroOldStats {
     }
 }
 
+$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+))?\}\s*$'
 function ConvertFrom-VeroStatsText {
-    <# A day file's text -> @{ <minute> = @{ Sent; Lost } }. Several lines for one minute (the watchdog restarted) are added
-       up; a broken line is skipped. Pure. #>
+    <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost } } }; Names = @{ <id> = its last name } }. Several
+       lines for one minute (the watchdog restarted) are added up; a broken line or one without an id is skipped. Pure. #>
     [CmdletBinding()] param([string]$Text)
-    $out = @{}
+    $data = @{}; $names = @{}; $decoded = @{}
     foreach ($line in ($Text -split "`n")) {
-        if ($line -notmatch '^\s*\{"m":(\d{1,4})(?:,"sent":(\d+),"lost":(\d+))?\}\s*$') { continue }
-        $m = [int]$Matches[1]
+        $mt = $script:StatsLine.Match($line)
+        if (-not $mt.Success) { continue }
+        $m = [int]$mt.Groups[1].Value
         if ($m -ge 1440) { continue }
-        $sent = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
-        $lost = if ($Matches[3]) { [Math]::Min([int]$Matches[3], $sent) } else { 0 }
-        if ($out.ContainsKey($m)) { $out[$m].Sent += $sent; $out[$m].Lost += $lost } else { $out[$m] = @{ Sent = $sent; Lost = $lost } }
+        $id = $mt.Groups[2].Value; $raw = $mt.Groups[3].Value
+        if (-not $decoded.ContainsKey($raw)) { $decoded[$raw] = try { [string](('"' + $raw + '"') | ConvertFrom-Json) } catch { $raw } }
+        $sent = if ($mt.Groups[4].Success) { [int]$mt.Groups[4].Value } else { 0 }
+        $lost = if ($mt.Groups[5].Success) { [Math]::Min([int]$mt.Groups[5].Value, $sent) } else { 0 }
+        if (-not $data.ContainsKey($id)) { $data[$id] = @{} }
+        $day = $data[$id]
+        if ($day.ContainsKey($m)) { $day[$m].Sent += $sent; $day[$m].Lost += $lost } else { $day[$m] = @{ Sent = $sent; Lost = $lost } }
+        $names[$id] = $decoded[$raw]
     }
-    $out
+    @{ Data = $data; Names = $names }
 }
 
 function Read-VeroStatsDay {
-    <# The tray's side: one day's minutes (empty when there is no file). #>
+    <# The tray's side: one day's minutes per profile id, and the names (empty when there is no file). #>
     [CmdletBinding()] param([Parameter(Mandatory)][datetime]$Date)
     $p = Join-Path (Get-VeroStatsDir) ($Date.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) + '.jsonl')
     $text = try { [IO.File]::ReadAllText($p) } catch { '' }
     ConvertFrom-VeroStatsText -Text $text
 }
 
+function Get-VeroStatsChoices {
+    <# The window's drop-down as (Id, Label): the active profile first (also before it has data), then the other profiles with
+       data, the most recently used first. Label: the current name (renamed: the history stays); a removed profile keeps its
+       last name, marked. -Days: Read-VeroStatsDay results, today first; -Profiles: config.json's profiles (Id, Profile). Pure. #>
+    [CmdletBinding()] param([object[]]$Days = @(), [object[]]$Profiles = @(), [string]$ActiveId = '')
+    $last = @{}; $names = @{}
+    for ($i = $Days.Count - 1; $i -ge 0; $i--) {                           # oldest first: a later name wins
+        foreach ($id in $Days[$i].Names.Keys) { $names[$id] = $Days[$i].Names[$id] }
+        foreach ($id in $Days[$i].Data.Keys) {
+            $key = (6 - $i) * 10000 + (@($Days[$i].Data[$id].Keys) | Measure-Object -Maximum).Maximum
+            if (-not $last.ContainsKey($id) -or $key -gt $last[$id]) { $last[$id] = $key }
+        }
+    }
+    $now = @{}; foreach ($p in $Profiles) { $now[[string]$p.Id] = [string]$p.Profile }
+    $order = @($(if ($ActiveId) { $ActiveId })) + @($last.Keys | Sort-Object { $last[$_] } -Descending | Where-Object { $_ -ne $ActiveId })
+    foreach ($id in $order) {
+        $label = if ($now.ContainsKey($id)) { $now[$id] } elseif ($names.ContainsKey($id)) { "$($names[$id]) (removed)" } else { "$id (removed)" }
+        [pscustomobject]@{ Id = $id; Label = $label }
+    }
+}
+
 function Get-VeroStatsState {
-    <# One bar's colour: off (no VPN), up (VPN on, not rated - the check was off), good / unstable / bad (the connection
+    <# One bar's colour: off (this profile not connected), up (connected, not rated - the check was off), good / unstable / bad (the connection
        check's thresholds: under 10 % lost, 10-50 %, over 50 %). Pure. #>
     [CmdletBinding()] param([int]$UpMinutes, [int]$Sent, [int]$Lost)
     if ($UpMinutes -le 0) { return 'off' }
@@ -127,27 +183,27 @@ function ConvertTo-VeroStatsDay {
 }
 
 function Format-VeroStatsBar {
-    <# A bar's hover text: "14:20-14:30  unstable - 18 % lost (11 of 60 checks), VPN on 10 of 10 min". Pure. #>
+    <# A bar's hover text: "14:20-14:30  unstable - 18 % lost (11 of 60 checks), connected 10 of 10 min". Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Bar, [int]$BucketMinutes = 10)
     $t = { param($m) '{0:00}:{1:00}' -f [int][Math]::Floor($m / 60), ($m % 60) }
     $span = '{0}-{1}' -f (& $t $Bar.Start), (& $t ([Math]::Min($Bar.Start + $BucketMinutes, 1440)))
     $dash = [char]0x2013
     switch ($Bar.State) {
         'future' { return $span }
-        'off'    { return "$span  VPN off" }
-        'up'     { return "$span  VPN on $($Bar.UpMinutes) of $BucketMinutes min $dash not rated (connection check off)" }
+        'off'    { return "$span  not connected" }
+        'up'     { return "$span  connected $($Bar.UpMinutes) of $BucketMinutes min $dash not rated (connection check off)" }
         default {
             $pct = ([Math]::Round(100.0 * $Bar.Lost / $Bar.Sent, 0)).ToString([Globalization.CultureInfo]::InvariantCulture)
-            "$span  $($Bar.State) $dash $pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), VPN on $($Bar.UpMinutes) of $BucketMinutes min"
+            "$span  $($Bar.State) $dash $pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), connected $($Bar.UpMinutes) of $BucketMinutes min"
         }
     }
 }
 
 function Format-VeroStatsTotal {
-    <# A day's summary: "VPN 9 h 40 min - good 87 %" / "no VPN". Pure. #>
+    <# A day's summary: "connected 9 h 40 min - good 87 %" / "not used". Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Day)
-    if ($Day.VpnMinutes -le 0) { return 'no VPN' }
+    if ($Day.VpnMinutes -le 0) { return 'not used' }
     $h = [int][Math]::Floor($Day.VpnMinutes / 60); $min = $Day.VpnMinutes % 60
     $dur = if ($h -gt 0) { "$h h $min min" } else { "$min min" }
-    "VPN $dur $([char]0x00B7) good $($Day.GoodPct) %"
+    "connected $dur $([char]0x00B7) good $($Day.GoodPct) %"
 }

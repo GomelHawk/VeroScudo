@@ -816,7 +816,9 @@ function Show-Settings {
         & $fill; $lb.SelectedIndex = $lb.Items.Count - 1
     }).GetNewClosure())
     $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [VeroMsg]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); Request-ProfilePassword $e; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
-    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Active -eq $work[$i].Profile) { $state.Active = $e.Profile }; $work[$i] = $e; & $fill } }).GetNewClosure())
+    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Active -eq $work[$i].Profile) { $state.Active = $e.Profile }
+        if ($work[$i].PSObject.Properties['Id'] -and $work[$i].Id) { $e | Add-Member -NotePropertyName Id -NotePropertyValue $work[$i].Id -Force }   # a rename keeps the statistics
+        $work[$i] = $e; & $fill } }).GetNewClosure())
     $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile
         if ([VeroMsg]::Show("Remove '$gone' from VeroScudo?`r`n`r`nOnly VeroScudo forgets it - the VPN itself stays in Windows. You do not need to remove profiles to use another one: select it in the tray menu (VPN profile).", 'VeroScudo', 'YesNo', 'Question') -ne 'Yes') { return }; $work.RemoveAt($i); & $fill }).GetNewClosure())
     $bPw.Add_Click(({
@@ -895,6 +897,7 @@ function Show-Settings {
             $check = ConvertFrom-VeroCheckForm -Enabled $chkQ.Checked -IntervalSeconds (& $num $inEvery 10) -WindowMinutes (& $num $inOver 1) -Rows @($rows | ForEach-Object {
                 @{ Text = $_.Host.Text; Method = $(if ($_.Method.SelectedIndex -eq 0) { 'ping' } else { 'tcp' }); Port = $(if ($_.Method.SelectedIndex -eq 0) { 443 } else { & $num $_.Port 443 }) } })
         } catch { & $selectTab 2; [VeroMsg]::Show("Not saved (Connection): $($_.Exception.Message)", 'VeroScudo') | Out-Null; return }
+        Set-VeroProfileIds -Entries @($work)                                # each profile's lasting id (statistics follow it)
         $json = [ordered]@{
             profiles = @($work | ForEach-Object { ConvertTo-VeroProfileObject $_ })
             activeProfile = $(if (@($work | ForEach-Object Profile) -contains $state.Active) { $state.Active } else { $work[0].Profile })
@@ -917,11 +920,21 @@ function Show-Settings {
 # One row per day, 24 h wide, one bar per 10 minutes on a shared time grid (a problem at the same hour every day lines up
 # in one column). Data: the guard's state\stats day files (67-Stats.ps1). Hover a bar for its time and numbers.
 $global:StatsForm = $null; $global:PreviewStats = $null
-function Get-StatsDays {
+function Get-StatsRaw {
+    <# The last 7 days' files, today first: per profile id its minutes, and the names (Read-VeroStatsDay). #>
+    $now = Get-Date
+    foreach ($i in 0..6) { if ($global:PreviewStats) { $global:PreviewStats[$i] } else { Read-VeroStatsDay -Date $now.Date.AddDays(-$i) } }
+}
+function Get-StatsChoices([object[]]$raw) {
+    $cfg = $global:Config
+    @(Get-VeroStatsChoices -Days $raw -Profiles $(if ($cfg) { @($cfg.Profiles) } else { @() }) -ActiveId $(if ($cfg) { [string]$cfg.ProfileId } else { '' }))
+}
+function Get-StatsDays([object[]]$raw, [string]$id) {
+    <# The 7 rows of one profile (by its lasting id), today first. #>
     $now = Get-Date
     foreach ($i in 0..6) {
         $d = $now.Date.AddDays(-$i)
-        $mins = if ($global:PreviewStats) { $global:PreviewStats[$i] } else { Read-VeroStatsDay -Date $d }
+        $mins = if ($id -and $raw[$i].Data.ContainsKey($id)) { $raw[$i].Data[$id] } else { @{} }
         $until = if ($i -eq 0) { $now.Hour * 60 + $now.Minute + 1 } else { 1440 }
         $row = ConvertTo-VeroStatsDay -Minutes $mins -BucketMinutes 10 -UntilMinute $until
         $name = if ($i -eq 0) { 'Today' } elseif ($i -eq 1) { 'Yesterday' } else { $d.ToString('dddd', [Globalization.CultureInfo]::InvariantCulture) }
@@ -930,17 +943,36 @@ function Get-StatsDays {
 }
 function Show-Stats {
     if ($global:StatsForm -and -not $global:StatsForm.IsDisposed) { $global:StatsForm.Activate(); return }
-    $f = New-Form 'VeroScudo - Statistics' 640 650
+    $f = New-Form 'VeroScudo - Statistics' 640 682
     New-Label $f 'Last 7 days' 20 16 300 30 $FontBig | Out-Null
     New-Label $f 'One bar = 10 minutes. Hover a bar for its time and numbers.' 20 50 600 20 $FontSmall $global:Theme.Sub | Out-Null
-    $card = New-Card $f 20 80 600 438
+    # one VPN profile at a time: a corporate VPN and a home one are different connections - their problems never mix
+    New-Label $f 'VPN profile' 20 82 90 22 | Out-Null
+    $pick = New-Object VeroCombo; $pick.Location = (P 112 78); $pick.Size = (Z 300 30); $pick.DropDownStyle = 'DropDownList'; $pick.FlatStyle = 'Flat'
+    $pick.BackColor = $global:Theme.Card; $pick.ForeColor = $global:Theme.Text; $pick.Font = $FontUI; Set-DarkCombo $pick; $f.Controls.Add($pick)
+    $card = New-Card $f 20 112 600 438
     # geometry in logical px; the strip is 144 bars x 4 px (3 px bar + 1 px gap) = 576 px
     $g = @{ X = 12; Top = 30; RowH = 57; BarW = 4; StripH = 24; LabelH = 20 }
     $chart = New-Object System.Windows.Forms.Panel; $chart.Location = (P 0 0); $chart.Size = (Z 600 438); $chart.BackColor = $global:Theme.Card
     $card.Controls.Add($chart)
     # double buffering: a repaint on every hover would flicker otherwise
     $chart.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'NonPublic,Instance').SetValue($chart, $true, $null)
-    $global:StatsDaysNow = @(Get-StatsDays)
+    $global:StatsIds = @()
+    # (re)reads the files: the drop-down keeps the shown profile (by id: a rename keeps it), the chart follows it
+    $reload = ({
+        $raw = @(Get-StatsRaw)
+        $cur = if ($pick.SelectedIndex -ge 0 -and $pick.SelectedIndex -lt $global:StatsIds.Count) { $global:StatsIds[$pick.SelectedIndex] } else { '' }
+        $ch = Get-StatsChoices $raw
+        $global:StatsLoading = $true
+        $pick.Items.Clear(); foreach ($c in $ch) { [void]$pick.Items.Add($c.Label) }
+        $global:StatsIds = @($ch | ForEach-Object Id)
+        $at = [array]::IndexOf([string[]]$global:StatsIds, [string]$cur)
+        $pick.SelectedIndex = if ($at -ge 0) { $at } elseif ($global:StatsIds.Count) { 0 } else { -1 }
+        $global:StatsLoading = $false
+        $global:StatsRawNow = $raw
+        $global:StatsDaysNow = @(Get-StatsDays $raw $(if ($pick.SelectedIndex -ge 0) { $global:StatsIds[$pick.SelectedIndex] } else { '' }))
+        $chart.Invalidate()
+    }).GetNewClosure()
     $fSmall = $FontSmall; $fUI = $FontUI                                   # local copies: the handlers below are closures
     $colors = @{
         good = [System.Drawing.Color]::FromArgb(48, 200, 79); up = [System.Drawing.Color]::FromArgb(48, 200, 79)
@@ -991,21 +1023,26 @@ function Show-Stats {
         }
         if ($tip.GetToolTip($s) -ne $text) { $tip.SetToolTip($s, $text) }
     }).GetNewClosure())
+    $pick.Add_SelectedIndexChanged(({
+        if ($global:StatsLoading -or $pick.SelectedIndex -lt 0) { return }
+        $global:StatsDaysNow = @(Get-StatsDays $global:StatsRawNow $global:StatsIds[$pick.SelectedIndex]); $chart.Invalidate()
+    }).GetNewClosure())
+    & $reload
     # legend
-    $ly = 528; $lx = 20
-    foreach ($it in @(@('good', 'Good (or VPN on, not rated)'), @('unstable', 'Unstable'), @('bad', 'Bad'), @('off', 'VPN off'))) {
+    $ly = 560; $lx = 20
+    foreach ($it in @(@('good', 'Good (or connected, not rated)'), @('unstable', 'Unstable'), @('bad', 'Bad'), @('off', 'Not connected'))) {
         $sw = New-Object System.Windows.Forms.Panel; $sw.Location = (P $lx ($ly + 4)); $sw.Size = (Z 12 12); $sw.BackColor = $colors[$it[0]]; $f.Controls.Add($sw)
         $w = if ($it[0] -eq 'good') { 200 } else { 90 }
         New-Label $f $it[1] ($lx + 18) $ly $w 20 $FontSmall $global:Theme.Sub | Out-Null
         $lx += $w + 26
     }
-    New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; without it, VPN time is green.' 20 552 600 40 $FontSmall $global:Theme.Sub | Out-Null
-    $bRef = New-Button $f 'Refresh' 400 598 100
-    $bRef.Add_Click(({ $global:StatsDaysNow = @(Get-StatsDays); $chart.Invalidate() }).GetNewClosure())
-    (New-Button $f 'Close' 510 598 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())
+    New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; without it, connected time is green.' 20 584 600 40 $FontSmall $global:Theme.Sub | Out-Null
+    $bRef = New-Button $f 'Refresh' 400 630 100
+    $bRef.Add_Click($reload)
+    (New-Button $f 'Close' 510 630 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())
     # a minute later the picture has moved on: refresh while open
     $timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 60000
-    $timer.Add_Tick(({ $global:StatsDaysNow = @(Get-StatsDays); $chart.Invalidate() }).GetNewClosure())
+    $timer.Add_Tick($reload)
     $f.Add_FormClosed(({ $timer.Stop(); $timer.Dispose() }).GetNewClosure())
     if (-not $global:PreviewDir) { $timer.Start() }
     $global:StatsForm = $f
@@ -1328,15 +1365,18 @@ if ($Preview) {
     $global:PreviewFacts = $null; $global:PreviewQuality = $null
     foreach ($ti in 0..2) { Invoke-Shot "settings-$(@('profiles', 'behaviour', 'connection')[$ti])" { $sf = Show-Settings; & $global:SettingsTab $ti; Save-FormShot $sf $global:ShotName; $global:SettingsForm = $null } }
     $global:PreviewCheck = $null
-    # statistics: a made-up week - a good day, a lunch-time problem every day, an evening without VPN, check off one day
+    # statistics: a made-up week of the first profile - a lunch-time problem every day, a bad half hour, an evening without
+    # VPN, check off one day - plus a second profile and a removed one in the drop-down
+    $ids = @(if ($global:Config) { $global:Config.ProfileId; @($global:Config.Profiles | ForEach-Object Id | Where-Object { $_ -ne $global:Config.ProfileId }) }) + @('a1a1a1a1a1a1', 'b2b2b2b2b2b2')   # the active profile first: it is shown
     $global:PreviewStats = @(foreach ($i in 0..6) {
-        $m = @{}
+        $m = @{}; $m2 = @{}
         foreach ($t in (8 * 60)..(19 * 60 + 30)) {
             if (($i -eq 4 -and $t -gt 15 * 60) -or ($i -eq 0 -and $t -gt ((Get-Date).Hour * 60 + (Get-Date).Minute))) { break }
             $lost = if ($t -ge 12 * 60 + 40 -and $t -lt 13 * 60 + 20) { [int]($t % 3 -eq 0) } elseif ($i -eq 2 -and $t -ge 16 * 60 -and $t -lt 16 * 60 + 30) { 3 } else { [int](($t * 7 + $i) % 41 -eq 0) }
             $m[$t] = if ($i -eq 5) { @{ Sent = 0; Lost = 0 } } else { @{ Sent = 3; Lost = [Math]::Min($lost, 3) } }
         }
-        $m
+        foreach ($t in (20 * 60)..(22 * 60)) { if ($i -eq 0 -and $t -gt ((Get-Date).Hour * 60 + (Get-Date).Minute)) { break }; $m2[$t] = @{ Sent = 3; Lost = 0 } }
+        @{ Data = @{ $ids[0] = $m; $ids[1] = $m2; 'c3c3c3c3c3c3' = @{ 600 = @{ Sent = 0; Lost = 0 } } }; Names = @{ $ids[0] = 'p0'; $ids[1] = 'p1'; 'c3c3c3c3c3c3' = 'Old office' } }
     })
     Invoke-Shot 'stats' { $fm = Show-Stats; Save-FormShot $fm $global:ShotName; $global:StatsForm = $null }
     $global:PreviewStats = $null

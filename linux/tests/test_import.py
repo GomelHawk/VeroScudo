@@ -5,7 +5,7 @@ import json
 import pytest
 
 from veroscudo import firewall, importer, nm, pf, scutil
-from veroscudo.config import Config, server_rules
+from veroscudo.config import Config, profile_id, server_rules
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -61,7 +61,8 @@ def test_import_adds_profiles_with_their_type_and_keeps_the_rest():
     text, msgs = importer.add_profiles(BASE, FOUND, ["Office L2TP", "Reserve"])
     j = json.loads(text)
     assert [p["profile"] for p in j["profiles"]] == ["Work", "Office L2TP", "Reserve"]
-    assert j["profiles"][1] == {"profile": "Office L2TP", "server": "l2tp.example.com", "port": 443, "protocol": "udp", "vpnType": "l2tp", "username": "jdoe"}
+    assert j["profiles"][1] == {"profile": "Office L2TP", "server": "l2tp.example.com", "port": 443, "protocol": "udp", "vpnType": "l2tp", "username": "jdoe",
+                                "id": profile_id("Office L2TP")}
     assert j["activeProfile"] == "Work" and j["retrySeconds"] == 10 and len(msgs) == 2
     cfg = Config.from_text(text, active="Office L2TP")
     assert server_rules(cfg.current) == [("udp", (500, 4500, 1701)), ("esp", ())]
@@ -144,3 +145,17 @@ def test_set_default_and_options():
 def test_set_option_has_no_way_to_weaken_the_rule(key, value):
     with pytest.raises(ValueError):
         importer.set_option(TWO, key, value)
+
+
+def test_every_profile_gets_a_lasting_id_that_survives_a_rename():
+    """Statistics follow the id: written on the first save (from the name - what the guard used so far), kept on a rename;
+    a new profile named like one renamed earlier gets a random id, never the renamed one's."""
+    j = json.loads(importer.set_option(TWO, "updateCheck", "false"))
+    ids = [p["id"] for p in j["profiles"]]
+    assert ids == [profile_id("Work"), profile_id("Backup")]
+    assert profile_id("Work") == "00040bab8a78"                     # windows/tests: Get-VeroProfileId gives the same
+    j["profiles"][0]["profile"] = "Office"                          # renamed: the id stays
+    j["profiles"].append({"profile": "Work", "server": "vpn3.example.com"})
+    out = json.loads(importer.set_option(json.dumps(j), "updateCheck", "true"))
+    assert out["profiles"][0]["id"] == profile_id("Work") and out["profiles"][2]["id"] not in ids
+    assert len(out["profiles"][2]["id"]) == 12

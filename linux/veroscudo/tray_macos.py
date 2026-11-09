@@ -785,45 +785,66 @@ class Tray(NSObject):
     @objc.python_method
     def build_stats(self):
         g = traymodel.STATS_GEOMETRY
-        win, c = self.window(traymodel.STATS_TITLE, 640, 612)
+        win, c = self.window(traymodel.STATS_TITLE, 640, 682)
         head = self.label(c, traymodel.STATS_HEADING, 20, 16, 300, 30)
         head.setFont_(NSFont.boldSystemFontOfSize_(20))
         note = self.label(c, traymodel.STATS_NOTE, 20, 50, 600, 20, dim=True)
         note.setFont_(_small_font())
-        chart = StatsChart.alloc().initWithFrame_(NSMakeRect(20, 80, g["width"], g["height"]))
+        # one VPN profile at a time: a corporate VPN and a home one are different connections - their problems never mix
+        self.label(c, "VPN profile", 20, 82, 90, 20)
+        pick = self.popup(c, 112, 78, 300, (), "statsProfile:")
+        chart = StatsChart.alloc().initWithFrame_(NSMakeRect(20, 112, g["width"], g["height"]))
         # the hovered bar: as a tooltip, and in the note line too (a tooltip waits for the mouse to rest)
         chart.setup(lambda text: note.setStringValue_(text or traymodel.STATS_NOTE))
         c.addSubview_(chart)
         win.setAcceptsMouseMovedEvents_(True)
         dark, lx = _dark(), 20
         for state, text in traymodel.STATS_LEGEND:
-            sw = NSBox.alloc().initWithFrame_(NSMakeRect(lx, 532, 12, 12))
+            sw = NSBox.alloc().initWithFrame_(NSMakeRect(lx, 564, 12, 12))
             sw.setBoxType_(4)                               # NSBoxCustom: a plain coloured square
             sw.setTitlePosition_(0)
             sw.setBorderWidth_(0)
             sw.setFillColor_(_rgb(traymodel.stats_colour(state, dark)))
             c.addSubview_(sw)
             w = 200 if state == "good" else 90
-            self.label(c, text, lx + 18, 528, w, 20, dim=True).setFont_(_small_font())
+            self.label(c, text, lx + 18, 560, w, 20, dim=True).setFont_(_small_font())
             lx += w + 26
         foot = self.wrapping(c, traymodel.STATS_FOOT, dim=True, small=True)
-        foot.setFrame_(NSMakeRect(20, 552, 370, 50))
-        self.button(c, "Refresh", "statsRefresh:", 400, 560, 100)
-        close = self.button(c, "Close", "statsClose:", 510, 560, 110)
+        foot.setFrame_(NSMakeRect(20, 584, 600, 40))
+        self.button(c, "Refresh", "statsRefresh:", 400, 630, 100)
+        close = self.button(c, "Close", "statsClose:", 510, 630, 110)
         close.setKeyEquivalent_("\r")
-        self.stats_win, self.stats_ui = win, {"chart": chart, "note": note}
+        self.stats_win, self.stats_ui = win, {"chart": chart, "note": note, "pick": pick}
         self.fill_stats()
         win.center()
 
     @objc.python_method
-    def stats_week(self):
-        return stats.week(self.store.state)
+    def stats_week(self, pid):
+        return stats.week(self.store.state, pid)
+
+    @objc.python_method
+    def stats_choices(self):
+        cfg = self.cfg
+        return stats.choices(stats.profiles_seen(self.store.state), [(p.id, p.name) for p in cfg.profiles] if cfg else [],
+                             cfg.current.id if cfg else None)
 
     @objc.python_method
     def fill_stats(self):
-        chart = self.stats_ui["chart"]
-        chart.days = self.stats_week()
+        pick, chart = self.stats_ui["pick"], self.stats_ui["chart"]
+        current = self.selected(pick)                      # the id of the shown profile (renamed: same id, new name)
+        items = self.stats_choices()                       # a profile used for the first time shows up on Refresh
+        pick.removeAllItems()
+        for pid, label in items:
+            pick.addItemWithTitle_(label)
+            pick.lastItem().setRepresentedObject_(pid)
+        ids = [pid for pid, _ in items]
+        if current in ids:
+            pick.selectItemAtIndex_(ids.index(current))
+        chart.days = self.stats_week(self.selected(pick))
         chart.setNeedsDisplay_(True)
+
+    def statsProfile_(self, _):
+        self.fill_stats()
 
     def statistics_(self, _):
         if self.stats_win is None:

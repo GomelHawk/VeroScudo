@@ -338,7 +338,7 @@ class Guard:
     def record_minute(self, up: bool) -> None:
         """Statistics: VeroScudo's own VPN up right now (armed and the active profile connected; other VPNs do not count)."""
         try:
-            self.stats.tick(up)
+            self.stats.tick(up, self.cfg.current.id, self.cfg.profile)
         except OSError:
             log.exception("statistics")
 
@@ -354,7 +354,7 @@ class Guard:
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
         results = quality.run_round(chk.targets)
         try:
-            self.stats.checks(len(results), sum(1 for ok, _ in results if not ok))
+            self.stats.checks(len(results), sum(1 for ok, _ in results if not ok), cfg.current.id, cfg.profile)
         except OSError:
             log.exception("statistics")
         q = self.quality.add_round(chk, cfg.profile, results, down_at=self.store.last_down())

@@ -2,6 +2,7 @@
 nftables rules and nmcli arguments run as root."""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -14,6 +15,15 @@ from . import quality
 DEFAULT_CONFIG = Path("/etc/veroscudo/config.json")
 _HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 _BAD_NAME = re.compile(r'[\x00-\x1f"\\]')
+_ID = re.compile(r"^[0-9a-f]{12}$")
+
+
+def profile_id(name: str, stored: object = None) -> str:
+    """A profile's lasting id (config.json "id"): it stays when the profile is renamed, so its statistics keep their history.
+    A profile without one (configs before 1.4) gets one made from its name - the same on Windows (Get-VeroProfileId). Pure."""
+    if isinstance(stored, str) and _ID.match(stored):
+        return stored
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
 
 
 def config_path() -> Path:
@@ -75,6 +85,7 @@ class Profile:
     protocol: str = "tcp"          # transport of the VPN control channel: tcp (SSTP/OpenVPN-tcp) or udp (WireGuard, OpenVPN-udp, IKEv2)
     server_ips: tuple[str, ...] = ()   # pinned addresses: when set, nothing is resolved
     vpn_type: str = ""             # "" = protocol/port above; else the VPN's own ports (server_rules): l2tp, ikev2, ipsec, pptp, ...
+    id: str = ""                   # lasting id (profile_id): statistics follow it across a rename
 
 
 @dataclass(frozen=True)
@@ -153,7 +164,7 @@ class Config:
         vtype = str(p.get("vpnType", "")).lower()
         if vtype not in VPN_TYPES:
             raise ValueError(f"config.json: vpnType must be one of {', '.join(sorted(VPN_TYPES))} (profile '{name}')")
-        return Profile(name, server, str(p.get("username", "")), port, proto, tuple(pins), vtype)
+        return Profile(name, server, str(p.get("username", "")), port, proto, tuple(pins), vtype, profile_id(name, p.get("id")))
 
     @staticmethod
     def from_text(raw: str, active: str | None = None) -> Config:
@@ -166,6 +177,9 @@ class Config:
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ValueError(f"config.json: profile '{min(dupes)}' is listed twice")
+        ids = [p.id for p in profiles]
+        if len(set(ids)) != len(ids):
+            raise ValueError("config.json: two profiles have the same id")
         vm = j.get("vm", True)
         if vm not in ("auto", True, False):
             raise ValueError("config.json: vm must be true or false")

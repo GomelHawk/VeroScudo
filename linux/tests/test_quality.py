@@ -244,7 +244,7 @@ def test_guard_counts_each_round_in_the_statistics(guard):
     g.quality_tick()
     g.stats.flush()
     lines = [ln for f in (g.store.state / "stats").glob("*.jsonl") for ln in f.read_text().splitlines()]
-    assert len(lines) == 1 and '"sent":1,"lost":0' in lines[0]
+    assert len(lines) == 1 and '"p":"' in lines[0] and '"sent":1,"lost":0' in lines[0]
 
 
 def test_guard_does_nothing_when_the_check_is_off(tmp_path, monkeypatch):

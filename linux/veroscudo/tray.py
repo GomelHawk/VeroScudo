@@ -524,6 +524,12 @@ class Windows:
         w, box = self._window("VeroScudo - Statistics", 620)
         box.pack_start(self._label("<span size='x-large' weight='bold'>Last 7 days</span>", markup=True), False, False, 0)
         box.pack_start(self._label("One bar = 10 minutes. Hover a bar for its time and numbers.", dim=True), False, False, 0)
+        # one VPN profile at a time: a corporate VPN and a home one are different connections - their problems never mix
+        pick = Gtk.Box(spacing=8)
+        pick.pack_start(self._label("VPN profile", wrap=False), False, False, 0)
+        combo = Gtk.ComboBoxText()
+        pick.pack_start(combo, False, False, 0)
+        box.pack_start(pick, False, False, 0)
         width = 144 * self.STAT_BAR
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         card.set_border_width(12)
@@ -552,15 +558,23 @@ class Windows:
             rows.append((day, tot, img, ev))
         dark = self._dark(box)
         legend = Gtk.Box(spacing=14)
-        for state, text in (("good", "Good (or VPN on, not rated)"), ("unstable", "Unstable"), ("bad", "Bad"), ("off", "VPN off")):
+        for state, text in traymodel.STATS_LEGEND:
             legend.pack_start(self._label(f"<span foreground='{self._stat_colour(state, dark)}'>\u25a0</span> <small>{text}</small>",
                                           markup=True, wrap=False), False, False, 0)
         box.pack_start(legend, False, False, 0)
-        box.pack_start(self._label("Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need "
-                                   "Settings > Connection; without it, VPN time is green.", dim=True), False, False, 0)
+        box.pack_start(self._label(traymodel.STATS_FOOT, dim=True), False, False, 0)
+
+        def fill_choices() -> None:
+            current = combo.get_active_id()
+            items = self.app.stats_choices()                              # (id, label): renamed = current name
+            combo.remove_all()
+            for pid, label in items:
+                combo.append(pid, label)
+            ids = [pid for pid, _ in items]
+            combo.set_active(ids.index(current) if current in ids else 0 if ids else -1)
 
         def fill() -> None:
-            week = self.app.stats_week()
+            week = self.app.stats_week(combo.get_active_id() or "")
             for (day_lb, tot_lb, img, ev), (label, d) in zip(rows, week):
                 day_lb.set_text(label)
                 tot_lb.set_text(stats.total_text(d))
@@ -576,9 +590,16 @@ class Windows:
 
         for r in rows:
             r[3].connect("query-tooltip", tip)
+        fill_choices()
         fill()
-        self._buttons(box, ("Refresh", fill, False), ("Close", lambda: w.destroy(), True))
-        timer = self.GLib.timeout_add_seconds(60, lambda: (fill(), True)[1])     # the picture moves on while open
+        combo.connect("changed", lambda *_: fill())
+
+        def again() -> None:
+            fill_choices()                                                # a profile used for the first time shows up
+            fill()
+
+        self._buttons(box, ("Refresh", again, False), ("Close", lambda: w.destroy(), True))
+        timer = self.GLib.timeout_add_seconds(60, lambda: (again(), True)[1])     # the picture moves on while open
         self.stats = w
         w.connect("destroy", lambda *_: (self.GLib.source_remove(timer), setattr(self, "stats", None)))
         w.show_all()
@@ -789,8 +810,13 @@ class TrayApp:
         self.win.update_status()
 
     # exit location (exitinfo.py)
-    def stats_week(self) -> list:
-        return stats.week(self.store.state)
+    def stats_week(self, pid: str) -> list:
+        return stats.week(self.store.state, pid)
+
+    def stats_choices(self) -> list[tuple[str, str]]:
+        cfg = self.cfg
+        return stats.choices(stats.profiles_seen(self.store.state), [(p.id, p.name) for p in cfg.profiles] if cfg else [],
+                             cfg.current.id if cfg else None)
 
     def exit_enabled(self) -> bool:
         return self.exit.enabled()
@@ -1115,7 +1141,10 @@ class _PreviewApp:
     def exit_enabled(self):
         return True
 
-    def stats_week(self):
+    def stats_choices(self):
+        return [("a1", "CorporateVPN"), ("b2", "wg-home"), ("c3", "old-office (removed)")]
+
+    def stats_week(self, profile=""):
         """A made-up week: a lunch-time problem every day, a bad half hour, an evening without VPN, one day with the check off."""
         now = datetime(2026, 11, 7, 17, 25)
         rows = []

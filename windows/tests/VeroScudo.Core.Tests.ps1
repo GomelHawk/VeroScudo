@@ -1907,11 +1907,11 @@ Describe 'profile types: validation and on-disk form come from the handler table
     }
     It 'on disk: the built-in client stays implicit, OpenVPN carries auth and dco, WireGuard its port' {
         $ras = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'Work'; Type = 'ras'; Server = 'vpn.example.com'; Port = 443; Username = 'u'; ServerIps = @(); Auth = $false })
-        @($ras.Keys) | Should -Be @('profile', 'server', 'port', 'username', 'auth')
+        @($ras.Keys) | Should -Be @('profile', 'id', 'server', 'port', 'username', 'auth')
         $o = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'ovpn'; Type = 'openvpn'; Server = ''; Port = 1194; Username = ''; ServerIps = @(); Auth = $true; Dco = $true })
-        @($o.Keys) | Should -Be @('profile', 'type', 'auth', 'dco')
+        @($o.Keys) | Should -Be @('profile', 'id', 'type', 'auth', 'dco')
         $w = ConvertTo-VeroProfileObject ([pscustomobject]@{ Profile = 'wg'; Type = 'wireguard'; Server = 'wg.example.com'; Port = 51820; Username = ''; ServerIps = @('203.0.113.5'); Auth = $false })
-        @($w.Keys) | Should -Be @('profile', 'type', 'server', 'port', 'serverIps')
+        @($w.Keys) | Should -Be @('profile', 'id', 'type', 'server', 'port', 'serverIps')
     }
 }
 Describe 'Connection check: config.json (connectionCheck)' {
@@ -2091,59 +2091,79 @@ Describe 'Connection check: a real TCP check against a local listener' {
     }
 }
 
-Describe 'Statistics: minutes, day rows, bar texts' {
+Describe 'Statistics: minutes per profile, day rows, bar texts' {
     BeforeEach {
         InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
         $script:statsDir = Join-Path (Get-VeroPath).State 'stats'
         if (Test-Path $script:statsDir) { Remove-TestFile @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object FullName) }
     }
-    It 'writes one line per minute with the VPN up, with the checks of that minute' {
+    It 'writes one line per minute and profile with the VPN up, with the checks of that minute' {
         $t = [datetime]'2026-11-07 10:05:10'
-        Update-VeroStats -Up $true -Now $t
-        Add-VeroStatsChecks -Sent 3 -Lost 1 -Now $t.AddSeconds(20)
+        Update-VeroStats -Up $true -Id 'aaa' -Name 'Work' -Now $t
+        Add-VeroStatsChecks -Sent 3 -Lost 1 -Id 'aaa' -Name 'Work' -Now $t.AddSeconds(20)
+        Update-VeroStats -Up $true -Id 'bbb' -Name 'Home' -Now $t.AddSeconds(40)    # switched within the minute: both
         Update-VeroStats -Up $false -Now $t.AddSeconds(60)                  # 10:06, VPN down: 10:05 is written, 10:06 is not
         Update-VeroStats -Up $false -Now $t.AddSeconds(120)
-        $lines = @(Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl'))
-        $lines | Should -Be @('{"m":605,"sent":3,"lost":1}')
+        @(Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl')) | Should -Be @('{"m":605,"id":"aaa","p":"Work","sent":3,"lost":1}', '{"m":605,"id":"bbb","p":"Home"}')
     }
-    It 'writes an up minute without checks as up only, and the last minute when the watchdog stops' {
-        $t = [datetime]'2026-11-07 23:59:30'
-        Update-VeroStats -Up $true -Now $t
+    It 'writes an up minute without checks, and the last minute when the watchdog stops' {
+        Update-VeroStats -Up $true -Id 'aaa' -Name 'Work' -Now ([datetime]'2026-11-07 23:59:30')
         Save-VeroStatsMinute
-        Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl') | Should -Be '{"m":1439}'
+        Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl') | Should -Be '{"m":1439,"id":"aaa","p":"Work"}'
     }
-    It 'reads a day: adds up repeated minutes, skips broken lines, never more lost than sent' {
-        $d = ConvertFrom-VeroStatsText -Text "{`"m`":605,`"sent`":3,`"lost`":1}`n{`"m`":605,`"sent`":2,`"lost`":0}`ngarbage`n{`"m`":606}`n{`"m`":1500}`n{`"m`":7,`"sent`":1,`"lost`":9}`n"
-        $d.Keys.Count | Should -Be 3
-        $d[605].Sent | Should -Be 5; $d[605].Lost | Should -Be 1
-        $d[606].Sent | Should -Be 0
-        $d[7].Lost | Should -Be 1
+    It 'escapes names exactly like the Linux/macOS side (JSON, ASCII) and reads them back' {
+        $name = "Office $([char]0x0444) `"VPN`" \ x"
+        $line = Format-VeroStatsLine -Minute 5 -Id 'aaa' -Name $name -Sent 2 -Lost 0
+        $line | Should -Be '{"m":5,"id":"aaa","p":"Office \u0444 \"VPN\" \\ x","sent":2,"lost":0}'
+        $r = ConvertFrom-VeroStatsText -Text $line
+        $r.Names['aaa'] | Should -Be $name; $r.Data['aaa'][5].Sent | Should -Be 2
     }
-    It 'rates each bar with the connection check thresholds; unrated VPN time counts as good' {
+    It 'reads a day: adds up repeated minutes, skips broken lines and old lines without an id, keeps the last name' {
+        $r = ConvertFrom-VeroStatsText -Text ('{"m":605,"id":"w","p":"W","sent":3,"lost":1}' + "`n" + '{"m":605,"id":"w","p":"W2","sent":2,"lost":0}' + "`ngarbage`n" +
+                                              '{"m":606,"id":"w","p":"W2"}' + "`n" + '{"m":1500,"id":"w","p":"W"}' + "`n" + '{"m":7,"id":"w","p":"W2","sent":1,"lost":9}' + "`n" +
+                                              '{"m":8,"p":"old build"}' + "`n" + '{"m":9,"id":"h","p":"H"}' + "`n")
+        $r.Data['w'].Keys.Count | Should -Be 3
+        $r.Data['w'][605].Sent | Should -Be 5; $r.Data['w'][605].Lost | Should -Be 1
+        $r.Data['w'][7].Lost | Should -Be 1
+        $r.Data['h'][9].Sent | Should -Be 0
+        $r.Names['w'] | Should -Be 'W2'
+        $r.Data.Keys.Count | Should -Be 2
+    }
+    It 'the drop-down: active first, renamed shown by its current name, a removed one by its last name' {
+        $old = ConvertFrom-VeroStatsText -Text ('{"m":900,"id":"o","p":"Old office"}' + "`n" + '{"m":100,"id":"w","p":"Work"}')
+        $today = ConvertFrom-VeroStatsText -Text ('{"m":60,"id":"w","p":"Corporate"}' + "`n" + '{"m":500,"id":"h","p":"Home"}')
+        $days = @($today, (ConvertFrom-VeroStatsText -Text ''), $old)
+        $profiles = @([pscustomobject]@{ Id = 'w'; Profile = 'Corporate VPN' }, [pscustomobject]@{ Id = 'h'; Profile = 'Home' }, [pscustomobject]@{ Id = 'n'; Profile = 'New' })
+        $c = @(Get-VeroStatsChoices -Days $days -Profiles $profiles -ActiveId 'w')
+        @($c | ForEach-Object Id) | Should -Be @('w', 'h', 'o')
+        @($c | ForEach-Object Label) | Should -Be @('Corporate VPN', 'Home', 'Old office (removed)')
+        @(Get-VeroStatsChoices -Days @() -Profiles $profiles -ActiveId 'n').Label | Should -Be 'New'
+    }
+    It 'rates each bar with the connection check thresholds; unrated connected time counts as good' {
         $m = @{}
-        foreach ($i in 0..9) { $m[$i] = @{ Sent = 6; Lost = 0 } }             # 00:00-00:10 good
-        foreach ($i in 10..19) { $m[$i] = @{ Sent = 6; Lost = 2 } }           # 00:10-00:20 33 % lost: unstable
-        foreach ($i in 20..29) { $m[$i] = @{ Sent = 6; Lost = 4 } }           # 00:20-00:30 67 %: bad
-        foreach ($i in 30..34) { $m[$i] = @{ Sent = 0; Lost = 0 } }           # 00:30-00:40 VPN on 5 min, check off
+        foreach ($i in 0..9) { $m[$i] = @{ Sent = 6; Lost = 0 } }
+        foreach ($i in 10..19) { $m[$i] = @{ Sent = 6; Lost = 2 } }
+        foreach ($i in 20..29) { $m[$i] = @{ Sent = 6; Lost = 4 } }
+        foreach ($i in 30..34) { $m[$i] = @{ Sent = 0; Lost = 0 } }
         $day = ConvertTo-VeroStatsDay -Minutes $m -BucketMinutes 10
         $day.Bars.Count | Should -Be 144
         @($day.Bars[0..4] | ForEach-Object State) | Should -Be @('good', 'unstable', 'bad', 'up', 'off')
         $day.VpnMinutes | Should -Be 35
-        $day.GoodPct | Should -Be 43                                          # (10 + 5) of 35 minutes
-        Get-VeroStatsState -UpMinutes 10 -Sent 10 -Lost 1 | Should -Be 'unstable'   # exactly 10 %: not good, like the check
+        $day.GoodPct | Should -Be 43
+        Get-VeroStatsState -UpMinutes 10 -Sent 10 -Lost 1 | Should -Be 'unstable'
     }
-    It 'marks the rest of today as future and a day without VPN as no VPN' {
+    It 'marks the rest of today as future and a day without this profile as not used' {
         $day = ConvertTo-VeroStatsDay -Minutes @{} -UntilMinute 600
         $day.Bars[59].State | Should -Be 'off'
         $day.Bars[60].State | Should -Be 'future'
         $day.GoodPct | Should -BeNullOrEmpty
-        Format-VeroStatsTotal -Day $day | Should -Be 'no VPN'
+        Format-VeroStatsTotal -Day $day | Should -Be 'not used'
     }
-    It 'says what a bar and a day were' {
+    It 'says what a bar and a day were - the same texts as Linux/macOS' {
         $bar = [pscustomobject]@{ Start = 860; State = 'unstable'; UpMinutes = 10; Sent = 60; Lost = 11 }
-        Format-VeroStatsBar -Bar $bar | Should -Be ("14:20-14:30  unstable {0} 18 % lost (11 of 60 checks), VPN on 10 of 10 min" -f [char]0x2013)
-        Format-VeroStatsBar -Bar ([pscustomobject]@{ Start = 0; State = 'off'; UpMinutes = 0; Sent = 0; Lost = 0 }) | Should -Be '00:00-00:10  VPN off'
-        Format-VeroStatsTotal -Day ([pscustomobject]@{ VpnMinutes = 580; GoodPct = 87 }) | Should -Be ("VPN 9 h 40 min {0} good 87 %" -f [char]0x00B7)
+        Format-VeroStatsBar -Bar $bar | Should -Be ("14:20-14:30  unstable {0} 18 % lost (11 of 60 checks), connected 10 of 10 min" -f [char]0x2013)
+        Format-VeroStatsBar -Bar ([pscustomobject]@{ Start = 0; State = 'off'; UpMinutes = 0; Sent = 0; Lost = 0 }) | Should -Be '00:00-00:10  not connected'
+        Format-VeroStatsTotal -Day ([pscustomobject]@{ VpnMinutes = 580; GoodPct = 87 }) | Should -Be ("connected 9 h 40 min {0} good 87 %" -f [char]0x00B7)
     }
     It 'removes only its own day files older than the kept days' {
         New-Item -ItemType Directory -Path $script:statsDir -Force | Out-Null
@@ -2154,5 +2174,30 @@ Describe 'Statistics: minutes, day rows, bar texts' {
     It 'the watchdog counts only the own VPN as up' {
         Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
         InModuleScope VeroScudo.Core { Test-VeroStatsUp } | Should -BeFalse
+    }
+}
+
+Describe 'Profile ids: statistics follow a profile across a rename' {
+    It 'is the first 12 hex digits of the SHA-1 of the name - the same as Linux/macOS profile_id()' {
+        Get-VeroProfileId -Name 'Work' | Should -Be '00040bab8a78'                     # linux/tests/test_import.py checks the same value
+        Get-VeroProfileId -Name 'Work' | Should -Match '^[0-9a-f]{12}$'
+        Get-VeroProfileId -Name 'Work' -Stored 'abcdefabcdef' | Should -Be 'abcdefabcdef'
+        Get-VeroProfileId -Name 'Work' -Stored 'not-an-id' | Should -Be (Get-VeroProfileId -Name 'Work')
+    }
+    It 'is read from config.json, made from the name when missing, and written back' {
+        $c = Get-VeroConfig -Raw '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe","id":"0123456789ab"},{"profile":"Backup","server":"vpn2.example.com","username":"jdoe"}]}'
+        @($c.Profiles)[0].Id | Should -Be '0123456789ab'
+        @($c.Profiles)[1].Id | Should -Be (Get-VeroProfileId -Name 'Backup')
+        $c.ProfileId | Should -Be '0123456789ab'
+        (ConvertTo-VeroProfileObject @($c.Profiles)[1]).id | Should -Be (Get-VeroProfileId -Name 'Backup')
+        { Get-VeroConfig -Raw '{"profiles":[{"profile":"A","server":"a.example.com","username":"u","id":"0123456789ab"},{"profile":"B","server":"b.example.com","username":"u","id":"0123456789ab"}]}' } | Should -Throw '*same id*'
+    }
+    It 'a renamed profile keeps its id; a new profile named like it gets a different one' {
+        $renamed = [pscustomobject]@{ Profile = 'Office'; Id = (Get-VeroProfileId -Name 'Work') }
+        $new = [pscustomobject]@{ Profile = 'Work' }
+        Set-VeroProfileIds -Entries @($renamed, $new)
+        $renamed.Id | Should -Be (Get-VeroProfileId -Name 'Work')
+        $new.Id | Should -Match '^[0-9a-f]{12}$'
+        $new.Id | Should -Not -Be $renamed.Id
     }
 }

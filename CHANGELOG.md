@@ -70,10 +70,15 @@ All notable changes to VeroScudo are recorded here. The format follows
   and it is older than 3 minutes, the tray says the guard has stopped and how to fix it.
 
 ### Statistics (Windows, Linux, macOS)
-- **Tray menu > Statistics:** the last 7 days of VPN time and connection quality, one row per day on a 24-hour time grid,
-  one bar per 10 minutes (green good, amber unstable, brown bad, grey VPN off; hover for the numbers), with each day's
-  VPN time and the share of it that was good. Only VeroScudo's own VPN counts. With the connection check off, VPN time
-  shows green. Recorded by the guard per minute in `stats/<date>.jsonl` (kept 8 days).
+- **Tray menu > Statistics:** the last 7 days of one VPN profile at a time (drop-down, the active profile first - a
+  corporate and a home VPN are different connections, their problems are never mixed): one row per day on a 24-hour time
+  grid, one bar per 10 minutes (green good, amber unstable, brown bad, grey not connected; hover for the numbers), with
+  each day's connected time and the share of it that was good. Only VeroScudo's own VPN counts. With the connection
+  check off, connected time shows green. Recorded by the guard per minute and profile in `stats/<date>.jsonl` (kept
+  8 days).
+- **Profiles get a lasting `id`** in config.json: a renamed profile keeps its statistics (shown by its new name), a
+  removed one stays visible for its 7 days with its last name, marked *(removed)*. Configs from before get the id their
+  names give, so nothing is lost.
 
 ### Connection check (Windows, Linux, macOS)
 - **Optional connection quality check** (Settings > *Connection*, off by default): while protected, the guard checks up to

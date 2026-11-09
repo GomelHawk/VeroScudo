@@ -209,7 +209,7 @@ function Update-VeroQuality {
     }
     $round = @(Invoke-VeroProbeRound -Targets $chk.Targets)
     foreach ($r in $round) { $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs }) }
-    try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+    try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
     $win = Get-VeroCheckWindow $chk
     $keep = @($script:QualitySamples.ToArray() | Where-Object { ($now - [double]$_.T) -le ($win + 1) })   # .ToArray(): @(<List>) throws on PowerShell 5.1
     $script:QualitySamples.Clear(); foreach ($s in $keep) { $script:QualitySamples.Add($s) }

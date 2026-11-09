@@ -157,7 +157,7 @@ function Invoke-VeroActionWatchdog {
                 try {
                     Invoke-VeroCheck -Action $Action
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
-                    try { Update-VeroStats -Up (Test-VeroStatsUp) } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+                    try { $sc = try { Get-VeroConfig } catch { $null }; Update-VeroStats -Up ([bool]$sc -and (Test-VeroStatsUp)) -Id $(if ($sc) { $sc.ProfileId } else { '' }) -Name $(if ($sc) { $sc.Profile } else { '' }) } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
                     try { [IO.File]::WriteAllText((Get-VeroPath).Heartbeat, [string][int64](Get-VeroEpoch)) } catch { Write-Verbose 'heartbeat not written' }
                 } catch {
                     if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries

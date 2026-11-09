@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from .config import Config, config_path
+from .config import Config, config_path, profile_id
 
 
 def to_profile(d: dict) -> dict:
@@ -49,10 +49,26 @@ def _load(raw: str) -> tuple[dict, list[dict]]:
 
 
 def _dump(j: dict, profiles: list[dict]) -> str:
-    j["profiles"] = profiles
+    j["profiles"] = with_ids(profiles)
     text = json.dumps(j, indent=2) + "\n"
     Config.from_text(text)                                   # the same validation as at load time
     return text
+
+
+def with_ids(profiles: list[dict]) -> list[dict]:
+    """Every profile gets its lasting "id" written down (statistics follow it across a rename): a profile without one gets
+    the id its name gives (what the guard has used for it so far), or a random one when another profile holds that id
+    already (a new profile named like one renamed earlier). Pure apart from the random fallback."""
+    taken = {p["id"] for p in profiles if isinstance(p.get("id"), str) and profile_id("", p["id"]) == p["id"]}
+    out = []
+    for p in profiles:
+        q = dict(p)
+        if q.get("id") not in taken or profile_id("", q.get("id")) != q.get("id"):
+            want = profile_id(str(q.get("profile", "")))
+            q["id"] = want if want not in taken else os.urandom(6).hex()
+        taken.add(q["id"])
+        out.append(q)
+    return out
 
 
 def remove_profile(raw: str, name: str) -> str:

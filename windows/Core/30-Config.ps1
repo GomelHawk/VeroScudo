@@ -96,6 +96,32 @@ function Test-VeroHost([string]$Value) {
     $a = $null; return [System.Net.IPAddress]::TryParse($Value, [ref]$a)
 }
 
+function Get-VeroProfileId {
+    <# A profile's lasting id (config.json "id"): it stays when the profile is renamed, so its statistics keep their history.
+       A profile without one (configs before 1.4) gets one made from its name: the first 12 hex digits of the SHA-1 of the
+       UTF-8 name - the same as profile_id() on Linux/macOS. Pure. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Name, $Stored)
+    if ($Stored -is [string] -and $Stored -cmatch '^[0-9a-f]{12}$') { return $Stored }
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Name)) } finally { $sha.Dispose() }
+    (-join ($h | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
+}
+
+function Set-VeroProfileIds {
+    <# Before a save: every entry gets its lasting Id - kept when it has one; else the one its name gives (what the guard used
+       for it so far), or a random one when another entry holds that already (a new profile named like one renamed earlier). #>
+    [CmdletBinding()] param([object[]]$Entries)
+    $taken = @{}
+    foreach ($e in $Entries) { if ($e.PSObject.Properties['Id'] -and $e.Id) { $taken[[string]$e.Id] = $true } }
+    foreach ($e in $Entries) {
+        if ($e.PSObject.Properties['Id'] -and $e.Id) { continue }
+        $id = Get-VeroProfileId -Name ([string]$e.Profile)
+        if ($taken.ContainsKey($id)) { $id = -join ((1..12) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) }
+        $e | Add-Member -NotePropertyName Id -NotePropertyValue $id -Force
+        $taken[$id] = $true
+    }
+}
+
 function Get-VeroConfig {
     <# Reads config.json, applies defaults, validates every value, resolves the active profile.
        -Raw accepts JSON text (tests); -Active overrides the selection (tests, switch). #>
@@ -136,11 +162,12 @@ function Get-VeroConfig {
         $dco = [bool](Get-Prop $p 'dco')                                    # OpenVPN: keep the kernel data channel (no program-scoped permit)
         $auth = if ($null -ne (Get-Prop $p 'auth')) { [bool]$p.auth } else { $th.PasswordCapable }   # OpenVPN: the .ovpn asks for a password
         [pscustomobject]@{ Profile = $name; Type = $type; Server = $server; Port = $port; Username = $user; ServerIps = @($pinned | ForEach-Object { [string]$_ })
-                           Dco = ($th.HasDco -and $dco); Auth = ($th.PasswordCapable -and $auth) }
+                           Dco = ($th.HasDco -and $dco); Auth = ($th.PasswordCapable -and $auth); Id = (Get-VeroProfileId -Name $name -Stored (Get-Prop $p 'id')) }
     }
     $profiles = @($profiles)
     $dupes = @($profiles | Group-Object Profile | Where-Object Count -gt 1)
     if ($dupes) { throw "config.json: profile '$($dupes[0].Name)' is listed twice" }
+    if (@($profiles | Group-Object Id | Where-Object Count -gt 1)) { throw 'config.json: two profiles have the same id' }
 
     # vm: protect VMs and containers with the kill-switch (true) or leave them alone (false). "auto" (before 1.4) = true.
     $vm = if ($null -ne $j.PSObject.Properties['vm']) { $j.vm } else { $true }
@@ -172,6 +199,7 @@ function Get-VeroConfig {
         Profiles        = $profiles
         DefaultProfile  = if ($default) { $default } else { $names[0] }
         Profile         = $act.Profile
+        ProfileId       = $act.Id                                            # lasting id: the statistics follow it across a rename
         Type            = $act.Type
         Dco             = $act.Dco
         Auth            = $act.Auth
@@ -210,6 +238,7 @@ function ConvertTo-VeroProfileObject {
     $type = if ($Entry.PSObject.Properties['Type'] -and $Entry.Type) { [string]$Entry.Type } else { 'ras' }
     $th = Get-VeroTypeHandler $type
     $o = [ordered]@{ profile = $Entry.Profile }
+    $o.id = Get-VeroProfileId -Name ([string]$Entry.Profile) -Stored $(if ($Entry.PSObject.Properties['Id']) { $Entry.Id } else { $null })
     if ($th.OnDiskType) { $o.type = $type }                                 # the built-in client is the default and stays implicit
     if ($Entry.Server) { $o.server = $Entry.Server }
     if ($th.OnDiskPort) { $o.port = $Entry.Port }

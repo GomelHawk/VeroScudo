@@ -558,9 +558,9 @@ def env_icons(default: Path) -> Path:
 STATS_TITLE = "VeroScudo - Statistics"
 STATS_HEADING = "Last 7 days"
 STATS_NOTE = "One bar = 10 minutes. Hover a bar for its time and numbers."
-STATS_LEGEND = (("good", "Good (or VPN on, not rated)"), ("unstable", "Unstable"), ("bad", "Bad"), ("off", "VPN off"))
+STATS_LEGEND = (("good", "Good (or connected, not rated)"), ("unstable", "Unstable"), ("bad", "Bad"), ("off", "Not connected"))
 STATS_FOOT = ("Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; "
-              "without it, VPN time is green.")
+              "without it, connected time is green.")
 # the chart's geometry in points, top-down, the Windows card's: 144 bars x 4 (3 + 1 gap) = 576 wide, one row per day
 STATS_GEOMETRY = {"x": 12, "top": 30, "row_h": 57, "bar_w": 4, "strip_h": 24, "label_h": 20, "width": 600, "height": 438}
 

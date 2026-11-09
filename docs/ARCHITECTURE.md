@@ -291,6 +291,7 @@ profile names without control/wildcard characters, host names or IPs, ports 1-65
 `retrySeconds` 3-3600, `serverIps` real addresses, `lanAllow` real ranges no wider than IPv4 /8
 or IPv6 /16 (never `0.0.0.0/0`, `Any`).
 
+- `id` (written by VeroScudo): the profile's lasting id - statistics follow it across a rename (see *Statistics*).
 - `profile`: the OS's name for the VPN (Windows Settings > VPN, NetworkManager connection id, macOS VPN service; the
   WireGuard app's tunnel name - 1-32 of `A-Z a-z 0-9 _ = + . -`).
 - `vpnType` (Linux/macOS): what the server permit allows - `l2tp` (UDP 500/4500/1701 + ESP), `ikev2`/`ipsec` (UDP 500/4500
@@ -348,21 +349,28 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
 
 ## Statistics
 
-Tray menu > *Statistics* (the same window on Windows, Linux and macOS): the last 7 days, one row per day, 24 hours wide
-on a shared time grid, one bar per 10 minutes - a problem that comes back at the same hour every day lines up in one
-column. Hover a bar for its time and numbers. Each row also shows the day's VPN time and *good %* (the share of that time
-in good bars).
+Tray menu > *Statistics* (the same window on Windows, Linux and macOS): the last 7 days **of one VPN profile at a time**
+(drop-down *VPN profile*, the active one first) - a corporate VPN and a home one are different connections, and their
+problems must not be mixed. One row per day, 24 hours wide on a shared time grid, one bar per 10 minutes - a problem that
+comes back at the same hour every day lines up in one column. Hover a bar for its time and numbers. Each row also shows
+how long the profile was connected that day and *good %* (the share of that time in good bars).
 
 - **What is recorded:** the guard's watchdog (Windows `Core/67-Stats.ps1`; Linux/macOS the daemon) notes, minute by
-  minute, whether **VeroScudo's** VPN was up (armed and the active profile connected - another VPN app does not count),
-  and, when the connection check is on, how many of its checks were sent and lost in that minute.
+  minute, which **VeroScudo** profile was up (armed and connected - another VPN app does not count), and, when the
+  connection check is on, how many of its checks were sent and lost in that minute.
+- **Per profile, across renames:** every profile has a lasting `id` in config.json (written on the next save; a config
+  from before 1.4 gets the id its name gives - the first 12 hex digits of the SHA-1 of the UTF-8 name, the same on every
+  platform - so nothing recorded so far is lost). The statistics are kept by that id: a **renamed** profile keeps its
+  history and is shown by its current name; a **removed** one stays in the drop-down for its 7 days with its last name,
+  marked *(removed)*. A new profile named like one renamed earlier gets a random id, never the renamed one's.
 - **Format:** one file per local day, `stats/yyyy-MM-dd.jsonl` in the state folder (Windows `state\stats`, Linux
-  `/var/lib/veroscudo/stats`, macOS the same; readable by the user, kept across reboots), one line per minute with the
-  VPN up: `{"m":605}` (up, check off) or `{"m":605,"sent":3,"lost":1}`. A minute without a line: VPN off, the computer
-  asleep or VeroScudo off. Raw counts rather than colours, so the window can group them into any bar width and a later
-  change of the thresholds re-rates old days. About 30 KB a day; files older than 8 days are removed by the guard.
+  `/var/lib/veroscudo/stats`, macOS the same; readable by the user, kept across reboots), one line per minute and profile
+  with the VPN up: `{"m":605,"id":"3f2a9c0d1e2b","p":"Work"}` (up, check off) or the same with `"sent":3,"lost":1`;
+  `p` is the profile's name at that minute (JSON, ASCII escapes). A minute without a line: VPN off, the computer asleep
+  or VeroScudo off. Raw counts rather than colours, so the window can group them into any bar width and a later change of
+  the thresholds re-rates old days. About 30 KB a day; files older than 8 days are removed by the guard.
 - **Colours:** the connection check's thresholds per bar - green under 10 % lost, amber 10-50 %, brown over 50 %; grey =
-  VPN off. With the check off there is nothing to rate: VPN time is green.
+  this profile not connected. With the check off there is nothing to rate: connected time is green.
 
 ## Tray app
 
