@@ -9,7 +9,8 @@
 #   5 You hang up the VPN (nmcli connection down) -> VeroScudo turns off, network normal
 #   6 On, then Off -> the kill-switch table is gone, network normal
 # A probe runs every 2 s the whole time: the exit address (https://ifconfig.me), a direct ping and a direct DNS query to
-# 1.1.1.1. LEAK = your real address while armed, or anything at all getting out while blocked.
+# 1.1.1.1. LEAK = while protected, an address seen while VeroScudo was off (behind NAT or another VPN there can be
+# several); while blocked, anything at all getting out.
 #     sudo linux/tests-local/live.sh             in the machine's own window (armed, inbound SSH is blocked)
 #     sudo -b linux/tests-local/live.sh          over SSH: runs on when SSH drops; read the log afterwards
 # Log: ~/veroscudo-live.log of the user who ran sudo, with VeroScudo's own log lines of the test. Exit code 0 = PASS.
@@ -31,14 +32,18 @@ say() { echo "$(date +%T) $*" | tee -a "$LOG"; }
 field() { veroscudo status 2>/dev/null | awk -F' *: ' -v k="$1" '$1 == k {print $2; exit}'; }   # one line of the status
 state() { field state; }
 exit_ip() { curl -s --max-time 3 https://ifconfig.me || true; }
-carries() {      # the tunnel carries traffic: an exit address that is not the real one, within 20 s
+off_addr() {     # $1 was seen as the exit address while VeroScudo was off
+  { echo "$REAL_IP"; awk '$3 == "off" && $4 == "off" && $5 != "BLOCKED" {print $5}' "$SAMPLES"; } | grep -Fxq -- "$1"
+}
+carries() {      # the tunnel carries traffic: an exit address not seen while off, within 20 s
   local i x
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    x=$(exit_ip); [ -n "$x" ] && [ "$x" != "$REAL_IP" ] && return 0
+    x=$(exit_ip); [ -n "$x" ] && ! off_addr "$x" && return 0
     sleep 1; : "$i"
   done
   return 1
 }
+off_list() { { echo "$REAL_IP"; awk '$3 == "off" && $4 == "off" && $5 != "BLOCKED" {print $5}' "$SAMPLES"; } | sort -u | paste -sd' '; }
 fail() { FAILS+=("$PHASE: $*"); say "FAIL $PHASE: $*"; }
 
 wait_state() {   # $1 wanted state, $2 timeout s -> prints the seconds it took; 1 = timeout
@@ -100,7 +105,7 @@ sleep 15
 VPN_IP=$(exit_ip)
 say "exit address while protected: ${VPN_IP:-none}"
 [ -n "$VPN_IP" ] || fail "no answer through the tunnel"
-[ "$VPN_IP" != "$REAL_IP" ] || fail "exit address is the real one - traffic does not go through the VPN"
+[ -z "$VPN_IP" ] || ! off_addr "$VPN_IP" || fail "exit address is the real one - traffic does not go through the VPN"
 
 # ---- 2 Reconnect
 phase 2-reconnect
@@ -154,7 +159,7 @@ phase 5-hangup
 nmcli connection down "$PROFILE" >/dev/null 2>&1
 if t=$(wait_state off 30); then say "VeroScudo off $t s after you hung up"; else fail "still '$(state)' 30 s after you hung up (expected off)"; fi
 sleep 5
-ip=$(exit_ip); [ "$ip" = "$REAL_IP" ] || fail "network not normal after hanging up (exit address '${ip:-none}')"
+[ -n "$(exit_ip)" ] || fail "no network after hanging up"
 
 # ---- 6 On, then Off
 phase 6-off
@@ -164,7 +169,7 @@ veroscudo off >/dev/null 2>&1
 sleep 3
 [ "$(state)" = off ] || fail "state '$(state)' after Off"
 nft list table inet veroscudo >/dev/null 2>&1 && fail "kill-switch table still present after Off"
-ip=$(exit_ip); [ "$ip" = "$REAL_IP" ] || fail "network not normal after Off (exit address '${ip:-none}')"
+[ -n "$(exit_ip)" ] || fail "no network after Off"
 kill "$PROBE_PID" 2>/dev/null; PROBE_PID=""
 
 # ---- verdict from the probes
@@ -176,7 +181,7 @@ while read -r tm ph s1 s2 ipx p d; do
   case "$s1" in
     blocked) blocked=$((blocked + 1))
              if [ "$ipx" != BLOCKED ] || [ "$p" = ping-ok ] || [ "$d" = dns-ok ]; then why="got out while blocked"; fi ;;
-    protected) [ "$ipx" = "$REAL_IP" ] && why="real address while protected" ;;
+    protected) [ "$ipx" != BLOCKED ] && off_addr "$ipx" && why="an address seen while off, while protected" ;;
   esac
   if [ -n "$why" ]; then leaks=$((leaks + 1)); say "LEAK $tm [$ph] $why: ip=$ipx $p $d"; fi
 done < "$SAMPLES"
@@ -184,7 +189,7 @@ done < "$SAMPLES"
 say "=== VeroScudo log during the test"
 awk -v s="$START" '($1 " " substr($2, 1, 8)) >= s' /var/log/veroscudo.log 2>/dev/null | tee -a "$LOG"
 say "=== Result"
-say "probes $n (blocked $blocked), leaks $leaks, real $REAL_IP, VPN ${VPN_IP:-none}"
+say "probes $n (blocked $blocked), leaks $leaks, VPN ${VPN_IP:-none}, without VPN: $(off_list)"
 [ "$leaks" -eq 0 ] || FAILS+=("leaks: $leaks")
 if [ ${#FAILS[@]} -eq 0 ]; then say "PASS"; exit 0; fi
 for f in "${FAILS[@]}"; do say "  - $f"; done
