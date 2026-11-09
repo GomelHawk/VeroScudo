@@ -223,11 +223,13 @@ function Invoke-VeroReconnect {
             }
             Invoke-VeroDial -Config $Config -Action $Action
             if (Test-VeroVpnConnected $Config.Profile) {
-                Write-VeroLog "reconnected '$($Config.Profile)' after $attempt attempt(s)" $Action
+                if ((Get-VeroConfigType $Config) -eq 'hiddify') { Write-VeroLog "Hiddify connected again - traffic goes through it" $Action }   # nothing was dialed
+                else { Write-VeroLog "reconnected '$($Config.Profile)' after $attempt attempt(s)" $Action }
                 if ((Get-VeroConfigType $Config) -eq 'ras') { Save-VeroRasCoId -ProfileName $Config.Profile }   # its "you hung up" must match it
                 break
             }
-            Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action
+            # Hiddify: nothing is dialed - VeroScudo waits for you to connect it there; once, then every ~5 minutes
+            if ((Get-VeroConfigType $Config) -ne 'hiddify' -or $attempt -eq 1 -or $attempt % 30 -eq 0) { Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action }
             # the server may have moved: look it up again (the redial's DNS permit is in force while down) and let the new
             # address through before the next attempt - the cache alone would refuse it forever
             if (@($Config.ServerIps).Count -eq 0 -and (Get-VeroConfigType $Config) -eq 'ras') {
@@ -265,6 +267,9 @@ function Invoke-VeroCheck {
     $cfg = Get-VeroConfig
     $script:CheckCount++
     try { if (Update-VeroRasWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: Windows VPN watch: $($_.Exception.Message)" $Action }
+    if (@($cfg.Profiles | Where-Object Type -eq 'hiddify').Count -gt 0) {
+        try { if (Update-VeroHiddifyWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: Hiddify watch: $($_.Exception.Message)" $Action }
+    }
     if (@($cfg.Profiles | Where-Object Type -eq 'wireguard').Count -gt 0) {
         try { if (Update-VeroWgWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: WireGuard watch: $($_.Exception.Message)" $Action }
     }

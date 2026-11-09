@@ -34,8 +34,24 @@ def split_families(addrs) -> tuple[list[str], list[str]]:
 MARK = "0x5653"          # conntrack mark of flows VeroScudo allowed outside the tunnel ("VS")
 
 
+def group_endpoints(endpoints) -> list[tuple[int, int, tuple[str, ...], list[str]]]:
+    """Per-endpoint permits (a Hiddify profile: (address, port, protocols) from its live config) grouped into
+    (family, port, protocols, addresses) - one rule each. Every address is checked again here. Pure; shared with pf."""
+    groups: dict[tuple[int, int, tuple[str, ...]], list[str]] = {}
+    for addr, port, protos in endpoints:
+        a = ipaddress.ip_address(str(addr))                       # raises on anything that is not an address
+        port = int(port)
+        if not 1 <= port <= 65535 or not protos or any(x not in ("tcp", "udp") for x in protos):
+            raise ValueError(f"refusing endpoint {addr!r} {port!r} {protos!r}")
+        lst = groups.setdefault((a.version, port, tuple(sorted(protos))), [])
+        if str(a) not in lst:
+            lst.append(str(a))
+    return [(fam, port, protos, addrs) for (fam, port, protos), addrs in sorted(groups.items())]
+
+
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
-                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False) -> str:
+                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False,
+                   endpoints: tuple = ()) -> str:
     """Default-drop output, input and forward (containers/VMs) with the documented allow-list. DNS is allowed only while
     the tunnel is down: while it is up, name resolution goes through the tunnel like everything else (no DNS leak).
 
@@ -48,7 +64,10 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     Every explicit permit outside the tunnel marks its connection; established traffic is accepted only with that mark. So a
     flow that used the tunnel (a connected UDP socket, a TCP socket bound to the tunnel address) cannot carry on over the
     physical NIC once the tunnel is gone - it was never marked. Inbound: nothing but replies to marked flows, the tunnel,
-    DHCP replies and neighbour discovery: the host is not reachable over the physical network while armed."""
+    DHCP replies and neighbour discovery: the host is not reachable over the physical network while armed.
+
+    `endpoints` (a Hiddify profile): (address, port, protocols) the VPN app itself must reach outside the tunnel - its
+    servers and its direct DNS servers - allowed in every state, like a server permit."""
     if tun_iface is not None and not IFNAME.match(tun_iface):
         raise ValueError(f"refusing interface name {tun_iface!r}")
     for b in bridges:
@@ -97,6 +116,10 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {keep}")
             else:
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} {keep}")
+    for ver, port, protos, addrs in group_endpoints(endpoints):        # Hiddify: its servers and direct DNS servers
+        fam = "ip" if ver == 4 else "ip6"
+        l4 = f"{protos[0]} dport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th dport {port}"
+        lines.append(f"    {fam} daddr {{ {', '.join(addrs)} }} {l4} {keep}")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):
         for cidr in lst:
             lines.append(f"    {fam} daddr {cidr} {keep}")

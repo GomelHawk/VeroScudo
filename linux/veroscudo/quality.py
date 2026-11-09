@@ -1,7 +1,8 @@
 """Connection quality: optional checks through the tunnel while protected (Settings > Connection, config `connectionCheck`).
 
 Same rules on every platform (Windows: Core/66-Quality.ps1, docs/ARCHITECTURE.md "Connection check"):
-- every `intervalSeconds` (10-100) the guard checks each address once: ping, or a TCP connection to a port;
+- every `intervalSeconds` (10-100) the guard checks each address once: ping, a TCP connection to a port, or HTTPS (a TLS
+  handshake and a HEAD request - any HTTP answer counts; no account or key is ever sent);
 - every check counts: loss = failed checks / all checks in the last `windowMinutes` (1-10), never fewer than 3 rounds;
 - below 10 % lost: good; 10-50 %: unstable; above 50 %: bad;
 - no rating ("checking") until one full window has passed since the rating started: it starts over on every connect,
@@ -15,13 +16,14 @@ import json
 import os
 import re
 import socket
+import ssl
 import statistics
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,8 +31,10 @@ INTERVAL_RANGE = (10, 100)            # seconds between two rounds
 WINDOW_RANGE = (1, 10)                # minutes the rating looks back
 MAX_TARGETS = 3
 MIN_CHECKS = 3                        # fewer: "checking"
-METHODS = ("ping", "tcp")
+METHODS = ("ping", "tcp", "https")
+PORT_METHODS = ("tcp", "https")       # the methods with a port
 TIMEOUT = 3.0                         # one check; a round runs its checks in parallel
+TLS_TIMEOUT = 5.0                     # a TLS check through a proxy (Hiddify) needs a few round trips more
 GOOD_BELOW, BAD_ABOVE = 10.0, 50.0    # loss %, see the module doc
 DEFAULT_HOST = "1.1.1.1"
 
@@ -38,11 +42,15 @@ DEFAULT_HOST = "1.1.1.1"
 @dataclass(frozen=True)
 class Target:
     host: str
-    method: str = "tcp"               # ping | tcp
-    port: int = 443                   # tcp only
+    method: str = "tcp"               # ping | tcp | https
+    port: int = 443                   # tcp and https
 
     def label(self) -> str:
-        return f"{self.host} (ping)" if self.method == "ping" else f"{self.host}:{self.port}"
+        if self.method == "ping":
+            return f"{self.host} (ping)"
+        if self.method == "https":
+            return f"{self.host} (HTTPS)" if self.port == 443 else f"{self.host}:{self.port} (HTTPS)"
+        return f"{self.host}:{self.port}"
 
 
 DEFAULT_TARGET = Target(DEFAULT_HOST, "tcp", 443)
@@ -57,7 +65,7 @@ class CheckConfig:
 
     def to_json(self) -> dict:
         return {"enabled": self.enabled, "intervalSeconds": self.interval_seconds, "windowMinutes": self.window_minutes,
-                "targets": [{"host": t.host, "method": t.method} | ({"port": t.port} if t.method == "tcp" else {})
+                "targets": [{"host": t.host, "method": t.method} | ({"port": t.port} if t.method in PORT_METHODS else {})
                             for t in self.targets]}
 
 
@@ -115,9 +123,9 @@ def parse(raw: object, is_host) -> CheckConfig:
             raise ValueError(f"config.json: invalid connectionCheck host {host!r}")
         method = str(t.get("method", "tcp")).lower()
         if method not in METHODS:
-            raise ValueError("config.json: connectionCheck method must be 'ping' or 'tcp'")
+            raise ValueError("config.json: connectionCheck method must be 'ping', 'tcp' or 'https'")
         port = 0
-        if method == "tcp":
+        if method in PORT_METHODS:
             try:
                 port = int(t.get("port", 443))
             except (TypeError, ValueError):
@@ -130,8 +138,8 @@ def parse(raw: object, is_host) -> CheckConfig:
 
 def from_form(enabled: bool, interval: int, window: int, rows, is_host) -> CheckConfig:
     """Settings > Connection -> CheckConfig. rows: up to 3 (text, method, port). An empty first address becomes 1.1.1.1;
-    empty others are dropped; a URL or host:port gives its host (and, for TCP, its port when the port field was left at
-    its default). Raises ValueError with a message for the user. Pure (the same rules as Windows' ConvertFrom-VeroCheckForm)."""
+    empty others are dropped; a URL or host:port gives its host (and, for TCP and HTTPS, its port when the port field was
+    left at its default). Raises ValueError with a message for the user. Pure (the same rules as Windows' ConvertFrom-VeroCheckForm)."""
     interval = min(max(int(interval), INTERVAL_RANGE[0]), INTERVAL_RANGE[1])
     window = min(max(int(window), WINDOW_RANGE[0]), WINDOW_RANGE[1])
     targets = []
@@ -146,13 +154,13 @@ def from_form(enabled: bool, interval: int, window: int, rows, is_host) -> Check
             raise ValueError(f"Address {i + 1}: '{text.strip()}' is not an IP address, host name or URL.")
         method = (method or "tcp").lower()
         if method not in METHODS:
-            raise ValueError(f"Address {i + 1}: choose Ping or TCP.")
+            raise ValueError(f"Address {i + 1}: choose Ping, TCP port or HTTPS.")
         p = int(port or 443)
-        if method == "tcp" and url_port and p == 443:
+        if method in PORT_METHODS and url_port and p == 443:
             p = url_port
-        if method == "tcp" and not 1 <= p <= 65535:
+        if method in PORT_METHODS and not 1 <= p <= 65535:
             raise ValueError(f"Address {i + 1}: the port must be 1-65535.")
-        targets.append(Target(host, method, p if method == "tcp" else 443))
+        targets.append(Target(host, method, p if method in PORT_METHODS else 443))
     return CheckConfig(bool(enabled), interval, window, tuple(targets) or (DEFAULT_TARGET,))
 
 
@@ -164,6 +172,7 @@ class Quality:
     rtt_ms: int | None = None
     checks: int = 0
     lost: int = 0
+    targets: tuple[tuple[str, int, int], ...] = ()     # per address in the window: (label, checks, lost)
 
 
 def window_seconds(cfg: CheckConfig) -> float:
@@ -173,7 +182,7 @@ def window_seconds(cfg: CheckConfig) -> float:
 
 
 def rate(samples, now: float, window_s: float, since: float | None = None) -> Quality:
-    """samples: (time, ok, rtt_ms or None), one per check. since: when the rating started - until a full window has passed
+    """samples: (time, ok, rtt_ms or None[, target index]), one per check. since: when the rating started - until a full window has passed
     the answer is "checking". Pure."""
     recent = [s for s in samples if now - s[0] <= window_s]
     n = len(recent)
@@ -185,6 +194,17 @@ def rate(samples, now: float, window_s: float, since: float | None = None) -> Qu
     rtt = round(statistics.median(rtts)) if rtts else None
     state = "good" if loss < GOOD_BELOW else ("bad" if loss > BAD_ABOVE else "unstable")
     return Quality(state, round(loss, 1), rtt, n, lost)
+
+
+def per_target(samples, targets, now: float, window_s: float) -> tuple[tuple[str, int, int], ...]:
+    """The rating window per address: ((label, checks, lost), ...) in the order of `targets` (samples carry the address's
+    index as their 4th item). Pure."""
+    counts = [[0, 0] for _ in targets]
+    for s in samples:
+        if len(s) > 3 and 0 <= s[3] < len(counts) and now - s[0] <= window_s:
+            counts[s[3]][0] += 1
+            counts[s[3]][1] += 0 if s[1] else 1
+    return tuple((t.label(), c[0], c[1]) for t, c in zip(targets, counts))
 
 
 def describe(q: Quality) -> str:
@@ -207,9 +227,62 @@ def _ping_argv(host: str) -> list[str]:
     return ["ping", "-6" if six else "-4", "-n", "-c", "1", "-W", str(int(TIMEOUT)), host]
 
 
-def check(t: Target) -> tuple[bool, int | None]:
-    """One check: (answered, round trip in ms)."""
+HEAD_REQUEST = "HEAD / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: VeroScudo\r\nConnection: close\r\n\r\n"
+
+
+def _first_line(sock, limit: int = 1024) -> bytes:
+    data = b""
+    while b"\n" not in data and len(data) < limit:
+        chunk = sock.recv(limit - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data.split(b"\n", 1)[0]
+
+
+def _https(t: Target, start: float) -> bool:
+    """TCP connect, TLS handshake (the system's trust store, the host's name) and a HEAD request: answered when the first
+    line of the answer starts with HTTP/ - any status counts (a 403 or 404 still proves the way to the service works).
+    A certificate that fails verification proves the server answered too (then without the HTTP part). Never sends
+    credentials: no cookies, no Authorization header, no body."""
+    ctx = ssl.create_default_context()
+    host = t.host.strip("[]")
+    try:
+        with socket.create_connection((host, t.port), timeout=TLS_TIMEOUT) as raw:
+            raw.settimeout(max(0.5, TLS_TIMEOUT - (time.monotonic() - start)))
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                name = f"[{host}]" if ":" in host else host
+                s.sendall(HEAD_REQUEST.format(host=name).encode("ascii", errors="replace"))
+                return _first_line(s).startswith(b"HTTP/")
+    except ssl.SSLCertVerificationError:
+        return True                                               # the server answered with its certificate
+    except (OSError, ValueError):                                 # ssl.SSLError is an OSError: closed, reset, garbage
+        return False
+
+
+def check(t: Target, tls: bool = False) -> tuple[bool, int | None]:
+    """One check: (answered, round trip in ms). https: see _https. tls (Hiddify profiles): a TLS handshake on the target's
+    TCP port (443 for a ping target) instead of ping/TCP - Hiddify's TUN answers pings and completes TCP handshakes itself,
+    locally, also when none of its servers works (seen live on Windows: <1 ms to a fake-DNS address); only a real server
+    answers a TLS handshake. HTTPS targets stay HTTPS. A certificate that does not match still proves the server
+    answered; a closed or reset connection does not."""
     start = time.monotonic()
+    if t.method == "https":
+        ok = _https(t, start)
+        return (True, round((time.monotonic() - start) * 1000)) if ok else (False, None)
+    if tls:
+        port = 443 if t.method == "ping" else t.port
+        ctx = ssl.create_default_context()
+        try:
+            with socket.create_connection((t.host, port), timeout=TLS_TIMEOUT) as raw:
+                raw.settimeout(max(0.5, TLS_TIMEOUT - (time.monotonic() - start)))
+                with ctx.wrap_socket(raw, server_hostname=t.host):
+                    pass
+        except ssl.SSLCertVerificationError:
+            pass                                                  # the server answered with its certificate
+        except (OSError, ValueError):                             # ssl.SSLError is an OSError: closed, reset, garbage
+            return False, None
+        return True, round((time.monotonic() - start) * 1000)
     if t.method == "ping":
         try:
             r = subprocess.run(_ping_argv(t.host), capture_output=True, text=True, timeout=TIMEOUT + 2, check=False)
@@ -226,18 +299,19 @@ def check(t: Target) -> tuple[bool, int | None]:
         return False, None
 
 
-def run_round(targets) -> list[tuple[bool, int | None]]:
-    """Every address once, in parallel (a round takes at most TIMEOUT, not TIMEOUT per address)."""
+def run_round(targets, tls: bool = False) -> list[tuple[bool, int | None]]:
+    """Every address once, in parallel (a round takes at most TIMEOUT, not TIMEOUT per address). tls: see check()."""
     out: list = [(False, None)] * len(targets)
+    slow = tls or any(t.method == "https" for t in targets)    # a TLS handshake needs a few round trips more
 
     def one(i: int, t: Target) -> None:
-        out[i] = check(t)
+        out[i] = check(t, tls)
 
     threads = [threading.Thread(target=one, args=(i, t), daemon=True) for i, t in enumerate(targets)]
     for th in threads:
         th.start()
     for th in threads:
-        th.join(TIMEOUT + 3)
+        th.join((TLS_TIMEOUT if slow else TIMEOUT) + 3)
     return out
 
 
@@ -266,16 +340,18 @@ class Monitor:
         if key != self.key or down_at > self.started:        # new connection, other profile or other rules: start over
             self.samples.clear()
             self.key, self.started, self.last_state = key, now, ""
-        for ok, rtt in results:
-            self.samples.append((now, ok, rtt))
-        q = rate(self.samples, now, window_seconds(cfg), since=self.started)
+        for i, (ok, rtt) in enumerate(results):
+            self.samples.append((now, ok, rtt, i))                # i: the address (per-address counts in quality.json)
+        q = replace(rate(self.samples, now, window_seconds(cfg), since=self.started),
+                    targets=per_target(self.samples, cfg.targets, now, window_seconds(cfg)))
         write(self.path, q, cfg, profile, now)
         return q
 
 
 def write(path: Path, q: Quality, cfg: CheckConfig, profile: str, now: float) -> None:
     data = {"profile": profile, "state": q.state, "lossPct": q.loss_pct, "rttMs": q.rtt_ms, "checks": q.checks, "lost": q.lost,
-            "intervalSeconds": cfg.interval_seconds, "windowMinutes": cfg.window_minutes, "updated": now}
+            "intervalSeconds": cfg.interval_seconds, "windowMinutes": cfg.window_minutes, "updated": now,
+            "targets": [{"label": label, "checks": n, "lost": k} for label, n, k in q.targets]}
     tmp = path.with_suffix(".json.new")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +376,10 @@ def read(path: Path, profile: str, now: float | None = None) -> Quality | None:
         if age > max(3 * int(j.get("intervalSeconds", 10)), 30) or age < -60:
             return None
         rtt = j.get("rttMs")
+        raw = j.get("targets")
+        targets = tuple((str(t.get("label", "")), int(t.get("checks", 0)), int(t.get("lost", 0)))
+                        for t in (raw if isinstance(raw, list) else []) if isinstance(t, dict))
         return Quality(str(j.get("state", "checking")), float(j.get("lossPct", 0)), int(rtt) if rtt is not None else None,
-                       int(j.get("checks", 0)), int(j.get("lost", 0)))
+                       int(j.get("checks", 0)), int(j.get("lost", 0)), targets)
     except (TypeError, ValueError):
         return None

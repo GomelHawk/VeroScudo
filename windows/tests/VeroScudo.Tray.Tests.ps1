@@ -77,6 +77,17 @@ Describe 'ConvertTo-VeroExitView: the location line' {
         (ConvertTo-VeroExitView -Info $script:info -State 'protected' -ProfileName 'Work' -Checking).Right | Should -Be 'checking...'
         (ConvertTo-VeroExitView -Info $script:info -State 'protected' -ProfileName 'Work' -ProtectedSince ([datetime]'2026-11-04T11:00:00Z') -Preview).Fresh | Should -BeTrue
     }
+    It 'Refresh never looks like nothing happened: a failed or refused one is shown next to the old values' {
+        $v = ConvertTo-VeroExitView -Info $script:info -State 'protected' -ProfileName 'Work' -Failure 'ipinfo.io: timeout'
+        $v.Right | Should -Match '^203\.0\.113\.9 - \d\d:\d\d - refresh failed$'; $v.Fresh | Should -BeFalse; $v.Tip | Should -Match 'Refresh: ipinfo.io: timeout'
+        (ConvertTo-VeroExitView -Info $script:info -State 'off' -ProfileName 'Work' -Failure 'no VPN tunnel is up - nothing to check').Right | Should -Match 'no VPN tunnel is up - nothing to check$'
+    }
+    It 'a tunnel that is up counts also with VeroScudo off or in "Protected + note"; Hiddify gets a note' {
+        (ConvertTo-VeroExitView -Info $script:info -State 'off' -ProfileName 'Work' -Connected -ProtectedSince ([datetime]'2026-11-04T09:00:00Z')).Fresh | Should -BeTrue
+        (ConvertTo-VeroExitView -Info $script:info -State 'attention' -ProfileName 'Work' -Connected -ProtectedSince ([datetime]'2026-11-04T09:00:00Z')).Fresh | Should -BeTrue
+        (ConvertTo-VeroExitView -Info $script:info -State 'off' -ProfileName 'Work').Fresh | Should -BeFalse
+        (ConvertTo-VeroExitView -Info $script:info -State 'protected' -ProfileName 'Work' -Hiddify).Tip | Should -Match 'Hiddify spreads traffic over several servers'
+    }
 }
 
 Describe 'Test-VeroTrayFileChanged: once per new write' {
@@ -186,5 +197,44 @@ Describe 'ConvertTo-VeroConnectionView: the CONNECTION card, tooltip and menu he
         Get-VeroTrayTip -Title 'Protected' -Word 'Good' | Should -Be 'VeroScudo - Protected, connection good'
         Get-VeroTrayTip -Title 'Protected' | Should -Be 'VeroScudo - Protected'
         (Get-VeroTrayTip -Title 'Protected' -Word 'Unstable' -Awake).Length | Should -BeLessOrEqual 63
+    }
+}
+
+Describe 'ConvertTo-VeroStatusPageView: a service status page line' {
+    It 'name and description, toned by the indicator' {
+        $ok = '{"page":{"name":"Anthropic"},"status":{"indicator":"none","description":"All Systems Operational"}}'
+        $v = ConvertTo-VeroStatusPageView -Json $ok -Url 'https://status.example.com/api/v2/status.json' -Time ([datetime]'2026-11-09 14:05')
+        $v.Text | Should -Be 'Anthropic: All Systems Operational'; $v.Tone | Should -Be 'good'; $v.Tip | Should -Match 'checked 14:05 from https://status.example.com'
+        $v.Badge | Should -Be 'OK'; $v.Name | Should -Be 'Anthropic'; $v.Right | Should -Be ("All Systems Operational {0} 14:05" -f [char]0x00B7)
+        (ConvertTo-VeroStatusPageView -Json ($ok -replace '"none"', '"major"') -Url 'https://s.example.com/x').Badge | Should -Be '!!'
+        (ConvertTo-VeroStatusPageView -Json ($ok -replace '"none"', '"minor"') -Url 'https://s.example.com/x').Tone | Should -Be 'warn'
+        (ConvertTo-VeroStatusPageView -Json ($ok -replace '"none"', '"critical"') -Url 'https://s.example.com/x').Tone | Should -Be 'bad'
+    }
+    It 'unreachable or not a status page: says so with the host' {
+        $v = ConvertTo-VeroStatusPageView -Json '' -Url 'https://status.example.com/api/v2/status.json' -Failure 'timeout'
+        $v.Text | Should -Be 'status.example.com: not reachable'; $v.Tip | Should -Match 'timeout'
+        $v.Badge | Should -Be '?'; $v.Name | Should -Be 'status.example.com'; $v.Right | Should -Match '^not reachable '
+        (ConvertTo-VeroStatusPageView -Json '<html>' -Url 'https://status.example.com/x').Text | Should -Be 'status.example.com: not reachable'
+    }
+}
+
+Describe 'Get-VeroTrayPref: every key the tray uses survives a read' {
+    It 'keeps the status page switch and address (live: saved, but read back as off)' {
+        $f = Join-Path $script:TrayTestDir 'tray-pref.json'
+        Set-VeroTrayPref -Path $f -Key 'statusPage' -Value $true
+        Set-VeroTrayPref -Path $f -Key 'statusPageUrl' -Value 'https://status.example.com/api/v2/status.json'
+        $p = Get-VeroTrayPref -Path $f
+        $p.statusPage | Should -BeTrue; $p.statusPageUrl | Should -Be 'https://status.example.com/api/v2/status.json'
+        $p.showExit | Should -BeTrue
+    }
+}
+
+Describe 'Hiddify: blocked means waiting for you, not reconnecting' {
+    It 'title, text and the CONNECTION card say what really happens (VeroScudo never dials Hiddify)' {
+        $f = @{ Configured = $true; Name = 'Hiddify'; Type = 'hiddify'; Armed = $true; Up = $false; Cred = $true; AuthBlocked = $false; Otp = $null; Conflicts = @(); Expect = $null; NativeNext = $null }
+        $st = ConvertTo-VeroTrayState $f
+        $st.Title | Should -Be 'Blocked - waiting for Hiddify'; $st.Text | Should -Match 'connect it in Hiddify'
+        (ConvertTo-VeroConnectionView -St $st -Check $null -Quality $null -Hiddify).Text | Should -Be 'waiting for Hiddify'
+        (ConvertTo-VeroConnectionView -St $st -Check $null -Quality $null).Text | Should -Be 'redialing'
     }
 }

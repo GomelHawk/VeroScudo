@@ -23,14 +23,16 @@ function ConvertTo-VeroTrayState($f) {
     }
     $state = if ($why) { 'attention' } elseif (-not $f.Armed) { 'off' } elseif ($f.Up) { 'protected' } else { 'blocked' }
     $title, $text = switch ($state) {
-        'protected' { 'Protected', "$name ($(Get-VeroTypeLabel $f.Type)) is connected and the kill-switch is on." }
+        'protected' { $lbl = Get-VeroTypeLabel $f.Type; 'Protected', "$(if ($lbl -eq $name) { $name } else { "$name ($lbl)" }) is connected and the kill-switch is on." }
         'blocked'   {
-            switch ([string]$f.Expect) {
+            # Hiddify: VeroScudo never dials it - it only waits for you to connect it there (no "reconnecting")
+            if ([string]$f.Type -eq 'hiddify' -and [string]$f.Expect -ne 'switch') { 'Blocked - waiting for Hiddify', "Hiddify is not connected. Nothing leaves this PC until you connect it in Hiddify (or turn VeroScudo off)." }
+            else { switch ([string]$f.Expect) {
                 'connect'   { 'Connecting', "Kill-switch on: traffic is blocked until $name is connected." }
                 'switch'    { 'Switching', "Switching to $name. Traffic stays blocked until it is connected." }
                 'reconnect' { 'Reconnecting', "Reconnecting $name. Traffic stays blocked until the tunnel is back." }
                 default     { 'Blocked - reconnecting', "$name is not connected. Nothing leaves this PC until it is back." }
-            }
+            } }
         }
         'off'       { 'Off', 'The VPN is turned off: normal network, not protected.' }
         default     { $head, $why }
@@ -40,21 +42,50 @@ function ConvertTo-VeroTrayState($f) {
 
 function ConvertTo-VeroExitView {
     <# What the location line shows. $Info: the last lookup (@{ Ip; Country; City; Org; Source; Time; Profile }) or $null.
-       Fresh = looked up through the tunnel that is up now (protected, same profile, after it came up); otherwise grey, with
-       its time. -Checking: a lookup runs; $Failure: why the last one failed; -Preview: screenshots (always fresh). Pure. #>
+       Fresh = looked up through the tunnel that is up now (protected or -Connected, same profile, after it came up);
+       otherwise grey, with its time. -Checking: a lookup runs; $Failure: why the last Refresh failed or was refused - shown
+       next to the old values too (a click must never look like nothing happened); -Hiddify: one more tooltip line;
+       -Preview: screenshots (always fresh). Pure. #>
     [CmdletBinding()] param($Info, [string]$State, [string]$ProfileName, [datetime]$ProtectedSince = [datetime]::MinValue, [switch]$Checking,
-                            [string]$Failure = '', [switch]$Preview)
+                            [string]$Failure = '', [switch]$Preview, [switch]$Connected, [switch]$Hiddify)
     $c = $Info
     if (-not $c -or -not $c.Ip) {
         $msg = if ($Checking) { 'Checking where your traffic leaves...' } elseif ($Failure) { "Location not available - $Failure" } else { 'Location: shown once the VPN is connected' }
         return @{ Has = $false; Text = $msg; Fresh = $false }
     }
     $t = try { [datetime]::Parse([string]$c.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind) } catch { [datetime]::MinValue }
-    $fresh = $State -eq 'protected' -and $ProfileName -and [string]$c.Profile -eq $ProfileName -and ($Preview -or $t -ge $ProtectedSince)
+    $fresh = ($State -eq 'protected' -or $Connected) -and $ProfileName -and [string]$c.Profile -eq $ProfileName -and ($Preview -or $t -ge $ProtectedSince) -and -not $Failure
     $country = try { (New-Object System.Globalization.RegionInfo([string]$c.Country)).EnglishName } catch { [string]$c.Country }
-    $right = if ($Checking) { 'checking...' } elseif ($fresh) { [string]$c.Ip } else { '{0} - {1:HH:mm}' -f $c.Ip, $t }
+    $right = if ($Checking) { 'checking...' } elseif ($Failure) { '{0} - {1:HH:mm} - {2}' -f $c.Ip, $t, $(if ($Failure -like 'no VPN tunnel*') { $Failure } else { 'refresh failed' }) }
+             elseif ($fresh) { [string]$c.Ip } else { '{0} - {1:HH:mm}' -f $c.Ip, $t }
+    $tip = ('{0}  {1}' -f $c.Ip, $c.Org) + "`r`n" + ('from {0}, {1:yyyy-MM-dd HH:mm}, profile {2}' -f $c.Source, $t, $c.Profile)
+    if ($Failure) { $tip += "`r`nRefresh: $Failure" }
+    if ($Hiddify) { $tip += "`r`nHiddify spreads traffic over several servers - the exit IP can differ per connection." }
     @{ Has = $true; Code = ([string]$c.Country).ToUpper(); Place = ((@($country, [string]$c.City) | Where-Object { $_ }) -join ' / '); Right = $right; Fresh = $fresh
-       Tip = (('{0}  {1}' -f $c.Ip, $c.Org) + "`r`n" + ('from {0}, {1:yyyy-MM-dd HH:mm}, profile {2}' -f $c.Source, $t, $c.Profile)) }
+       Tip = $tip }
+}
+
+function ConvertTo-VeroStatusPageView {
+    <# A service status page as the status window shows it - a card like the exit location: Badge (OK / ! / !! / ?), Name
+       (page.name, else the host), Right ("{description} - HH:mm"), Tone (none good, minor warn, major/critical bad, else
+       normal), Tip; Text is the Copy report line ("{name}: {description}" / "{host}: not reachable"). Pure (= statuspage.py). #>
+    [CmdletBinding()] param([string]$Json, [Parameter(Mandatory)][string]$Url, [datetime]$Time = (Get-Date), [string]$Failure = '')
+    $hostName = try { ([Uri]$Url).Host } catch { $Url }
+    $tip = 'checked {0:HH:mm} from {1}' -f $Time, $Url
+    $j = $null
+    if (-not $Failure -and $Json) { try { $j = $Json | ConvertFrom-Json } catch { $j = $null } }
+    $ok = $j -and $j.PSObject.Properties['status'] -and $j.status -and $j.status.PSObject.Properties['description']
+    $dot = [char]0x00B7
+    if (-not $ok) {
+        $why = if ($Failure) { $Failure } else { 'not a status page answer' }
+        return [pscustomobject]@{ Text = "${hostName}: not reachable"; Tone = 'normal'; Tip = "$tip`r`n$why"; Badge = '?'; Name = $hostName; Right = ('not reachable {0} {1:HH:mm}' -f $dot, $Time) }
+    }
+    $name = if ($j.PSObject.Properties['page'] -and $j.page -and [string]$j.page.name) { [string]$j.page.name } else { $hostName }
+    $ind = [string]$j.status.indicator
+    $tone = switch ($ind) { 'none' { 'good' } 'minor' { 'warn' } 'major' { 'bad' } 'critical' { 'bad' } default { 'normal' } }
+    $badge = switch ($ind) { 'none' { 'OK' } 'minor' { '!' } 'major' { '!!' } 'critical' { '!!' } default { '?' } }
+    $desc = [string]$j.status.description
+    [pscustomobject]@{ Text = "${name}: $desc"; Tone = $tone; Tip = $tip; Badge = $badge; Name = $name; Right = ('{0} {1} {2:HH:mm}' -f $desc, $dot, $Time) }
 }
 
 function ConvertTo-VeroConnectionView {
@@ -63,12 +94,12 @@ function ConvertTo-VeroConnectionView {
        Text: the quality while protected, else what the guard does about the connection (the two never matter at once).
        Tone: good | warn | bad | normal. Word: Good | Unstable | Bad while protected and rated, else $null. Pure
        (the same texts as connection_text / quality_word in linux/veroscudo/traymodel.py). #>
-    [CmdletBinding()] param($St, $Check, $Quality, [string]$Expect)
+    [CmdletBinding()] param($St, $Check, $Quality, [string]$Expect, [switch]$Hiddify)
     $enabled = [bool]($Check -and $Check.Enabled)
     $text = '-'; $tone = 'normal'; $word = $null; $tip = ''
     if (-not $St -or ($St.State -eq 'attention' -and -not $St.Armed)) { $text = '-' }
     elseif ($St.State -eq 'blocked' -or ($St.Armed -and -not $St.Connected)) {
-        $text = switch ($Expect) { 'connect' { 'connecting' } 'switch' { 'switching' } 'reconnect' { 'reconnecting' } default { 'redialing' } }
+        $text = if ($Hiddify -and $Expect -ne 'switch') { 'waiting for Hiddify' } else { switch ($Expect) { 'connect' { 'connecting' } 'switch' { 'switching' } 'reconnect' { 'reconnecting' } default { 'redialing' } } }
         $tone = 'warn'
     }
     elseif (-not $St.Armed) { $text = if ($St.Connected) { 'connected (VPN off)' } else { '-' } }
@@ -81,8 +112,11 @@ function ConvertTo-VeroConnectionView {
             $tip = '{0} checks in the last {1} min: {2} lost ({3}%){4}' -f $Quality.Checks, $Check.WindowMinutes, $Quality.Lost,
                 ([double]$Quality.LossPct).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture),
                 $(if ($null -ne $Quality.RttMs) { ", median $($Quality.RttMs) ms" } else { '' })
+            if ($Quality.PSObject.Properties['Targets'] -and @($Quality.Targets).Count -gt 1) {   # which address fails
+                $tip += "`r`n" + ((@($Quality.Targets) | ForEach-Object { '{0}: {1} of {2} lost' -f $_.Label, $_.Lost, $_.Checks }) -join "`r`n")
+            }
         }
-        $addr = @($Check.Targets | ForEach-Object { if ($_.Method -eq 'ping') { "$($_.Host) (ping)" } else { "$($_.Host):$($_.Port)" } }) -join ', '
+        $addr = @($Check.Targets | ForEach-Object { Get-VeroCheckLabel $_ }) -join ', '
         $tip = (@($tip, "Every $($Check.IntervalSeconds) s: $addr") | Where-Object { $_ }) -join "`r`n"
     }
     [pscustomobject]@{ Text = $text; Tone = $tone; Word = $word; Tip = $tip }
@@ -109,7 +143,8 @@ function Test-VeroTrayFileChanged {
 function Get-VeroTrayPref {
     <# The per-user tray choices (tray.json) with defaults for whatever is missing or unreadable. #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
-    $o = @{ keepAwake = $false; lastProfile = ''; eventsClearedAt = ''; showExit = $true; exitInfo = $null }
+    # every key the tray reads must be listed here - unknown keys are dropped (seen live: statusPage was saved but read as off)
+    $o = @{ keepAwake = $false; lastProfile = ''; eventsClearedAt = ''; showExit = $true; exitInfo = $null; statusPage = $false; statusPageUrl = '' }
     try { if (Test-Path -LiteralPath $Path) { $j = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json; foreach ($k in @($o.Keys)) { if ($j.PSObject.Properties[$k]) { $o[$k] = $j.$k } } } } catch { Write-Verbose 'tray.json unreadable' }
     $o
 }
@@ -144,4 +179,4 @@ function Test-VeroUacCancelled {
     $false
 }
 
-Export-ModuleMember -Function ConvertTo-VeroConnectionView, Get-VeroTrayTip, ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled
+Export-ModuleMember -Function ConvertTo-VeroStatusPageView, ConvertTo-VeroConnectionView, Get-VeroTrayTip, ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled

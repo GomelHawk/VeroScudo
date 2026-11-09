@@ -9,8 +9,25 @@ from pathlib import Path
 from .config import Config, config_path, profile_id
 
 
+def importable(d: dict) -> bool:
+    """A discovered connection VeroScudo can protect: a server (or, for Hiddify, its config file) and nothing against it.
+    Pure."""
+    if d.get("unsupported"):
+        return False
+    return bool(d.get("config_path")) if d.get("vpn_type") == "hiddify" else bool(d.get("server"))
+
+
+def summary(d: dict) -> str:
+    """'openvpn  vpn.example.com:1194' / 'Hiddify (VPN mode)  /home/.../current-config.json' for the import lists. Pure."""
+    if d.get("vpn_type") == "hiddify":
+        return f"Hiddify (VPN mode)  {d.get('config_path', '')}"
+    return f"{d['vpn_type'] or d['protocol']}  {d['server'] or '-'}:{d['port']}"
+
+
 def to_profile(d: dict) -> dict:
     """A discovered connection -> its config.json entry. Pure."""
+    if d.get("vpn_type") == "hiddify":                     # no server/port/username: its servers come from its live config
+        return {"profile": d["name"], "vpnType": "hiddify", "configPath": d["config_path"]}
     p = {"profile": d["name"], "server": d["server"], "port": int(d["port"]), "protocol": d["protocol"]}
     if d.get("vpn_type"):
         p["vpnType"] = d["vpn_type"]
@@ -32,11 +49,13 @@ def add_profiles(raw: str, found: list[dict], names: list[str]) -> tuple[str, li
             raise ValueError(f"no VPN connection named '{n}' (see: veroscudo import)")
         if n in have:
             raise ValueError(f"'{n}' is already configured")
-        if not d["server"] or d.get("unsupported"):
-            raise ValueError(f"'{n}' cannot be imported: {d['note']}")
+        if not importable(d):
+            raise ValueError(f"'{n}' cannot be imported: {d['note'] or 'no server found'}")
         profiles.append(to_profile(d))
         have.add(n)
-        msgs.append(f"imported '{n}': {d['vpn_type'] or d['protocol']} to {d['server']} port {d['port']}" + (f" ({d['note']})" if d["note"] else ""))
+        what = (f"Hiddify (VPN mode), servers from {d['config_path']}" if d.get("vpn_type") == "hiddify"
+                else f"{d['vpn_type'] or d['protocol']} to {d['server']} port {d['port']}")
+        msgs.append(f"imported '{n}': {what}" + (f" ({d['note']})" if d["note"] else ""))
     j.setdefault("activeProfile", profiles[0]["profile"])
     return _dump(j, profiles), msgs
 

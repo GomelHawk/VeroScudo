@@ -72,7 +72,7 @@ from AppKit import (  # type: ignore
 from Foundation import NSAttributedString, NSObject, NSString, NSTimer  # type: ignore
 from PyObjCTools import AppHelper  # type: ignore
 
-from . import __version__, exitinfo, keepawake, quality, stats, traymodel, update
+from . import __version__, exitinfo, importer, keepawake, quality, stats, statuspage, traymodel, update
 from .backend import nm
 from .config import Config, config_path, is_host
 from .state import StateStore, kind_label, switch_notice
@@ -81,6 +81,13 @@ ICONS = traymodel.env_icons(Path("/opt/veroscudo/icons"))
 CONNECTION_NOTE = ("The first rating comes one full period after each connect and each change here. The checks go through "
                    "the VPN tunnel; an address in your local network is not reachable while the kill-switch is on (unless "
                    "lanAllow lets it through).")
+METHODS = ("ping", "tcp", "https")                   # the order of the method pop-up
+METHOD_TITLES = ("Ping", "TCP port", "HTTPS")
+
+
+def method_of(index: int) -> str:
+    """The method pop-up's item -> the config's method (TCP when nothing sensible is selected). Pure."""
+    return METHODS[index] if 0 <= index < len(METHODS) else "tcp"
 
 
 def notify(title: str, body: str) -> None:
@@ -251,6 +258,8 @@ class Tray(NSObject):
         self.shown_profiles = None
         self.exit = exitinfo.ExitFetch()
         self.protected_since = 0.0
+        self.was_up = False
+        self.status_page = statuspage.StatusFetch()
         self.foreign = []
         self.foreign_at = 0.0
         self.foreign_shown = set()
@@ -391,7 +400,8 @@ class Tray(NSObject):
     @objc.python_method
     def exit_view(self):
         return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
-                                  self.exit.checking, self.exit.failure)
+                                  self.exit.checking, self.exit.failure, refused=self.exit.refused, tunnel_up=self.facts.up,
+                                  kind=self.facts.kind)
 
     @objc.python_method
     def icon(self, state, awake):
@@ -445,10 +455,15 @@ class Tray(NSObject):
             notify(*traymodel.expired_notice(self.facts.name)[:2])
             self.facts = self.collect()
             self.view = v = traymodel.tray_state(self.facts)
+        if self.facts.up and not self.was_up:                          # a tunnel came up: older lookups are not fresh
+            self.protected_since, self.exit.refused = time.time(), ""
+        self.was_up = self.facts.up
         if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
             self.protected_since = time.time()
             self.exit.start(self.facts.name)
+            self.status_page.on_connected()                            # the service status too - the same rule
         self.exit.poll()
+        self.status_page.tick()
         img = self.icon(v.state, self.awake.active)
         if img is not None:
             self.item.button().setImage_(img)
@@ -456,10 +471,11 @@ class Tray(NSObject):
             self.item.button().setTitle_("VS")
         self.item.button().setToolTip_(traymodel.tooltip(v, self.awake.active, self.facts))
         self.head.setTitle_(traymodel.menu_head(v, self.facts))
-        ms = traymodel.menu_state(v)
+        ms = traymodel.menu_state(v, self.facts.kind)
         self.on_item.setEnabled_(ms.on and self.facts.configured)
         self.off_item.setEnabled_(ms.off)
         self.redo_item.setEnabled_(ms.reconnect)
+        self.redo_item.setToolTip_(traymodel.RECONNECT_HIDDIFY if self.facts.kind == "hiddify" else None)
         self.fill_menus()
         noticed = self.switch_notice() or self.foreign_notice(v)
         n = None if noticed else traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
@@ -589,16 +605,10 @@ class Tray(NSObject):
     STATUS_W = 500
 
     @objc.python_method
-    def build_status(self):
+    def card(self, c, action):
+        """A full-width line in a thin frame: a small badge, the main text, a grey text on the right and a Refresh link - the
+        exit location and the service status page look the same. Returns (box, badge, main, right, refresh)."""
         W = self.STATUS_W
-        win, c = self.window("VeroScudo", W, 560)
-        st = {"c": c, "rows": None, "row_views": [], "h": 0}
-        st["img"] = NSImageView.alloc().initWithFrame_(NSMakeRect(18, 18, 64, 64))
-        c.addSubview_(st["img"])
-        st["title"] = self.label(c, "", 96, 18, W - 114, 28)
-        st["title"].setFont_(NSFont.boldSystemFontOfSize_(20))
-        st["text"] = self.wrapping(c, "", dim=True)
-        # where the traffic leaves the tunnel: one line under the header (Settings > Behaviour, "Show exit location")
         box = NSBox.alloc().initWithFrame_(NSMakeRect(18, 0, W - 36, 34))
         box.setBoxType_(4)                                  # NSBoxCustom: a thin frame, like the GTK frame
         box.setTitlePosition_(0)                            # NSNoTitle
@@ -609,18 +619,36 @@ class Tray(NSObject):
         inner = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 36, 34))
         box.setContentView_(inner)
         c.addSubview_(box)
-        st["loc"] = box
-        st["badge"] = self.label(inner, "", 10, 8, 30, 18)
-        st["badge"].setAlignment_(NSTextAlignmentCenter)
-        st["badge"].setFont_(NSFont.boldSystemFontOfSize_(NSFont.smallSystemFontSize()))
-        st["badge"].setDrawsBackground_(True)
-        st["badge"].setBackgroundColor_(NSColor.quaternaryLabelColor())
-        st["place"] = self.label(inner, "", 46, 8, 204, 18)
-        st["place"].setLineBreakMode_(NSLineBreakByTruncatingTail)
-        st["right"] = self.label(inner, "", 256, 8, 136, 18, dim=True)
-        st["right"].setAlignment_(NSTextAlignmentRight)
-        st["refresh"] = self.link(inner, "Refresh", "statusRefreshExit:")
-        st["refresh"].setFrame_(NSMakeRect(W - 36 - 66, 6, 60, 22))
+        badge = self.label(inner, "", 10, 8, 30, 18)
+        badge.setAlignment_(NSTextAlignmentCenter)
+        badge.setFont_(NSFont.boldSystemFontOfSize_(NSFont.smallSystemFontSize()))
+        badge.setDrawsBackground_(True)
+        badge.setBackgroundColor_(NSColor.quaternaryLabelColor())
+        main = self.label(inner, "", 46, 8, 204, 18)
+        main.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        right = self.label(inner, "", 256, 8, 136, 18, dim=True)
+        right.setAlignment_(NSTextAlignmentRight)
+        right.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        refresh = self.link(inner, "Refresh", action)
+        refresh.setFrame_(NSMakeRect(W - 36 - 66, 6, 60, 22))
+        return box, badge, main, right, refresh
+
+    @objc.python_method
+    def build_status(self):
+        W = self.STATUS_W
+        win, c = self.window("VeroScudo", W, 560)
+        st = {"c": c, "rows": None, "row_views": [], "h": 0}
+        st["img"] = NSImageView.alloc().initWithFrame_(NSMakeRect(18, 18, 64, 64))
+        c.addSubview_(st["img"])
+        st["title"] = self.label(c, "", 96, 18, W - 114, 28)
+        st["title"].setFont_(NSFont.boldSystemFontOfSize_(20))
+        st["text"] = self.wrapping(c, "", dim=True)
+        # where the traffic leaves the tunnel: one line under the header (Settings > Behaviour, "Show exit location")
+        st["loc"], st["badge"], st["place"], st["right"], st["refresh"] = self.card(c, "statusRefreshExit:")
+        # the service status page: a line like it, right under it (Settings > Connection, "Show a service status page")
+        st["svc"], st["sbadge"], st["sname"], st["sright"], st["srefresh"] = self.card(c, "statusRefreshService:")
+        st["sname"].setFrame_(NSMakeRect(46, 8, 150, 18))
+        st["sright"].setFrame_(NSMakeRect(202, 8, W - 36 - 66 - 202 - 4, 18))
         st["other"] = self.wrapping(c, "")
         st["evh"] = self.label(c, "Recent events", 18, 0, 200, 20)
         st["evh"].setFont_(NSFont.boldSystemFontOfSize_(13))
@@ -672,7 +700,11 @@ class Tray(NSObject):
                 alpha = 1.0 if xv.fresh else 0.6           # not looked up through the tunnel that is up now: grey
                 st["badge"].setStringValue_(xv.code or "?")
                 st["place"].setStringValue_(xv.place or xv.code)
-                st["place"].setFrame_(NSMakeRect(46, 8, 204, 18))
+                # a notice ('refresh failed', a refusal) is long: smaller, and the place gives way (truncated)
+                pw = 100 if xv.notice else 204
+                st["place"].setFrame_(NSMakeRect(46, 8, pw, 18))
+                st["right"].setFrame_(NSMakeRect(46 + pw + 6, 8, W - 36 - 66 - (46 + pw + 6) - 4, 18))
+                st["right"].setFont_(_small_font() if xv.notice else NSFont.systemFontOfSize_(NSFont.systemFontSize()))
                 st["right"].setStringValue_(xv.right)
                 for k in ("badge", "place", "right"):
                     st[k].setAlphaValue_(alpha)
@@ -681,12 +713,26 @@ class Tray(NSObject):
                 st["place"].setStringValue_(xv.text)
                 st["place"].setFrame_(NSMakeRect(10, 8, W - 36 - 82, 18))
                 st["place"].setAlphaValue_(0.6)
-                st["place"].setToolTip_(None)
+                st["place"].setToolTip_(xv.tip or None)
+            y += 34 + 12
+        # the service status page (Settings > Connection): its own line under the exit location, None = off
+        sv = self.status_page.view()
+        st["svc"].setHidden_(sv is None)
+        if sv is not None:
+            st["svc"].setFrame_(NSMakeRect(18, y, W - 36, 34))
+            bg, fg = statuspage.badge_colours(sv.tone, dark)    # "?": the exit badge's neutral background
+            st["sbadge"].setBackgroundColor_(_rgb(traymodel.hex_rgb(bg)) if bg else NSColor.quaternaryLabelColor())
+            st["sbadge"].setTextColor_(_rgb(traymodel.hex_rgb(fg)) if fg else NSColor.labelColor())
+            st["sbadge"].setStringValue_(sv.badge)
+            st["sname"].setStringValue_(sv.name)
+            st["sright"].setStringValue_(sv.right)
+            for k in ("sbadge", "sname", "sright"):
+                st[k].setToolTip_(sv.tip)
             y += 34 + 12
         # the table: CONNECTION coloured by its rating with the details as a tooltip, the firewall red while blocked
         cv = traymodel.connection_view(f, v, self.cfg.check if self.cfg else None)
-        rows = [(k, val, cv.tone if k == "Connection" else traymodel.firewall_tone(f, v) if k == "Firewall" else "normal",
-                 cv.tip if k == "Connection" else "")
+        tones = {"Connection": (cv.tone, cv.tip), "Firewall": (traymodel.firewall_tone(f, v), "")}
+        rows = [(k, val, *tones.get(k, ("normal", "")))
                 for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop, foreign=())]
         if (rows, dark) != st["rows"]:
             for x in st["row_views"]:
@@ -728,10 +774,11 @@ class Tray(NSObject):
             x -= w
             st[k].setFrame_(NSMakeRect(x, y, w, 30))
             x -= 8
-        ms = traymodel.menu_state(v)
-        st["onoff"].setTitle_("Turn VPN off" if (v.armed or v.connected) else "Turn VPN on")
+        ms = traymodel.menu_state(v, f.kind)
+        st["onoff"].setTitle_("Turn VPN off" if traymodel.offers_off(v, f.kind) else "Turn VPN on")
         st["onoff"].setEnabled_(f.configured)
         st["redo"].setEnabled_(ms.reconnect)
+        st["redo"].setToolTip_(traymodel.RECONNECT_HIDDIFY if f.kind == "hiddify" else None)
         h = y + 30 + 18
         if h != st["h"]:                                       # grows or shrinks downwards: the top edge stays
             fr = win.frame()
@@ -761,19 +808,23 @@ class Tray(NSObject):
         self.update_status()
 
     def statusRefreshExit_(self, _):
-        """The Refresh link: asked only while protected - otherwise the answer would show your real address."""
-        if self.view.state == "protected":
-            self.exit.start(self.facts.name)
-        else:
-            self.exit.failure = exitinfo.NOT_PROTECTED
+        """The Refresh link: asked whenever a VPN tunnel is up - otherwise the answer would show your real address."""
+        self.exit.refresh(self.facts.name, self.facts.up)
+        self.update_status()
+
+    def statusRefreshService_(self, _):
+        """The service card's Refresh link: a fetch now; "checking..." until it ends."""
+        self.status_page.refresh()
         self.update_status()
 
     @objc.python_method
     def copy_report(self):
         f, v = self.facts, self.view
         xl = exitinfo.report_line(self.exit_view()) if self.exit.enabled() else None
+        sv = self.status_page.view()
         lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
-                                                                     foreign=self.find_foreign(), exit_line=xl)]
+                                                                     foreign=self.find_foreign(), exit_line=xl,
+                                                                     service=sv.text if sv else None)]
         ev = traymodel.read_events(n=15)
         text = "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events", *(ev or [traymodel.log_hint()])])
         pb = NSPasteboard.generalPasteboard()
@@ -806,7 +857,7 @@ class Tray(NSObject):
             sw.setBorderWidth_(0)
             sw.setFillColor_(_rgb(traymodel.stats_colour(state, dark)))
             c.addSubview_(sw)
-            w = 200 if state == "good" else 90
+            w = {"good": 190, "unstable": 70, "bad": 150}.get(state, 90)
             self.label(c, text, lx + 18, 560, w, 20, dim=True).setFont_(_small_font())
             lx += w + 26
         foot = self.wrapping(c, traymodel.STATS_FOOT, dim=True, small=True)
@@ -862,7 +913,7 @@ class Tray(NSObject):
     # ---- the Settings window: VPN profiles, Behaviour, Connection
     @objc.python_method
     def build_settings(self):
-        W, H = 560, 430
+        W, H = 560, 550
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, H), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         win.setTitle_("VeroScudo - Settings")
@@ -933,12 +984,25 @@ class Tray(NSObject):
             y = top - 152 - i * 32
             host = self.field(v, 16, y, 250)
             host.setPlaceholderString_(quality.DEFAULT_HOST if i == 0 else "optional")
-            m = self.popup(v, 274, y - 1, 120, ("Ping", "TCP port"), "settingsMethod:")
+            m = self.popup(v, 274, y - 1, 120, METHOD_TITLES, "settingsMethod:")
             port = self.field(v, 402, y, 70)
             ui["rows"].append((host, m, port))
             more += [host, m, port]
-        more.append(self.label(v, CONNECTION_NOTE, 16, 36, W - 70, 52, dim=True))
-        ui["save"] = self.button(v, "Save connection settings", "settingsSave:", W - 260, 2, 210)
+        more.append(self.label(v, traymodel.CHECK_HTTPS_HINT, 16, top - 256, W - 70, 34, dim=True))
+        more.append(self.label(v, CONNECTION_NOTE, 16, top - 312, W - 70, 52, dim=True))
+        ui["save"] = self.button(v, "Save connection settings", "settingsSave:", W - 260, top - 350, 210)
+        # the service status page: your own setting (tray.json), saved at once - below the check's Save button
+        sep = NSBox.alloc().initWithFrame_(NSMakeRect(16, top - 364, W - 70, 1))
+        sep.setBoxType_(2)                                  # NSBoxSeparator
+        v.addSubview_(sep)
+        ui["sp"] = NSButton.checkboxWithTitle_target_action_(statuspage.LABEL, self, "settingsStatusPage:")
+        ui["sp"].setFrame_(NSMakeRect(16, top - 392, 460, 22))
+        v.addSubview_(ui["sp"])
+        ui["sp_url"] = self.field(v, 36, top - 422, W - 90)
+        ui["sp_url"].setPlaceholderString_(statuspage.DEFAULT_URL)
+        ui["sp_url"].setTarget_(self)
+        ui["sp_url"].setAction_("settingsStatusUrl:")         # Return or leaving the field
+        self.label(v, statuspage.ABOUT, 36, top - 446, W - 90, 18, dim=True).setFont_(_small_font())
         ui["more"] = more
         self.win, self.win_ui = win, ui
         self.fill_settings()
@@ -959,8 +1023,9 @@ class Tray(NSObject):
         found = [d for d in nm.discover() if d["name"] not in have]
         ui["imp"].removeAllItems()
         for d in found:
-            ok = bool(d["server"]) and not d.get("unsupported")
-            ui["imp"].addItemWithTitle_(f"{d['name']}  ({d['vpn_type'] or d['protocol']})" if ok else f"{d['name']}  - {d['note']}")
+            ok = importer.importable(d)
+            what = "Hiddify (VPN mode)" if d["vpn_type"] == "hiddify" else d["vpn_type"] or d["protocol"]
+            ui["imp"].addItemWithTitle_(f"{d['name']}  ({what})" if ok else f"{d['name']}  - {d['note']}")
             ui["imp"].lastItem().setRepresentedObject_(d["name"] if ok else "")
         if not found:
             ui["imp"].addItemWithTitle_("No other VPN service found. Create it in System Settings > VPN, connect once, then "
@@ -969,6 +1034,8 @@ class Tray(NSObject):
         ui["upd"].setState_(NSOnState if (cfg is None or cfg.update_check) else NSOffState)
         ui["vm"].setState_(NSOnState if (cfg is None or cfg.vm) else NSOffState)
         ui["loc"].setState_(NSOnState if self.exit.enabled() else NSOffState)
+        ui["sp"].setState_(NSOnState if self.status_page.enabled() else NSOffState)
+        ui["sp_url"].setStringValue_(self.status_page.url())
         chk = cfg.check if cfg else quality.CheckConfig()
         ui["en"].setState_(NSOnState if chk.enabled else NSOffState)
         ui["every"].setStringValue_(str(chk.interval_seconds))
@@ -976,8 +1043,8 @@ class Tray(NSObject):
         for i, (host, m, port) in enumerate(ui["rows"]):
             t = chk.targets[i] if i < len(chk.targets) else None
             host.setStringValue_(t.host if t else "")
-            m.selectItemAtIndex_(0 if t and t.method == "ping" else 1)
-            port.setStringValue_(str(t.port if t and t.method == "tcp" else 443))
+            m.selectItemAtIndex_(METHODS.index(t.method) if t and t.method in METHODS else 1)
+            port.setStringValue_(str(t.port if t and t.method in quality.PORT_METHODS else 443))
             port.setEnabled_(not (t and t.method == "ping"))
         self.show_check_fields()
 
@@ -1027,14 +1094,29 @@ class Tray(NSObject):
 
     def settingsMethod_(self, _):
         for _host, m, port in self.win_ui["rows"]:
-            port.setEnabled_(m.indexOfSelectedItem() == 1)
+            port.setEnabled_(method_of(m.indexOfSelectedItem()) in quality.PORT_METHODS)
+
+    def settingsStatusPage_(self, sender):
+        # your own setting (tray.json): saved at once, no administrator's password
+        self.status_page.set_enabled(sender.state() == NSOnState)
+        self.update_status()
+
+    def settingsStatusUrl_(self, sender):
+        text = str(sender.stringValue()).strip()
+        if text == self.status_page.url():
+            return
+        err = self.status_page.set_url(text)
+        if err:
+            sender.setStringValue_(self.status_page.url())       # not saved: the saved address again
+            self.alert("Not saved", err)
+        self.update_status()
 
     def settingsSave_(self, _):
         ui = self.win_ui
         if not str(ui["rows"][0][0].stringValue()).strip():      # the first address is never empty: cleared, it is 1.1.1.1
             ui["rows"][0][0].setStringValue_(quality.DEFAULT_HOST)
         try:
-            rows = [(str(h.stringValue()), "ping" if m.indexOfSelectedItem() == 0 else "tcp", int(str(p.stringValue()) or 443))
+            rows = [(str(h.stringValue()), method_of(m.indexOfSelectedItem()), int(str(p.stringValue()) or 443))
                     for h, m, p in ui["rows"]]
             chk = quality.from_form(ui["en"].state() == NSOnState, int(str(ui["every"].stringValue()) or 10),
                                     int(str(ui["over"].stringValue()) or 1), rows, is_host)
@@ -1050,6 +1132,9 @@ class Tray(NSObject):
         if action == "on":
             self.expect.start("connect")
         elif action == "reconnect":
+            if self.facts.kind == "hiddify":
+                notify("VeroScudo", traymodel.RECONNECT_HIDDIFY)
+                return
             if not self.store.armed:
                 notify("VeroScudo", "The VPN is off - use Turn VPN on.")
                 return
@@ -1082,7 +1167,7 @@ class Tray(NSObject):
 
     @objc.python_method
     def toggle_on_off(self):
-        if self.view.armed or self.view.connected:
+        if traymodel.offers_off(self.view, self.facts.kind):
             self.run_action("off")
         else:
             self.request_on()

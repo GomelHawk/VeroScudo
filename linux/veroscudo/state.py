@@ -27,7 +27,7 @@ def decide(user_requested: bool, armed: bool) -> Decision:
     return Decision.RECONNECT if armed else Decision.NONE
 
 
-KIND_LABELS = {"wireguard": "WireGuard", "openvpn": "OpenVPN"}
+KIND_LABELS = {"wireguard": "WireGuard", "openvpn": "OpenVPN", "hiddify": "Hiddify VPN mode"}
 
 
 def kind_label(kind: str | None) -> str:

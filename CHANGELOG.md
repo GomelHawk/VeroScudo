@@ -69,6 +69,39 @@ All notable changes to VeroScudo are recorded here. The format follows
 - **Windows gets "Guard not running"** (Linux had it): the watchdog writes a heartbeat on every pass; while VeroScudo is on
   and it is older than 3 minutes, the tray says the guard has stopped and how to fix it.
 
+### Checks for the services you depend on (Windows, Linux, macOS)
+- **HTTPS check method** (Settings > Connection, next to Ping and TCP port): TLS handshake plus one `HEAD /` without
+  credentials, any HTTP answer counts - e.g. `api.anthropic.com`; no account or key is used. The CONNECTION tooltip lists
+  each address's losses, so you see whether one service or the whole connection fails.
+- **Hiddify profiles are checked with TLS:** Hiddify answers pings and TCP handshakes itself (also when its servers are
+  dead), so those checks proved nothing; a TLS handshake needs a real server.
+- **Service status page** (opt-in, per user): a card under the exit location, in its style - a neutral badge OK / ! / !!
+  / ?, the service's name, its state and the time of the check, Refresh - from an Atlassian Statuspage (Anthropic's by
+  default), checked like the exit location: after each connect and on Refresh. It tells a service's outage from your
+  connection.
+- **Hiddify, blocked:** the window says *Blocked - waiting for Hiddify* and CONNECTION *waiting for Hiddify* (not
+  "reconnecting"/"redialing" - VeroScudo never dials Hiddify); the log says *Hiddify connected again* when it is back.
+- **Statistics: "VeroScudo on, but no connection" is bad,** not grey - a bar with 2+ such minutes reads "could not
+  connect", and the day says how long ("· no connection 42 min").
+- **Exit location Refresh always answers:** it works whenever a tunnel is up (also with VeroScudo off, and in "Protected +
+  note"), shows *checking...*, and a failed or refused refresh is shown next to the old values instead of nothing.
+  With Hiddify the tooltip notes that the exit IP can differ per connection.
+- **Windows: WSL never loses its network for a moment** when VeroScudo turns on with the tunnel already up, or turns off
+  (the allow rule now comes before the default Block, and goes after the default is restored).
+- **Hiddify fixes from the first live test:** with Hiddify connected and VeroScudo off, the button says *Turn VPN on*
+  (it said *Turn VPN off*, and Off did nothing); Off no longer logs "disconnected 'Hiddify'"; connecting Hiddify turns
+  VeroScudo on for it, like any VPN you connect yourself.
+
+### Hiddify in VPN mode (Windows, Linux, macOS)
+- **New profile type "Hiddify" - kill-switch only.** Connect, disconnect and reconnect in Hiddify (VPN/TUN mode);
+  VeroScudo keeps everything else blocked while its tunnel is down, records its statistics and runs the connection
+  check through it. Reconnect in VeroScudo is greyed out ("reconnect in Hiddify"); Off only disarms. Windows: the
+  `Hiddify.exe`/`HiddifyCli.exe` programs from the administrators-only install folder may reach any address (its servers
+  are many and change with each subscription). Linux/macOS: the servers and direct DNS of Hiddify's live config. Import:
+  Settings > Import (proxy mode is refused with a note).
+- **Fix: a running Hiddify was not detected at all on Windows** - its adapter is described `sing-tun Tunnel`, which matched
+  none of the known tunnel names. It now shows as *Hiddify (VPN mode)*.
+
 ### Statistics (Windows, Linux, macOS)
 - **Tray menu > Statistics:** the last 7 days of one VPN profile at a time (drop-down, the active profile first - a
   corporate and a home VPN are different connections, their problems are never mixed): one row per day on a 24-hour time

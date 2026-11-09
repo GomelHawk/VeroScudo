@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, badge, exitinfo, keepawake, quality, stats, traymodel, update
+from . import __version__, badge, exitinfo, importer, keepawake, quality, stats, statuspage, traymodel, update
 from .backend import nm
 from .config import Config, config_path, is_host
 from .state import StateStore, kind_label, switch_notice
@@ -159,7 +159,31 @@ class Windows:
         lb.connect("activate-link", lambda *_: (cb(), True)[1])
         return lb
 
+    def _card(self, box, refresh):
+        """A full-width line in a thin frame: a small badge, the main text, a grey text on the right and a Refresh link - the
+        exit location and the service status page look the same."""
+        Gtk = self.Gtk
+        frame = Gtk.Frame()
+        row = Gtk.Box(spacing=10)
+        row.set_border_width(8)
+        frame.add(row)
+        badge = Gtk.Label()
+        css = Gtk.CssProvider()
+        css.load_from_data(b"label { background-color: alpha(@theme_fg_color, 0.12); border-radius: 4px; padding: 1px 6px; }")
+        badge.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        main = self._label(wrap=False)
+        main.set_ellipsize(self.Pango.EllipsizeMode.END)
+        right = self._label(dim=True, wrap=False, xalign=1.0)
+        right.set_ellipsize(self.Pango.EllipsizeMode.END)          # a long text must not widen the window (full in the tooltip)
+        row.pack_start(badge, False, False, 0)
+        row.pack_start(main, True, True, 0)
+        row.pack_start(right, False, False, 0)
+        row.pack_start(self._link("Refresh", refresh), False, False, 0)
+        box.pack_start(frame, False, False, 0)
+        return frame, badge, main, right
+
     def show_status(self) -> None:
+        self.app.status_page_opened()
         if self.status:
             self.status.present()
             return
@@ -175,22 +199,15 @@ class Windows:
         head.pack_start(tb, True, True, 0)
         box.pack_start(head, False, False, 0)
         # where the traffic leaves the tunnel: one line under the header (Settings > Behaviour, "Show exit location")
-        loc = Gtk.Frame()
-        lrow = Gtk.Box(spacing=10)
-        lrow.set_border_width(8)
-        loc.add(lrow)
-        badge = Gtk.Label()
-        css = Gtk.CssProvider()
-        css.load_from_data(b"label { background-color: alpha(@theme_fg_color, 0.12); border-radius: 4px; padding: 1px 6px; }")
-        badge.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        place = self._label(wrap=False)
-        place.set_ellipsize(self.Pango.EllipsizeMode.END)
-        right = self._label(dim=True, wrap=False, xalign=1.0)
-        lrow.pack_start(badge, False, False, 0)
-        lrow.pack_start(place, True, True, 0)
-        lrow.pack_start(right, False, False, 0)
-        lrow.pack_start(self._link("Refresh", self.app.refresh_exit), False, False, 0)
-        box.pack_start(loc, False, False, 0)
+        loc, badge, place, right = self._card(box, self.app.refresh_exit)
+        # the service status page: a line like it, right under it (Settings > Connection, "Show a service status page")
+        svc, sbadge, sname, sright = self._card(box, self.app.refresh_status_page)
+        sright.set_max_width_chars(30)
+        same = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)    # both badges as wide: the two texts start in one column
+        for b in (badge, sbadge):
+            same.add_widget(b)
+        sbadge_css = Gtk.CssProvider()
+        sbadge.get_style_context().add_provider(sbadge_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
         grid = Gtk.Grid(column_spacing=18, row_spacing=6)
         box.pack_start(grid, False, False, 0)
         other = self._label()
@@ -212,10 +229,12 @@ class Windows:
             ("Open log", lambda: self.app.open_log(), False), ("Copy report", self._copy, True))
         self.status = w
         self._st = {"img": img, "title": title, "text": text, "grid": grid, "tv": tv, "sw": sw, "onoff": onoff, "redo": redo,
-                    "copy": copy, "rows": None, "loc": loc, "badge": badge, "place": place, "right": right, "other": other}
+                    "copy": copy, "rows": None, "loc": loc, "badge": badge, "place": place, "right": right, "other": other,
+                    "svc": svc, "sbadge": sbadge, "sname": sname, "sright": sright, "sbadge_css": sbadge_css, "sbadge_look": None}
         w.connect("destroy", lambda *_: setattr(self, "status", None))
         loc.show_all()
-        for x in (loc, other, badge, right):            # shown or hidden by update_status only (show_all leaves them alone)
+        svc.show_all()
+        for x in (loc, other, badge, right, svc):            # shown or hidden by update_status only (show_all leaves them alone)
             x.set_no_show_all(True)
         w.show_all()
         self.update_status()
@@ -249,16 +268,38 @@ class Windows:
                 st["badge"].set_markup(f"<small><b><span alpha='{alpha}'>{self.GLib.markup_escape_text(xv.code or '?')}"
                                        "</span></b></small>")
                 st["place"].set_markup(f"<span alpha='{alpha}'>{self.GLib.markup_escape_text(xv.place or xv.code)}</span>")
-                st["right"].set_text(xv.right)
+                # a notice ('refresh failed', a refusal) is long: smaller, and the place gives way (ellipsized)
+                st["place"].set_max_width_chars(12 if xv.notice else 52)
+                st["right"].set_max_width_chars(29 if xv.notice else 30)
+                st["right"].set_line_wrap(xv.notice)                      # a notice may take two lines, all of it shown
+                st["right"].set_ellipsize(self.Pango.EllipsizeMode.NONE if xv.notice else self.Pango.EllipsizeMode.END)
+                st["right"].set_markup(f"<small>{self.GLib.markup_escape_text(xv.right)}</small>" if xv.notice else
+                                       self.GLib.markup_escape_text(xv.right))
                 for k in ("loc", "place", "right", "badge"):
                     st[k].set_tooltip_text(xv.tip)
             else:
                 st["place"].set_markup(f"<span alpha='60%'>{self.GLib.markup_escape_text(xv.text)}</span>")
-                st["loc"].set_tooltip_text(None)
+                for k in ("loc", "place"):
+                    st[k].set_tooltip_text(xv.tip or None)
         # the table: CONNECTION coloured by its rating with the details as a tooltip, the firewall red while blocked
+        # the service status page (Settings > Connection): its own line under the exit location, None = off
+        sv = app.service_view()
+        st["svc"].set_visible(sv is not None)
+        if sv is not None:
+            bg, fg = statuspage.badge_colours(sv.tone, dark)
+            look = (bg, fg)
+            if look != st["sbadge_look"]:              # the exit badge's neutral background for "?", else the tone's colour
+                rule = f"background-color: {bg}; color: {fg};" if bg else ""
+                st["sbadge_css"].load_from_data(f"label {{ {rule} }}".encode())
+                st["sbadge_look"] = look
+            st["sbadge"].set_markup(f"<small><b>{self.GLib.markup_escape_text(sv.badge)}</b></small>")
+            st["sname"].set_text(sv.name)
+            st["sright"].set_text(sv.right)
+            for k in ("svc", "sbadge", "sname", "sright"):
+                st[k].set_tooltip_text(sv.tip)
         cv = traymodel.connection_view(f, v, app.cfg.check if app.cfg else None)
-        rows = [(k, val, cv.tone if k == "Connection" else traymodel.firewall_tone(f, v) if k == "Firewall" else "normal",
-                 cv.tip if k == "Connection" else "")
+        tones = {"Connection": (cv.tone, cv.tip), "Firewall": (traymodel.firewall_tone(f, v), "")}
+        rows = [(k, val, *tones.get(k, ("normal", "")))
                 for k, val in traymodel.status_rows(f, v, app.awake_on, app.tunnel, last_drop=app.last_drop, foreign=())]
         if rows != st["rows"]:
             for child in st["grid"].get_children():
@@ -282,10 +323,11 @@ class Windows:
             buf.set_text(text)
             adj = st["sw"].get_vadjustment()
             self.GLib.idle_add(lambda: adj.set_value(adj.get_upper()) or False)     # newest at the bottom
-        ms = traymodel.menu_state(v)
-        st["onoff"].set_label("Turn VPN off" if (v.armed or v.connected) else "Turn VPN on")
+        ms = traymodel.menu_state(v, f.kind)
+        st["onoff"].set_label("Turn VPN off" if traymodel.offers_off(v, f.kind) else "Turn VPN on")
         st["onoff"].set_sensitive(f.configured)
         st["redo"].set_sensitive(ms.reconnect)
+        st["redo"].set_tooltip_text(traymodel.RECONNECT_HIDDIFY if f.kind == "hiddify" else None)
 
     # settings
     def show_settings(self) -> None:
@@ -376,15 +418,17 @@ class Windows:
             m = Gtk.ComboBoxText()
             m.append("ping", "Ping")
             m.append("tcp", "TCP port")
+            m.append("https", "HTTPS")
             port = Gtk.SpinButton.new_with_range(1, 65535, 1)
             port.set_width_chars(6)
-            m.connect("changed", lambda c, port=port: port.set_sensitive(c.get_active_id() == "tcp"))
+            m.connect("changed", lambda c, port=port: port.set_sensitive(c.get_active_id() in quality.PORT_METHODS))
             if i == 0:   # the first address is never empty: cleared, it is 1.1.1.1 again
                 e.connect("focus-out-event", self._refill_first)
             tgrid.attach(e, 0, i, 1, 1)
             tgrid.attach(m, 1, i, 1, 1)
             tgrid.attach(port, 2, i, 1, 1)
             rows.append((e, m, port))
+        more.pack_start(self._label(traymodel.CHECK_HTTPS_HINT, dim=True), False, False, 0)
         more.pack_start(self._label("The first rating comes one full period after each connect and each change here. "
                                     "The checks go through the VPN tunnel; an address in your local network is not "
                                     "reachable while the kill-switch is on (unless lanAllow lets it through).", dim=True),
@@ -392,6 +436,18 @@ class Windows:
         save = Gtk.Button(label="Save connection settings")
         save.get_style_context().add_class("suggested-action")
         save.set_halign(Gtk.Align.END)
+        # the service status page: your own setting (tray.json), saved at once - below the check's Save button
+        sp_about = self._label(f"<small>{self.GLib.markup_escape_text(statuspage.ABOUT)}</small>", markup=True, dim=True)
+        sp_about.set_margin_start(26)
+        cp.pack_end(sp_about, False, False, 0)
+        sp_url = Gtk.Entry()
+        sp_url.set_margin_start(26)
+        sp_url.set_placeholder_text(statuspage.DEFAULT_URL)
+        sp_url.set_max_length(statuspage.MAX_URL)
+        cp.pack_end(sp_url, False, False, 0)
+        sp = Gtk.CheckButton(label=statuspage.LABEL)
+        cp.pack_end(sp, False, False, 0)
+        cp.pack_end(Gtk.Separator(), False, False, 6)
         cp.pack_end(save, False, False, 0)
         more.show_all()
         more.set_no_show_all(True)                 # shown only while the check box is ticked (show_all leaves it alone)
@@ -400,9 +456,12 @@ class Windows:
         self._buttons(box, ("Close", lambda: w.destroy(), True))
         self.settings = w
         self._se = {"lb": lb, "upd": upd, "vm": vm, "loc": loc, "busy": False, "nb": nb, "en": en, "more": more, "every": every,
-                    "over": over, "rows": rows}
-        # your own setting (tray.json): saved at once, no administrator's password
+                    "over": over, "rows": rows, "sp": sp, "sp_url": sp_url}
+        # your own settings (tray.json): saved at once, no administrator's password
         loc.connect("toggled", lambda b: self._se["busy"] or self.app.set_exit_enabled(b.get_active()))
+        sp.connect("toggled", lambda b: self._se["busy"] or self.app.set_status_page(b.get_active()))
+        sp_url.connect("activate", lambda e: self._save_status_url())
+        sp_url.connect("focus-out-event", lambda e, _ev: self._save_status_url() and False)
         upd.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "updateCheck", "true" if b.get_active() else "false"]))
         vm.connect("toggled", lambda b: self._se["busy"] or self.app.admin(["set", "vm", "true" if b.get_active() else "false"]))
         save.connect("clicked", lambda _b: self._save_check())
@@ -415,6 +474,21 @@ class Windows:
     def _refill_first(entry, _event) -> bool:
         if not entry.get_text().strip():
             entry.set_text(quality.DEFAULT_HOST)
+        return False
+
+    def _save_status_url(self) -> bool:
+        se = self._se
+        if se["busy"]:
+            return False
+        text = se["sp_url"].get_text().strip()
+        if text == self.app.status_page_url():
+            return False
+        err = self.app.set_status_page_url(text)
+        if err:
+            se["busy"] = True
+            se["sp_url"].set_text(self.app.status_page_url())       # not saved: the saved address again
+            se["busy"] = False
+            self.message("Not saved", err, error=True)
         return False
 
     def _save_check(self) -> None:
@@ -453,6 +527,8 @@ class Windows:
             se["upd"].set_active(bool(cfg.update_check) if cfg else True)
             se["vm"].set_active(bool(cfg.vm) if cfg else True)
             se["loc"].set_active(self.app.exit_enabled())
+            se["sp"].set_active(self.app.status_page_enabled())
+            se["sp_url"].set_text(self.app.status_page_url())
             chk = cfg.check if cfg else quality.CheckConfig()
             se["en"].set_active(chk.enabled)
             se["more"].set_visible(chk.enabled)
@@ -462,8 +538,8 @@ class Windows:
                 t = chk.targets[i] if i < len(chk.targets) else None
                 e.set_text(t.host if t else "")
                 m.set_active_id(t.method if t else "tcp")
-                p.set_value(t.port if t and t.method == "tcp" else 443)
-                p.set_sensitive((t.method if t else "tcp") == "tcp")
+                p.set_value(t.port if t and t.method in quality.PORT_METHODS else 443)
+                p.set_sensitive((t.method if t else "tcp") in quality.PORT_METHODS)
         finally:
             se["busy"] = False
 
@@ -488,8 +564,8 @@ class Windows:
         area.pack_start(self._label("One connection per import: not every VPN on a computer is for work.", dim=True), False, False, 0)
         lb = Gtk.ListBox()
         for c in found:
-            ok = (c["server"] and not c.get("unsupported")) or c["note"].startswith("run as root")
-            what = f"{c['vpn_type'] or c['protocol']}  {c['server'] or '?'}:{c['port']}" if ok else c["note"]
+            ok = importer.importable(c) or c["note"].startswith("run as root")
+            what = importer.summary(c) if ok else c["note"]
             lab = self._label(f"<b>{self.GLib.markup_escape_text(c['name'])}</b>\n<span alpha='60%'>"
                               f"{self.GLib.markup_escape_text(what)}</span>", markup=True, wrap=False)
             lab.set_margin_start(8)
@@ -739,6 +815,8 @@ class TrayApp:
         self.update_url = ""
         self.exit = exitinfo.ExitFetch()
         self.protected_since = 0.0
+        self._was_up = False
+        self.status_page = statuspage.StatusFetch()
         self.foreign: list[traymodel.Foreign] = []
         self._foreign_at = 0.0
         self._foreign_shown: set = set()
@@ -827,14 +905,39 @@ class TrayApp:
 
     def exit_view(self) -> exitinfo.ExitView:
         return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
-                                  self.exit.checking, self.exit.failure)
+                                  self.exit.checking, self.exit.failure, refused=self.exit.refused, tunnel_up=self.facts.up,
+                                  kind=self.facts.kind)
 
     def refresh_exit(self) -> None:
-        """The Refresh link: asked only while protected - otherwise the answer would show your real address."""
-        if self.view.state == "protected":
-            self.exit.start(self.facts.name)
-        else:
-            self.exit.failure = exitinfo.NOT_PROTECTED
+        """The Refresh link: asked whenever a VPN tunnel is up - otherwise the answer would show your real address."""
+        self.exit.refresh(self.facts.name, self.facts.up)
+        self.win.update_status()
+
+    # service status page (statuspage.py)
+    def service_view(self) -> statuspage.ServiceView | None:
+        return self.status_page.view()
+
+    def status_page_enabled(self) -> bool:
+        return self.status_page.enabled()
+
+    def status_page_url(self) -> str:
+        return self.status_page.url()
+
+    def set_status_page(self, on: bool) -> None:
+        self.status_page.set_enabled(on)
+        self.win.update_status()
+
+    def set_status_page_url(self, url: str) -> str:
+        err = self.status_page.set_url(url)
+        self.win.update_status()
+        return err
+
+    def status_page_opened(self) -> None:
+        """The status window opened: nothing to fetch - the status page is looked at after each connect and on Refresh."""
+
+    def refresh_status_page(self) -> None:
+        """The service card's Refresh link: a fetch now; "checking..." until it ends."""
+        self.status_page.refresh()
         self.win.update_status()
 
     def find_foreign(self, force: bool = False) -> list[traymodel.Foreign]:
@@ -908,17 +1011,23 @@ class TrayApp:
             notify(*traymodel.expired_notice(self.facts.name), state="blocked")
             self.facts = self.collect()
             self.view = v = traymodel.tray_state(self.facts)
+        if self.facts.up and not self._was_up:                         # a tunnel came up: older lookups are not fresh
+            self.protected_since, self.exit.refused = time.time(), ""
+        self._was_up = self.facts.up
         if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
             self.protected_since = time.time()
             self.exit.start(self.facts.name)
+            self.status_page.on_connected()                            # the service status too - the same rule
         self.exit.poll()
+        self.status_page.tick()
         self.ind.set_icon_full(self.icon_file(v.state, self.awake.active), v.title)
         self.ind.set_title(traymodel.tooltip(v, self.awake.active, self.facts))
         self.head.set_label(traymodel.menu_head(v, self.facts))
-        ms = traymodel.menu_state(v)
+        ms = traymodel.menu_state(v, self.facts.kind)
         self.on_item.set_sensitive(ms.on and self.facts.configured)
         self.off_item.set_sensitive(ms.off)
         self.redo_item.set_sensitive(ms.reconnect)
+        self.redo_item.set_tooltip_text(traymodel.RECONNECT_HIDDIFY if self.facts.kind == "hiddify" else None)
         self.fill_profiles()
         noticed = self.switch_notice() or self.foreign_notice(v)
         n = None if noticed else traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
@@ -999,6 +1108,9 @@ class TrayApp:
         if action == "on":
             self.expect.start("connect")
         elif action == "reconnect":
+            if self.facts.kind == "hiddify":
+                notify("VeroScudo", traymodel.RECONNECT_HIDDIFY, state="blocked" if self.store.armed else "off")
+                return
             if not self.store.armed:
                 notify("VeroScudo", "The VPN is off - use Turn VPN on.", state="off")
                 return
@@ -1017,7 +1129,7 @@ class TrayApp:
         self.act("use", name)
 
     def toggle_on_off(self) -> None:
-        if self.view.armed or self.view.connected:
+        if traymodel.offers_off(self.view, self.facts.kind):
             self.act("off")
         else:
             self.request_on()
@@ -1047,8 +1159,10 @@ class TrayApp:
     def copy_report(self) -> None:
         f, v = self.facts, self.view
         xl = exitinfo.report_line(self.exit_view()) if self.exit_enabled() else None
+        sv = self.service_view()
         lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
-                                                                     foreign=self.find_foreign(), exit_line=xl)]
+                                                                     foreign=self.find_foreign(), exit_line=xl,
+                                                                     service=sv.text if sv else None)]
         ev = traymodel.read_events(n=15)
         text = "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events", *(ev or [traymodel.log_hint()])])
         cb = self.Gtk.Clipboard.get(self.Gdk.SELECTION_CLIPBOARD)
@@ -1116,17 +1230,20 @@ PREVIEW_EXIT = {"ip": "203.0.113.25", "city": "Example City", "country": "PL", "
 
 
 class _PreviewApp:
-    def __init__(self, facts: traymodel.Facts, foreign=(), exit_info=PREVIEW_EXIT, checking=False, exit_fresh=True) -> None:
+    def __init__(self, facts: traymodel.Facts, foreign=(), exit_info=PREVIEW_EXIT, checking=False, exit_fresh=True,
+                 exit_failure="", exit_refused="", service=None) -> None:
         self.facts, self.view = facts, traymodel.tray_state(facts)
         self.cfg = Config.from_text('{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","vpnType":"sstp"},'
                                     '{"profile":"wg-home","server":"203.0.113.9","port":51820,"protocol":"udp","vpnType":"wireguard"}],'
                                     '"activeProfile":"CorporateVPN","connectionCheck":{"enabled":true,"intervalSeconds":10,'
                                     '"windowMinutes":2,"targets":[{"host":"1.1.1.1","method":"tcp","port":443},'
-                                    '{"host":"10.0.0.1","method":"ping"}]}}')
+                                    '{"host":"10.0.0.1","method":"ping"},{"host":"api.example.com","method":"https",'
+                                    '"port":443}]}}')
         self.awake_on, self.tunnel = False, ("ppp0" if facts.up else None)
         self.foreign = list(foreign)
         self.last_drop = "10:40 - connection lost"
         self._exit, self._checking, self._fresh = exit_info, checking, exit_fresh
+        self._failure, self._refused, self._service = exit_failure, exit_refused, service
 
     def kind(self, name):
         return "wireguard" if name.startswith("wg") else "vpn"
@@ -1145,7 +1262,8 @@ class _PreviewApp:
         return [("a1", "CorporateVPN"), ("b2", "wg-home"), ("c3", "old-office (removed)")]
 
     def stats_week(self, profile=""):
-        """A made-up week: a lunch-time problem every day, a bad half hour, an evening without VPN, one day with the check off."""
+        """A made-up week: a lunch-time problem every day, a bad half hour, an evening without VPN, one day with the check off,
+        and a morning VeroScudo was on but could not connect (red)."""
         now = datetime(2026, 11, 7, 17, 25)
         rows = []
         for i in range(7):
@@ -1155,13 +1273,24 @@ class _PreviewApp:
                     break
                 lost = int(t % 3 == 0) if 12 * 60 + 40 <= t < 13 * 60 + 20 else 3 if (i == 2 and 16 * 60 <= t < 16 * 60 + 30) \
                     else int((t * 7 + i) % 41 == 0)
-                m[t] = (0, 0) if i == 5 else (3, min(lost, 3))
+                down = i == 1 and 9 * 60 + 5 <= t < 9 * 60 + 47                 # on, but the redial kept failing
+                m[t] = (0, 0, down) if i == 5 or down else (3, min(lost, 3))
             d = now.date() - timedelta(days=i)
             rows.append((stats.day_label(d, now.date()), stats.day_row(m, until=now.hour * 60 + now.minute + 1 if i == 0 else 1440)))
         return rows
 
     def exit_view(self):
-        return exitinfo.exit_view(self._exit, self.view.state, self.facts.name, checking=self._checking, preview=self._fresh)
+        return exitinfo.exit_view(self._exit, self.view.state, self.facts.name, checking=self._checking, preview=self._fresh,
+                                  failure=self._failure, refused=self._refused, tunnel_up=self.facts.up, kind=self.facts.kind)
+
+    def service_view(self):
+        return self._service
+
+    def status_page_enabled(self):
+        return True
+
+    def status_page_url(self):
+        return statuspage.DEFAULT_URL
 
     def discover(self):
         return [{"name": "Office L2TP", "vpn_type": "l2tp", "server": "l2tp.example.com", "port": 1701, "protocol": "udp", "note": ""},
@@ -1172,6 +1301,8 @@ class _PreviewApp:
         pass
 
     act = admin = copy_report = open_log = refresh_exit = clear_events = set_exit_enabled = lambda *a, **k: None
+    set_status_page = status_page_opened = refresh_status_page = lambda *a, **k: None
+    set_status_page_url = lambda *a, **k: ""
 
 
 def preview(outdir: Path) -> int:
@@ -1193,7 +1324,29 @@ def preview(outdir: Path) -> int:
     app_tun = traymodel.Foreign("tun1", "tun1", None, False)
     other_profile = traymodel.Foreign("wg-home", "wg0", "wg-home", True)
     prot = {"name": "CorporateVPN", "kind": "vpn", "armed": True, "up": True}
+    up_at = time.time() - 600
+    ok = statuspage.service_view({"name": "Example Service", "indicator": "none", "description": "All Systems Operational"},
+                                 statuspage.DEFAULT_URL, up_at)
+    minor = statuspage.service_view({"name": "Example Service", "indicator": "minor", "description": "Partially Degraded Service"},
+                                    statuspage.DEFAULT_URL, up_at)
+    gone = statuspage.service_view({"error": "timed out"}, statuspage.DEFAULT_URL, up_at)
+    major = statuspage.service_view({"name": "Example Service", "indicator": "major", "description": "Major Outage"},
+                                    statuspage.DEFAULT_URL, up_at)
+    first = statuspage.service_view(None, statuspage.DEFAULT_URL)
+    q3 = quality.Quality("unstable", 22.2, 310, 18, 4, (("1.1.1.1:443", 6, 0), ("10.0.0.1 (ping)", 6, 4),
+                                                       ("api.example.com (HTTPS)", 6, 0)))
     for name, (f, kw) in {
+        "status-service-ok": (traymodel.Facts(**prot, check_enabled=True, quality=q3), {"service": ok}),
+        "status-service-minor": (traymodel.Facts(**prot), {"service": minor}),
+        "status-service-unreachable": (traymodel.Facts(**prot), {"service": gone}),
+        "status-service-major": (traymodel.Facts(**prot), {"service": major}),
+        "status-service-checking": (traymodel.Facts(**prot), {"service": first}),
+        "status-service-off": (traymodel.Facts(**prot), {"service": None}),
+        "status-exit-refresh-failed": (traymodel.Facts(**prot), {"exit_failure": "ipinfo.io: timed out / cloudflare.com: timed out",
+                                                                 "exit_fresh": False}),
+        "status-exit-refused": (traymodel.Facts(name="CorporateVPN", kind="vpn"), {"exit_refused": exitinfo.NO_TUNNEL,
+                                                                                  "exit_fresh": False}),
+        "status-exit-hiddify": (traymodel.Facts(name="Hiddify", kind="hiddify", armed=True, up=True), {}),
         "status-protected": (traymodel.Facts(**prot), {}),
         "status-protected-good": (traymodel.Facts(**prot, check_enabled=True, quality=quality.Quality("good", 0.0, 45, 18, 0)), {}),
         "status-protected-unstable": (traymodel.Facts(**prot, check_enabled=True,

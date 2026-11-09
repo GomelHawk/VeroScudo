@@ -178,10 +178,54 @@ function Update-ExitFetch {
     }
 }
 
+# ---------------------------------------------------------------- service status page (opt-in, per user)
+# An Atlassian Statuspage (.../api/v2/status.json, Anthropic's by default): fetched in the background by the same rules as
+# the exit location - once after each connect (Protected) and on Refresh, 6 s timeout. Tells a service's own outage from your connection (Claude Code hanging: their problem or yours?).
+$global:SvcJob = $null; $global:SvcResult = $null; $global:SvcNext = [datetime]::MinValue
+$global:SvcDefaultUrl = 'https://status.anthropic.com/api/v2/status.json'
+function Test-StatusPageEnabled { [bool](Get-TrayPref).statusPage }
+function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u) { $u } else { $global:SvcDefaultUrl } }
+function Start-StatusPageFetch([switch]$Now) {
+    if (-not (Test-StatusPageEnabled) -or $global:SvcJob -or $global:PreviewDir) { return }
+    if (-not $Now -and (Get-Date) -lt $global:SvcNext) { return }
+    $global:SvcNext = (Get-Date).AddMinutes(5)
+    $url = Get-StatusPageUrl
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({ param($u)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        try { $w = Invoke-WebRequest -Uri $u -TimeoutSec 6 -UseBasicParsing -Headers @{ Accept = 'application/json' }
+              @{ Json = ([Text.Encoding]::UTF8.GetString($w.RawContentStream.ToArray())) } }
+        catch { @{ Error = $_.Exception.Message } }
+    }).AddArgument($url)
+    $global:SvcJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Url = $url; Started = (Get-Date) }
+}
+function Update-StatusPageFetch {
+    $j = $global:SvcJob; if (-not $j) { return }
+    if ($j.Handle.IsCompleted -or ((Get-Date) - $j.Started).TotalSeconds -gt 15) {
+        $out = $null
+        if ($j.Handle.IsCompleted) { try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $out = @{ Error = $_.Exception.Message } } }
+        else { try { $j.PS.Stop() } catch { Write-Verbose 'status page stop failed' }; $out = @{ Error = 'no answer within 15 s' } }
+        $j.PS.Dispose(); $global:SvcJob = $null
+        $global:SvcResult = @{ Url = $j.Url; Time = (Get-Date); Json = $(if ($out) { $out.Json }); Error = $(if ($out) { $out.Error }) }
+    }
+}
+$global:PreviewSvc = $null
+function Get-StatusPageView {
+    if ($global:PreviewSvc) { return $global:PreviewSvc }
+    if (-not (Test-StatusPageEnabled)) { return $null }
+    $r = $global:SvcResult
+    $u = Get-StatusPageUrl; $h = try { ([Uri]$u).Host } catch { $u }
+    if (-not $r -or $global:SvcJob) {
+        $right = if ($global:SvcJob) { 'checking...' } else { 'not checked yet' }          # checked after each connect and on Refresh
+        return [pscustomobject]@{ Text = "${h}: $right"; Tone = 'normal'; Tip = $u; Badge = '?'; Name = $(if ($r) { (ConvertTo-VeroStatusPageView -Json $r.Json -Url $r.Url -Time $r.Time -Failure ([string]$r.Error)).Name } else { $h }); Right = $right }
+    }
+    ConvertTo-VeroStatusPageView -Json $r.Json -Url $r.Url -Time $r.Time -Failure ([string]$r.Error)
+}
+
 function Get-ExitView($st) {
     $c = if ($global:PreviewExit) { $global:PreviewExit } else { (Get-TrayPref).exitInfo }
     ConvertTo-VeroExitView -Info $c -State $st.State -ProfileName $(if ($global:Config) { [string]$global:Config.Profile } else { '' }) -ProtectedSince $global:ProtectedSince `
-        -Checking:([bool]$global:ExitJob) -Failure ([string]$global:ExitError) -Preview:([bool]$global:PreviewExit)
+        -Checking:([bool]$global:ExitJob) -Failure ([string]$global:ExitError) -Preview:([bool]$global:PreviewExit) -Connected:([bool]$st.Connected) -Hiddify:(Test-HiddifyProfile)
 }
 
 $global:Expect = $null
@@ -228,7 +272,7 @@ function Get-ConnectionView($st) {
     $chk = if ($global:PreviewCheck) { $global:PreviewCheck } elseif ($global:Config) { $global:Config.ConnectionCheck } else { $null }
     $q = if ($global:PreviewFacts) { $global:PreviewQuality } elseif ($chk -and $chk.Enabled -and $global:Config) { Read-VeroQuality -ProfileName $global:Config.Profile } else { $null }
     $exp = if ($global:PreviewFacts) { [string]$global:PreviewFacts.Expect } else { [string](Get-TrayExpect) }
-    ConvertTo-VeroConnectionView -St $st -Check $chk -Quality $q -Expect $exp
+    ConvertTo-VeroConnectionView -St $st -Check $chk -Quality $q -Expect $exp -Hiddify:(Test-HiddifyProfile)
 }
 function Invoke-GuardTask([string]$name) { Start-Process (Join-Path (Get-VeroSystemDir System) 'schtasks.exe') -ArgumentList "/run /tn `"$global:Folder$name`"" -WindowStyle Hidden }
 function Get-LastEvents([int]$n = 6, [string]$After = '') {
@@ -308,7 +352,19 @@ function Show-Status {
     $rl.Font = $FontSmall; $rl.LinkColor = $global:Theme.Accent; $rl.ActiveLinkColor = $global:Theme.Accent; $rl.BackColor = 'Transparent'; $rl.LinkBehavior = 'HoverUnderline'
     $loc.Controls.Add($rl)
     $tip = New-Object System.Windows.Forms.ToolTip
-    $rl.Add_LinkClicked(({ if ((Get-State).State -eq 'protected') { Start-ExitFetch } else { $global:ExitError = 'checked only while the VPN is connected (Protected)' } }).GetNewClosure())
+    # whenever a tunnel is up (also with VeroScudo off, also "Protected + note"): the lookup then goes through it
+    $rl.Add_LinkClicked(({ if ((Get-State).Connected) { $global:ExitError = ''; Start-ExitFetch } else { $global:ExitError = 'no VPN tunnel is up - nothing to check' } }).GetNewClosure())
+    # a service's own status page (Settings > Connection, opt-in): a card like the location line - tells their outage
+    # from your connection
+    $sc = New-Card $f 20 180 420 44
+    $sBadge = New-Label $sc '' 12 11 30 22 $FontSmall $global:Theme.Text; $sBadge.TextAlign = 'MiddleCenter'; $sBadge.BackColor = $global:Theme.Hover
+    $sBadge.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold)
+    $sName = New-Label $sc '' 52 1 130 42 $FontUI; $sName.AutoEllipsis = $true; $sName.TextAlign = 'MiddleLeft'
+    $sRight = New-Label $sc '' 182 1 178 42 $FontSmall $global:Theme.Sub; $sRight.TextAlign = 'MiddleRight'; $sRight.AutoEllipsis = $true
+    $sl = New-Object System.Windows.Forms.LinkLabel; $sl.Text = 'Refresh'; $sl.Location = (P 362 1); $sl.Size = (Z 50 42); $sl.TextAlign = 'MiddleRight'
+    $sl.Font = $FontSmall; $sl.LinkColor = $global:Theme.Accent; $sl.ActiveLinkColor = $global:Theme.Accent; $sl.BackColor = 'Transparent'; $sl.LinkBehavior = 'HoverUnderline'
+    $sc.Controls.Add($sl)
+    $sl.Add_LinkClicked(({ $global:SvcResult = $null; Start-StatusPageFetch -Now }).GetNewClosure())
     # everything below sits in one panel: the header grows with its text (nothing cut off) and pushes it down
     $body = New-Object System.Windows.Forms.Panel; $body.Location = (P 0 170); $body.Size = (Z 460 412); $body.BackColor = $global:Theme.Bg; $f.Controls.Add($body)
     $f.ClientSize = (Z 460 582)
@@ -340,7 +396,7 @@ function Show-Status {
     $bCopy  = New-Button $body 'Copy report' 341 358 99 $true
     $bRedo.Add_Click(({ Request-Reconnect }).GetNewClosure())
     $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }).GetNewClosure())
-    $bCopy.Add_Click(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $xv = Get-ExitView (Get-State); $txt += "`r`n" + ('{0,-11} {1}' -f 'Exit', $(if ($xv.Has) { '{0} {1} {2}' -f $xv.Code, $xv.Place, $xv.Right } else { $xv.Text })); $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $bCopy.Text = 'Copied'; }).GetNewClosure())
+    $bCopy.Add_Click(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $xv = Get-ExitView (Get-State); $txt += "`r`n" + ('{0,-11} {1}' -f 'Exit', $(if ($xv.Has) { '{0} {1} {2}' -f $xv.Code, $xv.Place, $xv.Right } else { $xv.Text })); $sv = Get-StatusPageView; if ($sv) { $txt += "`r`n" + ('{0,-11} {1}' -f 'Service', $sv.Text) }; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $bCopy.Text = 'Copied'; }).GetNewClosure())
     $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Request-TurnOn } }).GetNewClosure())
     $clr.Add_LinkClicked(({ Set-TrayPref 'eventsClearedAt' (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); $evText.Text = '' }).GetNewClosure())
     $refresh = ({
@@ -351,7 +407,20 @@ function Show-Status {
         if ($hero.Height -ne $heroH) { $hero.Height = $heroH }
         $showLoc = Test-ExitEnabled
         $loc.Visible = $showLoc; $loc.Top = $hero.Bottom + [int](14 * $global:Scale)
-        $bodyTop = if ($showLoc) { $loc.Bottom } else { $hero.Bottom }
+        $prevBottom = if ($showLoc) { $loc.Bottom } else { $hero.Bottom }
+        $sv = Get-StatusPageView
+        $sc.Visible = [bool]$sv
+        if ($sv) {
+            $sc.Top = $prevBottom + [int](10 * $global:Scale); $prevBottom = $sc.Bottom
+            $sBadge.Text = $sv.Badge; $sName.Text = $sv.Name; $sRight.Text = $sv.Right
+            # the right text as wide as it needs, the name gets the rest (a long host name wrapped mid-word)
+            $rw = [System.Windows.Forms.TextRenderer]::MeasureText($sv.Right, $FontSmall).Width + [int](6 * $global:Scale)
+            $sRight.Width = [Math]::Min($rw, [int](300 * $global:Scale)); $sRight.Left = [int](360 * $global:Scale) - $sRight.Width
+            $sName.Width = [Math]::Max([int](40 * $global:Scale), $sRight.Left - $sName.Left - [int](6 * $global:Scale))
+            # secondary information: a neutral badge like the country code, no colour (the connection is the main thing)
+            foreach ($ctl in $sc, $sName, $sRight, $sBadge) { $tip.SetToolTip($ctl, $sv.Tip) }
+        }
+        $bodyTop = $prevBottom
         if ($body.Top -ne $bodyTop) { $body.Top = $bodyTop }
         if ($f.ClientSize.Height -ne $body.Bottom) { $f.ClientSize = New-Object System.Drawing.Size($f.ClientSize.Width, $body.Bottom) }
         if ($showLoc) {
@@ -369,7 +438,7 @@ function Show-Status {
         $title.ForeColor = if ($st.Expected) { $global:Amber } else { switch ($st.State) { 'protected' { [System.Drawing.Color]::FromArgb(48,200,79) } 'blocked' { [System.Drawing.Color]::FromArgb(248,80,70) } 'attention' { $global:Amber } default { $global:Theme.Text } } }
         $cards['VPN profile'].Text = if ($global:Config) { $global:Config.Profile } else { '-' }
         $heads['VPN profile'].Text = if ($global:Config) { ('VPN profile - ' + (Get-VeroTypeLabel $global:Config.Type)).ToUpper() } else { 'VPN PROFILE' }
-        $bRedo.Enabled = $st.Armed
+        $bRedo.Enabled = $st.Armed -and -not (Test-HiddifyProfile)            # Hiddify reconnects in Hiddify
         $cards['Firewall'].Text = if ($st.Armed) { 'kill-switch ON' } else { 'normal' }
         $cards['Firewall'].ForeColor = if ($st.Expected) { $global:Amber } elseif ($st.Armed -and -not $st.Connected) { [System.Drawing.Color]::FromArgb(248,80,70) } else { $global:Theme.Text }
         $cards['Last drop'].Text = Get-LastDrop
@@ -385,7 +454,8 @@ function Show-Status {
         if ($evText.Text -ne $evNew) { $evText.Text = $evNew; $evText.SelectionStart = $evText.TextLength; $evText.ScrollToCaret() }   # newest at the bottom, scrollable
         $fv = @(Get-ForeignCached)
         $other.Text = if ($fv.Count -gt 0) { 'Other VPNs: ' + (($fv | ForEach-Object { '{0} ({1})' -f $_.Name, $(if ($_.Configured) { 'another profile' } elseif ($_.Kind -eq 'app') { 'VPN app' } else { 'not imported' }) }) -join ', ') } else { '' }
-        $bOnOff.Text = if ($st.Armed -or $st.Connected) { 'Turn VPN off' } else { 'Turn VPN on' }
+        # Off also hangs up a VPN VeroScudo can disconnect - never Hiddify (you disconnect it there): offered only while on
+        $bOnOff.Text = if ($st.Armed -or ($st.Connected -and -not (Test-HiddifyProfile))) { 'Turn VPN off' } else { 'Turn VPN on' }
     }).GetNewClosure()
     & $refresh
     $f.Add_Shown(({ $evText.SelectionStart = $evText.TextLength; $evText.ScrollToCaret() }).GetNewClosure())   # newest line visible at once
@@ -469,12 +539,15 @@ function Request-Otp {
     }
 }
 
-function Select-WindowsVpn([string[]]$have) {
+function Select-WindowsVpn([string[]]$have, [bool]$haveHiddify = $false) {
     <# Import from Windows: ONE Windows VPN profile per import, chosen by you - not every VPN on a PC is for work. Lists
        your profiles and those for all users with the type, server and sign-in VeroScudo found; profiles already in the
        list are not offered again. Nothing is selected in advance. Returns the chosen profile or nothing. #>
     $all = @(Get-VeroWindowsVpn | Sort-Object Name)
     $offer = @($all | Where-Object { $have -notcontains $_.Name -and $_.Server })
+    # Hiddify (installed, VPN mode): offered here too - VeroScudo then only blocks while its tunnel is down
+    $hid = if (-not $haveHiddify) { Get-VeroHiddifyOffer } else { $null }
+    if ($hid) { $offer += [pscustomobject]@{ Name = 'Hiddify'; Hiddify = $true; Ok = $hid.Ok; Note = $hid.Note } }
     if ($offer.Count -eq 0) {
         $msg = if ($all.Count -eq 0) { 'No Windows VPN profile found. Create one in Settings > Network & Internet > VPN (any type: Automatic, IKEv2, SSTP, L2TP/IPsec, PPTP), connect once, then import it here.' } else { 'Every Windows VPN profile is already in the list.' }
         [VeroMsg]::Show($msg, 'VeroScudo') | Out-Null; return
@@ -486,6 +559,7 @@ function Select-WindowsVpn([string[]]$have) {
     $lbx.Add_HandleCreated({ [VeroNative]::DarkScroll($this.Handle, $global:Dark) })
     $lbx.BackColor = $global:Theme.Bg; $lbx.ForeColor = $global:Theme.Text; $lbx.Font = $FontUI; $lbx.IntegralHeight = $false
     foreach ($v in $offer) {
+        if ($v.PSObject.Properties['Hiddify']) { [void]$lbx.Items.Add("Hiddify  -  $($v.Note)"); continue }
         $proto = switch ($v.TunnelType) { 'Ikev2' { 'IKEv2' } 'Sstp' { 'SSTP' } 'L2tp' { 'L2TP/IPsec' } 'Pptp' { 'PPTP' } default { 'Automatic' } }
         [void]$lbx.Items.Add(('{0}  -  {1}  -  {2}  -  {3}{4}' -f $v.Name, $proto, $v.Server, $(if ($v.Password) { 'password' } else { 'certificate' }), $(if ($v.AllUsers) { '  (all users)' } else { '' })))
     }
@@ -496,7 +570,11 @@ function Select-WindowsVpn([string[]]$have) {
     $ok.Enabled = $false
     $lbx.Add_SelectedIndexChanged(({ $ok.Enabled = ($lbx.SelectedIndex -ge 0) }).GetNewClosure())
     $cancel.Add_Click(({ $sf.Close() }).GetNewClosure())
-    $ok.Add_Click(({ if ($lbx.SelectedIndex -ge 0) { $res.Value = $offer[$lbx.SelectedIndex] }; $sf.Close() }).GetNewClosure())
+    $ok.Add_Click(({
+        if ($lbx.SelectedIndex -lt 0) { return }
+        $pick = $offer[$lbx.SelectedIndex]
+        if ($pick.PSObject.Properties['Hiddify'] -and -not $pick.Ok) { [VeroMsg]::Show($pick.Note, 'VeroScudo') | Out-Null; return }
+        $res.Value = $pick; $sf.Close() }).GetNewClosure())
     Show-Modal $sf 'import'
     if ($res.Value) { $res.Value }
 }
@@ -759,12 +837,12 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
 $global:SettingsForm = $null
 function Show-Settings {
     if ($global:SettingsForm -and -not $global:SettingsForm.IsDisposed) { $global:SettingsForm.Activate(); return }
-    $f = New-Form 'VeroScudo settings' 520 576
+    $f = New-Form 'VeroScudo settings' 520 666
     # three tabs (the same on Linux and macOS): VPN profiles, Behaviour, Connection - drawn here in the theme's colours
     # (WinForms' TabControl paints its strip light grey on the dark theme)
     $pages = @(); $tabs = @()
     foreach ($i in 0..2) {
-        $pg = New-Object System.Windows.Forms.Panel; $pg.Location = (P 0 64); $pg.Size = (Z 520 400); $pg.BackColor = $global:Theme.Bg; $f.Controls.Add($pg); $pages += $pg
+        $pg = New-Object System.Windows.Forms.Panel; $pg.Location = (P 0 64); $pg.Size = (Z 520 490); $pg.BackColor = $global:Theme.Bg; $f.Controls.Add($pg); $pages += $pg
         $t = New-Label $f (@('VPN profiles', 'Behaviour', 'Connection')[$i]) (20 + $i * 130) 14 120 30 $FontBold; $t.TextAlign = 'MiddleCenter'; $t.Cursor = 'Hand'; $tabs += $t
     }
     $bar = New-Object System.Windows.Forms.Panel; $bar.Location = (P 20 44); $bar.Size = (Z 120 3); $bar.BackColor = $global:Theme.Accent; $f.Controls.Add($bar)
@@ -806,8 +884,14 @@ function Show-Settings {
     $bKey = New-Button $card 'Key passphrase...' 308 220 160
     $bImp.Add_Click(({
         $have = @($work | ForEach-Object Profile)
-        $v = Select-WindowsVpn $have
+        $v = Select-WindowsVpn $have $(@($work | Where-Object { $_.Type -eq 'hiddify' }).Count -gt 0)
         if (-not $v) { return }
+        if ($v.PSObject.Properties['Hiddify']) {                            # Hiddify in VPN mode: a profile without server or password
+            $name = 'Hiddify'; $n = 2; while ($have -contains $name) { $name = "Hiddify $n"; $n++ }
+            [void]$work.Add([pscustomobject]@{ Profile = $name; Type = 'hiddify'; Server = ''; Port = 443; Username = ''; ServerIps = @(); Dco = $false; Auth = $false; ImportFrom = $null; ImportText = $null })
+            & $fill; $lb.SelectedIndex = $lb.Items.Count - 1
+            return
+        }
         $e = ConvertTo-VeroRasEntry -Vpn $v -UserName (Get-VeroRasSavedUser -Name $v.Name -AllUsers $v.AllUsers)
         if ($e.Auth -and -not $e.Username) { $e = Edit-VpnProfile $e }            # the one thing Windows did not tell us
         if (-not $e) { return }
@@ -816,14 +900,14 @@ function Show-Settings {
         & $fill; $lb.SelectedIndex = $lb.Items.Count - 1
     }).GetNewClosure())
     $bAdd.Add_Click(({ $e = Edit-VpnProfile $null; if ($e) { if (@($work | Where-Object Profile -eq $e.Profile)) { [VeroMsg]::Show("'$($e.Profile)' is already in the list.", 'VeroScudo') | Out-Null; return }; [void]$work.Add($e); Request-ProfilePassword $e; & $fill; $lb.SelectedIndex = $lb.Items.Count - 1 } }).GetNewClosure())
-    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Active -eq $work[$i].Profile) { $state.Active = $e.Profile }
+    $bEdit.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0) { return }; if ($work[$i].Type -eq 'hiddify') { [VeroMsg]::Show('Nothing to edit: a Hiddify profile takes its servers from the Hiddify app. Connect, disconnect and reconnect it in Hiddify (VPN mode).', 'VeroScudo') | Out-Null; return }; $e = Edit-VpnProfile $work[$i]; if ($e) { if ($state.Active -eq $work[$i].Profile) { $state.Active = $e.Profile }
         if ($work[$i].PSObject.Properties['Id'] -and $work[$i].Id) { $e | Add-Member -NotePropertyName Id -NotePropertyValue $work[$i].Id -Force }   # a rename keeps the statistics
         $work[$i] = $e; & $fill } }).GetNewClosure())
     $bDel.Add_Click(({ $i = $lb.SelectedIndex; if ($i -lt 0 -or $work.Count -le 1) { return }; $gone = $work[$i].Profile
         if ([VeroMsg]::Show("Remove '$gone' from VeroScudo?`r`n`r`nOnly VeroScudo forgets it - the VPN itself stays in Windows. You do not need to remove profiles to use another one: select it in the tray menu (VPN profile).", 'VeroScudo', 'YesNo', 'Question') -ne 'Yes') { return }; $work.RemoveAt($i); & $fill }).GetNewClosure())
     $bPw.Add_Click(({
         $i = $lb.SelectedIndex; if ($i -lt 0) { return }; $e = $work[$i]
-        if (-not (Test-VeroNeedsPassword $e)) { [VeroMsg]::Show("'$($e.Profile)' needs no password here$(if ($e.Type -eq 'wireguard') { ' - the WireGuard app keeps its keys' }).", 'VeroScudo') | Out-Null; return }
+        if (-not (Test-VeroNeedsPassword $e)) { [VeroMsg]::Show("'$($e.Profile)' needs no password here$(if ($e.Type -eq 'wireguard') { ' - the WireGuard app keeps its keys' } elseif ($e.Type -eq 'hiddify') { ' - the Hiddify app keeps its servers and keys' }).", 'VeroScudo') | Out-Null; return }
         $sec = Read-Password "$($e.Username) ($($e.Profile))"
         if ($sec) { $cp = Get-VeroPath -VpnProfile $e.Profile; New-Item -ItemType Directory -Path $cp.UserDir -Force | Out-Null
                     New-Object System.Management.Automation.PSCredential($e.Username, $sec) | Export-Clixml $cp.Cred; & $fill }
@@ -858,9 +942,9 @@ function Show-Settings {
     $chkLoc.Add_CheckedChanged({ Set-TrayPref 'showExit' $this.Checked })   # your own setting: saved at once, no administrator prompt
     # Connection: optional quality checks through the tunnel while protected (66-Quality.ps1). The fields show only when ticked.
     $chk = if ($global:PreviewCheck) { $global:PreviewCheck } elseif ($global:Config) { $global:Config.ConnectionCheck } else { ConvertFrom-VeroCheckConfig $null }
-    $card3 = New-Card $pages[2] 20 0 480 376
+    $card3 = New-Card $pages[2] 20 0 480 486
     $chkQ = New-ThemedCheck; $chkQ.Text = 'Check the connection quality while protected'; $chkQ.Location = (P 12 12); $chkQ.Size = (Z 450 24); $chkQ.ForeColor = $global:Theme.Text; $chkQ.Checked = [bool]$chk.Enabled; $card3.Controls.Add($chkQ)
-    $more = New-Object System.Windows.Forms.Panel; $more.Location = (P 1 44); $more.Size = (Z 476 328); $more.BackColor = $global:Theme.Card; $card3.Controls.Add($more)
+    $more = New-Object System.Windows.Forms.Panel; $more.Location = (P 1 44); $more.Size = (Z 476 340); $more.BackColor = $global:Theme.Card; $card3.Controls.Add($more)
     New-Label $more 'Check every' 12 5 112 22 | Out-Null
     $inEvery = New-Input $more 128 2 60 ([string]$chk.IntervalSeconds)
     New-Label $more 'seconds (10-100)' 196 6 220 22 $FontSmall $global:Theme.Sub | Out-Null
@@ -875,27 +959,40 @@ function Show-Settings {
         $y = 132 + $i * 40
         $inHost = New-Input $more 12 $y 228 $(if ($t) { [string]$t.Host } else { '' })
         $cbM = New-Object VeroCombo; $cbM.Location = (P 248 $y); $cbM.Size = (Z 116 30); $cbM.DropDownStyle = 'DropDownList'; $cbM.FlatStyle = 'Flat'; $cbM.BackColor = $global:Theme.Card; $cbM.ForeColor = $global:Theme.Text; $cbM.Font = $FontUI; Set-DarkCombo $cbM
-        [void]$cbM.Items.Add('Ping'); [void]$cbM.Items.Add('TCP port'); $more.Controls.Add($cbM)
-        $cbM.SelectedIndex = if ($t -and $t.Method -eq 'ping') { 0 } else { 1 }
-        $inPort = New-Input $more 372 $y 92 $(if ($t -and $t.Method -eq 'tcp') { [string]$t.Port } else { '443' })
-        $syncPort = ({ $tcp = ($cbM.SelectedIndex -eq 1); $inPort.ReadOnly = -not $tcp; $inPort.TabStop = $tcp; $inPort.ForeColor = if ($tcp) { $global:Theme.Text } else { $global:Theme.Sub } }).GetNewClosure()
+        [void]$cbM.Items.Add('Ping'); [void]$cbM.Items.Add('TCP port'); [void]$cbM.Items.Add('HTTPS'); $more.Controls.Add($cbM)
+        $cbM.SelectedIndex = if ($t -and $t.Method -eq 'ping') { 0 } elseif ($t -and $t.Method -eq 'https') { 2 } else { 1 }
+        $inPort = New-Input $more 372 $y 92 $(if ($t -and $t.Method -in 'tcp', 'https') { [string]$t.Port } else { '443' })
+        $syncPort = ({ $tcp = ($cbM.SelectedIndex -ge 1); $inPort.ReadOnly = -not $tcp; $inPort.TabStop = $tcp; $inPort.ForeColor = if ($tcp) { $global:Theme.Text } else { $global:Theme.Sub } }).GetNewClosure()
         & $syncPort; $cbM.Add_SelectedIndexChanged($syncPort)
         if ($i -eq 0) { $inHost.Add_Leave({ if (-not $this.Text.Trim()) { $this.Text = '1.1.1.1' } }) }   # never empty: there is always one address
         $rows += [pscustomobject]@{ Host = $inHost; Method = $cbM; Port = $inPort }
     }
-    New-WrapLabel $more 'The first rating comes one full period after each connect and each change here. The checks go through the VPN tunnel; an address in your local network is not reachable while the kill-switch is on (unless lanAllow lets it through).' 12 256 452 $FontSmall $global:Theme.Sub | Out-Null
+    $hint = New-WrapLabel $more 'HTTPS checks the real way to a web service (any answer counts) - e.g. api.anthropic.com. No account or key is used.' 12 254 452 $FontSmall $global:Theme.Sub
+    New-WrapLabel $more 'The first rating comes one full period after each connect and each change. The checks go through the VPN tunnel; local addresses are blocked (unless lanAllow lets them through).' 12 ((Get-Logical $hint.Bottom) + 4) 452 $FontSmall $global:Theme.Sub | Out-Null
+    # a service's status page (per user, saved at once): shown in the status window; independent of the checks above
+    $chkSp = New-ThemedCheck; $chkSp.Text = 'Show a service status page in the status window'; $chkSp.Location = (P 12 390); $chkSp.Size = (Z 450 24); $chkSp.ForeColor = $global:Theme.Text
+    $chkSp.Checked = [bool](Test-StatusPageEnabled); $card3.Controls.Add($chkSp)
+    $inSp = New-Input $card3 38 420 426 (Get-StatusPageUrl)
+    New-Label $card3 'Atlassian Statuspage format (.../api/v2/status.json) - Anthropic''s by default.' 38 454 426 20 $FontSmall $global:Theme.Sub | Out-Null
+    $saveSp = ({
+        $u = $inSp.Text.Trim(); if (-not $u) { $u = $global:SvcDefaultUrl; $inSp.Text = $u }
+        if ($u -notmatch '^https://[^\s]+$' -or $u.Length -gt 300) { [VeroMsg]::Show('The status page must be an https:// address', 'VeroScudo') | Out-Null; $inSp.Text = (Get-StatusPageUrl); return }
+        if ($u -ne (Get-StatusPageUrl)) { Set-TrayPref 'statusPageUrl' $u; $global:SvcResult = $null; Start-StatusPageFetch -Now }
+    }).GetNewClosure()
+    $inSp.Add_Leave($saveSp)
+    $chkSp.Add_CheckedChanged(({ Set-TrayPref 'statusPage' $chkSp.Checked; if ($chkSp.Checked) { & $saveSp; $global:SvcResult = $null; Start-StatusPageFetch -Now } }).GetNewClosure())
     $more.Visible = $chkQ.Checked
     $chkQ.Add_CheckedChanged(({ $more.Visible = $chkQ.Checked }).GetNewClosure())
-    New-Label $f 'Passwords and the exit location switch are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 472 480 36 $FontSmall $global:Theme.Sub | Out-Null
-    $bCancel = New-Button $f 'Close' 270 522 110
-    $bSave   = New-Button $f 'Save' 390 522 110 $true
+    New-Label $f 'Passwords, the exit location and the status page switches are saved at once (your account only). Saving the rest writes config.json (administrator prompt).' 20 562 480 36 $FontSmall $global:Theme.Sub | Out-Null
+    $bCancel = New-Button $f 'Close' 270 612 110
+    $bSave   = New-Button $f 'Save' 390 612 110 $true
     $bCancel.Add_Click(({ $f.Close() }).GetNewClosure())
     $bSave.Add_Click(({
         if ($work.Count -eq 0) { [VeroMsg]::Show('Add at least one VPN profile.', 'VeroScudo') | Out-Null; return }
         $num = { param($box, [int]$fallback) $v = 0; if ([int]::TryParse($box.Text.Trim(), [ref]$v)) { $v } elseif (-not $box.Text.Trim()) { $fallback } else { throw "'$($box.Text.Trim())' is not a whole number." } }
         try {
             $check = ConvertFrom-VeroCheckForm -Enabled $chkQ.Checked -IntervalSeconds (& $num $inEvery 10) -WindowMinutes (& $num $inOver 1) -Rows @($rows | ForEach-Object {
-                @{ Text = $_.Host.Text; Method = $(if ($_.Method.SelectedIndex -eq 0) { 'ping' } else { 'tcp' }); Port = $(if ($_.Method.SelectedIndex -eq 0) { 443 } else { & $num $_.Port 443 }) } })
+                @{ Text = $_.Host.Text; Method = @('ping', 'tcp', 'https')[[Math]::Max(0, $_.Method.SelectedIndex)]; Port = $(if ($_.Method.SelectedIndex -eq 0) { 443 } else { & $num $_.Port 443 }) } })
         } catch { & $selectTab 2; [VeroMsg]::Show("Not saved (Connection): $($_.Exception.Message)", 'VeroScudo') | Out-Null; return }
         Set-VeroProfileIds -Entries @($work)                                # each profile's lasting id (statistics follow it)
         $json = [ordered]@{
@@ -1030,11 +1127,11 @@ function Show-Stats {
     & $reload
     # legend
     $ly = 560; $lx = 20
-    foreach ($it in @(@('good', 'Good (or connected, not rated)'), @('unstable', 'Unstable'), @('bad', 'Bad'), @('off', 'Not connected'))) {
+    foreach ($it in @(@('good', 'Good (or connected, not rated)'), @('unstable', 'Unstable'), @('bad', 'Bad or could not connect'), @('off', 'Not connected'))) {
         $sw = New-Object System.Windows.Forms.Panel; $sw.Location = (P $lx ($ly + 4)); $sw.Size = (Z 12 12); $sw.BackColor = $colors[$it[0]]; $f.Controls.Add($sw)
-        $w = if ($it[0] -eq 'good') { 200 } else { 90 }
+        $w = switch ($it[0]) { 'good' { 190 } 'bad' { 160 } 'off' { 100 } default { 80 } }
         New-Label $f $it[1] ($lx + 18) $ly $w 20 $FontSmall $global:Theme.Sub | Out-Null
-        $lx += $w + 26
+        $lx += $w + 14
     }
     New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; without it, connected time is green.' 20 584 600 40 $FontSmall $global:Theme.Sub | Out-Null
     $bRef = New-Button $f 'Refresh' 400 630 100
@@ -1203,8 +1300,10 @@ function Show-ForeignNotice {
     $false
 }
 
+function Test-HiddifyProfile { [bool]($global:Config -and [string]$global:Config.Type -eq 'hiddify') }
 function Request-Reconnect {
     <# Reconnect: the elevated task blocks traffic, hangs up and redials; traffic flows again once the tunnel is back. #>
+    if (Test-HiddifyProfile) { $notify.ShowBalloonTip(5000, 'VeroScudo', 'Connect and reconnect in Hiddify - VeroScudo only keeps everything else blocked while its tunnel is down.', [System.Windows.Forms.ToolTipIcon]::Info); return }
     if (-not (Test-VeroArmed)) { $notify.ShowBalloonTip(4000, 'VeroScudo', 'The VPN is off - use Turn VPN on.', [System.Windows.Forms.ToolTipIcon]::Info); return }
     Set-TrayExpect 'reconnect'
     Invoke-GuardTask 'Reconnect'
@@ -1277,8 +1376,11 @@ function Invoke-UpdateCheck([switch]$Force) {
 function Refresh {
     if (Update-ConfigCache) { Update-ProfileMenu }
     $st = Get-State
-    if ($st.State -eq 'protected' -and $global:Last -ne 'protected') { $global:ProtectedSince = Get-Date; Start-ExitFetch }   # each (re)connect: once
+    if ($st.State -eq 'protected' -and $global:Last -ne 'protected') { $global:ProtectedSince = Get-Date; Start-ExitFetch; Start-StatusPageFetch -Now }   # each (re)connect: once (location and service status)
+    elseif ($st.Connected -and -not $global:LastConnected) { $global:ProtectedSince = Get-Date }    # a tunnel came up with VeroScudo off: older lookups are not this tunnel's
+    $global:LastConnected = [bool]$st.Connected
     Update-ExitFetch
+    Update-StatusPageFetch
     if ($st.State -eq 'blocked' -and $global:Last -eq 'off' -and -not (Get-TrayExpect)) { Set-TrayExpect 'connect'; $st = Get-State }   # turned on elsewhere (shortcut)
     if ($global:Expect) {
         $age = ((Get-Date) - $global:Expect.Since).TotalSeconds
@@ -1294,7 +1396,7 @@ function Refresh {
     $cv = Get-ConnectionView $st
     $notify.Text = Get-VeroTrayTip -Title $st.Title -Word $cv.Word -Awake:([VeroKeepAwake]::Active)
     $mHead.Text = "VeroScudo - $($st.Title)$(if ($cv.Word) { " - $($cv.Word)" })"
-    $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or $st.Connected; $mRedo.Enabled = $st.Armed
+    $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or ($st.Connected -and -not (Test-HiddifyProfile)); $mRedo.Enabled = $st.Armed -and -not (Test-HiddifyProfile)
     $noticed = Show-SwitchNotice
     if (-not $noticed) { $noticed = Show-ForeignNotice }
     Request-Otp
@@ -1363,6 +1465,17 @@ if ($Preview) {
         Invoke-Shot "status-quality-$qk" { $fm = Show-Status; Save-FormShot $fm $global:ShotName; $global:StatusForm = $null }
     }
     $global:PreviewFacts = $null; $global:PreviewQuality = $null
+    # the service status card: operational, a minor incident, not reachable, first check running
+    $okJ = '{"page":{"name":"Anthropic"},"status":{"indicator":"none","description":"All Systems Operational"}}'
+    $global:PreviewFacts = @{ Configured = $true; Name = $pn; Type = $pt; Armed = $true; Up = $true; Cred = $true; AuthBlocked = $false; Otp = $null; Conflicts = @(); NativeNext = $null; Expect = $null }
+    $svcs = [ordered]@{
+        'ok'          = (ConvertTo-VeroStatusPageView -Json $okJ -Url 'https://status.anthropic.com/api/v2/status.json')
+        'minor'       = (ConvertTo-VeroStatusPageView -Json ($okJ -replace '"none","description":"All Systems Operational"', '"minor","description":"Partially Degraded Service"') -Url 'https://status.anthropic.com/api/v2/status.json')
+        'unreachable' = (ConvertTo-VeroStatusPageView -Json '' -Url 'https://status.anthropic.com/api/v2/status.json' -Failure 'timeout')
+        'checking'    = [pscustomobject]@{ Text = 'checking'; Tone = 'normal'; Tip = ''; Badge = '?'; Name = 'status.anthropic.com'; Right = 'checking...' }
+    }
+    foreach ($sk in $svcs.Keys) { $global:PreviewSvc = $svcs[$sk]; Invoke-Shot "status-service-$sk" { $fm = Show-Status; Save-FormShot $fm $global:ShotName; $global:StatusForm = $null } }
+    $global:PreviewSvc = $null; $global:PreviewFacts = $null
     foreach ($ti in 0..2) { Invoke-Shot "settings-$(@('profiles', 'behaviour', 'connection')[$ti])" { $sf = Show-Settings; & $global:SettingsTab $ti; Save-FormShot $sf $global:ShotName; $global:SettingsForm = $null } }
     $global:PreviewCheck = $null
     # statistics: a made-up week of the first profile - a lunch-time problem every day, a bad half hour, an evening without
@@ -1375,6 +1488,7 @@ if ($Preview) {
             $lost = if ($t -ge 12 * 60 + 40 -and $t -lt 13 * 60 + 20) { [int]($t % 3 -eq 0) } elseif ($i -eq 2 -and $t -ge 16 * 60 -and $t -lt 16 * 60 + 30) { 3 } else { [int](($t * 7 + $i) % 41 -eq 0) }
             $m[$t] = if ($i -eq 5) { @{ Sent = 0; Lost = 0 } } else { @{ Sent = 3; Lost = [Math]::Min($lost, 3) } }
         }
+        if ($i -eq 1) { foreach ($t in (15 * 60)..(15 * 60 + 39)) { $m[$t] = @{ Sent = 0; Lost = 0; Down = $true } } }   # on, could not connect
         foreach ($t in (20 * 60)..(22 * 60)) { if ($i -eq 0 -and $t -gt ((Get-Date).Hour * 60 + (Get-Date).Minute)) { break }; $m2[$t] = @{ Sent = 3; Lost = 0 } }
         @{ Data = @{ $ids[0] = $m; $ids[1] = $m2; 'c3c3c3c3c3c3' = @{ 600 = @{ Sent = 0; Lost = 0 } } }; Names = @{ $ids[0] = 'p0'; $ids[1] = 'p1'; 'c3c3c3c3c3c3' = 'Old office' } }
     })

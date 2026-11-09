@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 
+from . import hiddify
 from .netutil import IFNAME as _IFNAME
 from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's contract)
 
@@ -18,6 +19,8 @@ def _status(profile: str) -> str:
 
 
 def is_connected(profile: str) -> bool:
+    if hiddify.is_profile(profile):
+        return hiddify.connected(profile)       # Hiddify runs and a utun holds its tun address
     out = _status(profile)
     return bool(out) and out.splitlines()[0].strip() == "Connected"
 
@@ -32,11 +35,15 @@ def parse_iface(text: str) -> str | None:
 
 
 def iface(profile: str) -> str | None:
-    """The tunnel interface from the extended status."""
+    """The tunnel interface from the extended status (a Hiddify profile: the utun holding Hiddify's tun address)."""
+    if hiddify.is_profile(profile):
+        return hiddify.iface(profile)
     return parse_iface(_status(profile))
 
 
 def up(profile: str) -> bool:
+    if hiddify.is_profile(profile):
+        return is_connected(profile)            # connected in Hiddify only - VeroScudo never starts it
     subprocess.run(["scutil", "--nc", "start", profile], check=False, capture_output=True, text=True)
     for _ in range(30):                       # scutil returns at once; wait for the outcome like nmcli does
         time.sleep(1)
@@ -50,6 +57,8 @@ def up(profile: str) -> bool:
 
 
 def down(profile: str) -> bool:
+    if hiddify.is_profile(profile):
+        return True                             # VeroScudo never stops Hiddify
     r = subprocess.run(["scutil", "--nc", "stop", profile], check=False, capture_output=True, text=True)
     return r.returncode == 0
 
@@ -78,8 +87,8 @@ def watch(profiles, on_up, on_down, interval: float = 2.0, on_auth=None) -> None
 
 
 def kind(profile: str) -> str | None:
-    """macOS VPN services here are the built-in kinds (IKEv2, L2TP, Cisco IPSec)."""
-    return "vpn"
+    """macOS VPN services here are the built-in kinds (IKEv2, L2TP, Cisco IPSec); a Hiddify profile is 'hiddify'."""
+    return hiddify.KIND if hiddify.is_profile(profile) else "vpn"
 
 
 def is_stale(profile: str) -> bool:
@@ -107,7 +116,7 @@ def tunnel_owners() -> dict[str, str]:
     try:
         listing = subprocess.run(["scutil", "--nc", "list"], check=False, capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
-        return {}
+        listing = ""
     out = {}
     for name in connected_services(listing):
         try:
@@ -116,6 +125,7 @@ def tunnel_owners() -> dict[str, str]:
             continue
         if ifc:
             out[ifc] = name
+    out.update(hiddify.owners())                # Hiddify's utun, imported or not (its own service name, if any, is replaced)
     return out
 
 
@@ -159,7 +169,13 @@ def vm_bridges() -> list[str]:
 
 
 def check(cfg) -> list[str]:
-    return [f"{p.name}: no VPN service with this name (System Settings > VPN)" for p in cfg.profiles if not _status(p.name)]
+    out = []
+    for p in cfg.profiles:
+        if p.vpn_type == hiddify.KIND:
+            out += hiddify.check_profile(p.name, p.config_path)
+        elif not _status(p.name):
+            out.append(f"{p.name}: no VPN service with this name (System Settings > VPN)")
+    return out
 
 
 # ---- import from macOS (veroscudo import)
@@ -190,8 +206,10 @@ def parse_server(text: str) -> str:
 
 
 def discover() -> list[dict]:
-    out = []
+    out = hiddify.discover()
     for s in parse_list(subprocess.run(["scutil", "--nc", "list"], check=False, capture_output=True, text=True).stdout):
+        if out and "hiddify" in s["name"].lower():
+            continue                           # Hiddify's own network extension: imported from its config file instead
         d = {"name": s["name"], "vpn_type": s["kind"], "server": "", "port": 4500, "protocol": "udp", "username": "", "note": ""}
         if not s["kind"]:
             d["note"] = "VPN type not supported by VeroScudo (an app's own VPN)"

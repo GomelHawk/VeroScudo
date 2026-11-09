@@ -212,7 +212,7 @@ def guard(request, tmp_path, monkeypatch):
     connected = {"up": True}
     monkeypatch.setattr(vpn, "is_connected", lambda p: connected["up"])
     rounds = []
-    monkeypatch.setattr(quality, "run_round", lambda targets: rounds.append(targets) or [(True, 20)] * len(targets))
+    monkeypatch.setattr(quality, "run_round", lambda targets, tls=False: rounds.append(targets) or [(True, 20)] * len(targets))
     store = StateStore(tmp_path / "run", tmp_path / "lib")
     g = daemon.Guard(cfg('{"enabled":true,"intervalSeconds":15}'), store)
     return g, connected, rounds
@@ -248,7 +248,7 @@ def test_guard_counts_each_round_in_the_statistics(guard):
 
 
 def test_guard_does_nothing_when_the_check_is_off(tmp_path, monkeypatch):
-    monkeypatch.setattr(quality, "run_round", lambda t: pytest.fail("checked while disabled"))
+    monkeypatch.setattr(quality, "run_round", lambda t, tls=False: pytest.fail("checked while disabled"))
     g = daemon.Guard(cfg(), StateStore(tmp_path / "run", tmp_path / "lib"))
     g.store.set_armed(True)
     assert g.quality_tick() == 5.0
@@ -326,3 +326,116 @@ def test_first_rating_exactly_after_the_set_period_with_20_s_rounds(tmp_path):
     c = CheckConfig(True, 20, 1)
     states = [m.add_round(c, "Work", [(True, 20)], now=1000.0 + i * 20).state for i in range(4)]
     assert states == ["checking", "checking", "checking", "good"]          # rounds at 0, 20, 40 s; rated at 60 s
+
+
+# ---------------------------------------------------------------- HTTPS: the real way to a web service
+def test_https_target_in_config_form_and_labels():
+    c = cfg('{"enabled":true,"targets":[{"host":"api.example.com","method":"https"},'
+            '{"host":"web.example.com","method":"https","port":8443},{"host":"10.0.0.1","method":"ping"}]}').check
+    assert c.targets == (Target("api.example.com", "https", 443), Target("web.example.com", "https", 8443),
+                         Target("10.0.0.1", "ping", 443))
+    assert c.to_json()["targets"] == [{"host": "api.example.com", "method": "https", "port": 443},
+                                      {"host": "web.example.com", "method": "https", "port": 8443},
+                                      {"host": "10.0.0.1", "method": "ping"}]
+    assert [t.label() for t in c.targets] == ["api.example.com (HTTPS)", "web.example.com:8443 (HTTPS)", "10.0.0.1 (ping)"]
+    assert Target("1.1.1.1", "tcp", 443).label() == "1.1.1.1:443"
+    f = quality.from_form(True, 10, 1, [("https://api.example.com/v1", "https", 443), ("https://x.example.com:9443", "https", 443),
+                                        ("y.example.com", "https", 8443)], is_host)
+    assert f.targets == (Target("api.example.com", "https", 443), Target("x.example.com", "https", 9443),
+                         Target("y.example.com", "https", 8443))
+    with pytest.raises(ValueError, match="Ping, TCP port or HTTPS"):
+        quality.from_form(True, 10, 1, [("a.example.com", "udp", 1)], is_host)
+    with pytest.raises(ValueError, match="'https'"):
+        cfg('{"enabled":true,"targets":[{"host":"a.example.com","method":"http"}]}')
+
+
+class _PlainContext:
+    """Stands in for ssl's context: no TLS, so a local plain socket plays the web server (no certificate, no network)."""
+
+    def __init__(self, error=None):
+        self.error, self.names = error, []
+
+    def wrap_socket(self, raw, server_hostname=None):
+        self.names.append(server_hostname)
+        if self.error:
+            raise self.error
+        return raw
+
+
+def _server(answer: bytes):
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    got = []
+
+    def run():
+        conn, _ = srv.accept()
+        with conn:
+            got.append(conn.recv(4096))
+            if answer:
+                conn.sendall(answer)
+    threading.Thread(target=run, daemon=True).start()
+    return srv, srv.getsockname()[1], got
+
+
+@pytest.mark.parametrize(("answer", "ok"), [(b"HTTP/1.1 403 Forbidden\r\nServer: x\r\n\r\n", True),
+                                            (b"SSH-2.0-OpenSSH\r\n", False), (b"", False)])
+def test_https_check_sends_a_bare_head_request_and_any_http_answer_counts(monkeypatch, answer, ok):
+    ctx = _PlainContext()
+    monkeypatch.setattr(quality.ssl, "create_default_context", lambda: ctx)
+    srv, port, got = _server(answer)
+    try:
+        res = quality.check(Target("127.0.0.1", "https", port))
+    finally:
+        srv.close()
+    assert res[0] is ok and (res[1] is not None) is ok
+    assert ctx.names == ["127.0.0.1"]
+    assert got == [b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: VeroScudo\r\nConnection: close\r\n\r\n"]
+
+
+def test_https_certificate_error_still_means_the_server_answered(monkeypatch):
+    import ssl
+    monkeypatch.setattr(quality.ssl, "create_default_context", lambda: _PlainContext(ssl.SSLCertVerificationError("bad cert")))
+    srv, port, _ = _server(b"")
+    try:
+        assert quality.check(Target("127.0.0.1", "https", port))[0] is True
+        assert quality.check(Target("127.0.0.1", "https", port), tls=True)[0] is True       # Hiddify: HTTPS stays HTTPS
+    finally:
+        srv.close()
+    monkeypatch.setattr(quality.ssl, "create_default_context", lambda: _PlainContext(ssl.SSLError("reset")))
+    srv, port, _ = _server(b"")
+    try:
+        assert quality.check(Target("127.0.0.1", "https", port))[0] is False
+    finally:
+        srv.close()
+
+
+def test_per_target_counts_reach_the_tray_tooltip(tmp_path):
+    m = quality.Monitor(tmp_path / "quality.json")
+    c = CheckConfig(True, 10, 1, (Target("1.1.1.1"), Target("api.example.com", "https")))
+    for i in range(7):
+        q = m.add_round(c, "Work", [(True, 30), (i % 2 == 0, 40 if i % 2 == 0 else None)], now=1000.0 + i * 10)
+    assert q.targets == (("1.1.1.1:443", 7, 0), ("api.example.com (HTTPS)", 7, 3))
+    data = json.loads(m.path.read_text())
+    assert data["targets"] == [{"label": "1.1.1.1:443", "checks": 7, "lost": 0},
+                               {"label": "api.example.com (HTTPS)", "checks": 7, "lost": 3}]
+    r = quality.read(m.path, "Work", now=1065.0)
+    assert r == q
+    f = tm.Facts(name="Work", kind="vpn", armed=True, up=True, check_enabled=True, quality=r)
+    tip = tm.connection_view(f, tm.tray_state(f), c).tip.splitlines()
+    assert tip[1:] == ["1.1.1.1:443: 0 of 7 lost", "api.example.com (HTTPS): 3 of 7 lost",
+                       "Every 10 s: 1.1.1.1:443, api.example.com (HTTPS)"]
+
+
+def test_the_guard_writes_down_minutes_while_on_and_not_connected(guard, monkeypatch):
+    g, connected, _ = guard
+    connected["up"] = False
+    g.store.set_armed(True)
+    monkeypatch.setattr(g, "enable_killswitch", lambda up: None)
+    monkeypatch.setattr(g, "reconnect_async", lambda: None)
+    g.watchdog()                                                         # armed, not connected: a down pass
+    g.stats.flush()
+    lines = [ln for f in (g.store.state / "stats").glob("*.jsonl") for ln in f.read_text().splitlines()]
+    assert any(ln.endswith('"p":"Work","down":1}') for ln in lines)

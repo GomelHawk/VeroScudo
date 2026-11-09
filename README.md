@@ -272,7 +272,10 @@ and the record of the last full run.
   reverts it. Without it, every third reconnect dies young. Details in the architecture doc.
 - **Only two states exist on purpose.** If you need raw internet, turn the VPN off. There is
   deliberately no "unblock while the VPN is down" action.
-- **Vendor VPN apps** (PrivateVPN's app, Hiddify, NordVPN and similar) are not supported: VeroScudo
+- **Hiddify** is supported in **VPN mode** as a kill-switch-only profile (Settings > Import): you connect,
+  disconnect and reconnect in Hiddify; VeroScudo blocks everything else while its tunnel is down and records its
+  statistics. Proxy modes are not supported.
+- **Other vendor VPN apps** (PrivateVPN's app, NordVPN and similar) are not supported: VeroScudo
   cannot tell their "you hung up" from a failure. Most providers also offer IKEv2/L2TP for the Windows
   client, an `.ovpn` or a WireGuard config - use one of those as a profile. VeroScudo shows *Attention*
   when such an app's tunnel or kill-switch runs next to it.

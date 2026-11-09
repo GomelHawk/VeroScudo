@@ -57,7 +57,14 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   not detect or report them (Settings > Behaviour says so under *Protect VMs and containers*); to protect such a VM,
   switch it to NAT mode or run a VPN with a kill-switch inside it. NAT-mode VMs, WSL and bridge-mode Docker/libvirt
   are covered (with a ~1–2 s window after a drop).
-- **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, Hiddify, NordVPN ...) -
+- **Hiddify (VPN mode)** - supported as a kill-switch-only profile. Windows: `Hiddify.exe`/`HiddifyCli.exe` may reach
+  any address (by program, from an administrators-only folder), so whatever the app itself sends outside its tunnel
+  (its update check, error reports) is not covered. Linux/macOS: only the servers in its live config (see ARCHITECTURE).
+  Any drop - also your own disconnect in Hiddify - keeps everything blocked until its tunnel is back or VeroScudo is off.
+  Live test 2026-11-09 (Windows, Hiddify 4.1.1, `windows/tests-local/Test-Hiddify.ps1`): disconnect in Hiddify, quit
+  Hiddify -> only BLOCKED; reconnect, restart and server changes while VeroScudo stayed on -> through Hiddify at once;
+  0 of 61 samples showed the real address.
+- **Vendor VPN apps** with their own tunnel drivers and kill-switches (PrivateVPN's app, NordVPN ...) -
   VeroScudo cannot tell their "you hung up" from a failure. It detects their tunnels and filter layers and shows
   *Attention*. OpenVPN (run by VeroScudo itself) and the WireGuard app's tunnels are supported profile types (beta).
 - **WireGuard: the first 1-3 minutes of a silent drop** - traffic goes into the dead tunnel and is lost (not leaked)

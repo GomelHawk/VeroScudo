@@ -19,11 +19,12 @@ function Get-VeroFilterSpec {
         [object[]]$Endpoints = $null,          # OpenVPN / WireGuard: @{ Ip; Proto (6|17); Port } - replaces the RAS ports above
         [string]$EndpointApp = '',             # OpenVPN without DCO: only openvpn.exe may reach them; '' = kernel socket (no program)
         [bool]$CrlWindow = $false,             # SSTP only: a dial just failed on the certificate revocation check (see Open-VeroCrlWindow)
-        [string]$PermitKind = ''               # 'server': ServerIps on the tunnel type's ports (built-in client) | 'endpoints': Endpoints (OpenVPN, WireGuard)
+        [string]$PermitKind = '',              # 'server': ServerIps on the tunnel type's ports (built-in client) | 'endpoints': Endpoints (OpenVPN, WireGuard) | 'program': ProgramApps to anywhere (Hiddify)
+        [string[]]$ProgramApps = @()           # 'program': the client's executables (full paths in an administrators-only folder)
     )
     Import-VeroNative
     if (-not $PermitKind) { $PermitKind = if ($null -ne $Endpoints) { 'endpoints' } else { 'server' } }   # older callers and tests
-    if ($PermitKind -notin 'server', 'endpoints') { throw "PermitKind must be 'server' or 'endpoints'" }
+    if ($PermitKind -notin 'server', 'endpoints', 'program') { throw "PermitKind must be 'server', 'endpoints' or 'program'" }
     $C4 = [VeroScudo.Layer]::ConnectV4; $C6 = [VeroScudo.Layer]::ConnectV6
     $R4 = [VeroScudo.Layer]::RecvAcceptV4; $R6 = [VeroScudo.Layer]::RecvAcceptV6
     $specs = New-Object 'System.Collections.Generic.List[VeroScudo.FilterSpec]'
@@ -46,7 +47,7 @@ function Get-VeroFilterSpec {
     if ($SwitchLuid -and ($TunnelLuid -or -not $Config.Vm)) { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'Default Switch (VM DHCP/DNS)' $l $true $permit).Interface($SwitchLuid) } }
 
     # the VPN server: only the protocol/ports of the profile's tunnel type; TCP/UDP only from svchost (SstpSvc, IKEEXT, RasMan)
-    if ($PermitKind -eq 'endpoints') { $ServerIps = @() }                   # reserve types: their own endpoints below
+    if ($PermitKind -in 'endpoints', 'program') { $ServerIps = @() }        # reserve types: their own permits below
     $fam = Split-Family $ServerIps
     # IKEv2 data: Windows hands each packet of the tunnel to the firewall as an IP-in-IP flow to the server (protocol 4,
     # protocol 41 for IPv6 inside) before IPsec encrypts it. Without these the tunnel connects and carries nothing (seen live
@@ -85,6 +86,14 @@ function Get-VeroFilterSpec {
                 foreach ($ip in $list) { $null = $s.Remote($ip) }
                 if ($EndpointApp) { $null = $s.App($EndpointApp) }
             }
+        }
+    }
+
+    # Hiddify: its own programs may reach anything (its servers are many, change with each subscription and use TCP and
+    # UDP); outbound only - nothing may connect in to them. No program known: nothing at all (never a program-less permit).
+    if ($PermitKind -eq 'program') {
+        foreach ($app in @($ProgramApps | Where-Object { $_ })) {
+            foreach ($l in $C4, $C6) { $null = (New-Spec "VPN app $([IO.Path]::GetFileName($app))" $l $true $permit).App($app) }
         }
     }
 
@@ -299,28 +308,29 @@ function Set-VeroVmAccess {
         if ($orig -eq 'Block') { $orig = 'NotConfigured' }
         @{ DefaultOutboundAction = $orig } | ConvertTo-Json | Set-Content $p.VmBackup
     }
+    # the allow rule first, the default Block after it: turning on while the tunnel is up never leaves WSL a moment without
+    # network (seen live: Block, then 1 s later allowed - a connection open in WSL at that moment could hang)
+    $want = if ($Allow) { 'True' } else { 'False' }
+    $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
+    if (-not $r) {
+        New-NetFirewallHyperVRule -Name $script:VmRule -DisplayName 'VeroScudo - WSL outbound' -Direction Outbound -Action Allow -VMCreatorId $script:WslCreator -Enabled $want | Out-Null
+        Write-VeroLog "Hyper-V rule created: WSL outbound ($(if ($Allow) { 'allowed' } else { 'blocked' }))" $Action
+    } elseif ([string]$r.Enabled -ne $want) {
+        Set-NetFirewallHyperVRule -Name $script:VmRule -Enabled $want
+        Write-VeroLog "WSL outbound -> $(if ($Allow) { 'allowed' } else { 'blocked' })" $Action
+    }
     $cur = Get-NetFirewallHyperVVMSetting -PolicyStore PersistentStore -Name $script:WslCreator -ErrorAction SilentlyContinue
     if (-not $cur -or [string]$cur.DefaultOutboundAction -ne 'Block') {
         Set-NetFirewallHyperVVMSetting -Name $script:WslCreator -DefaultOutboundAction Block
         Write-VeroLog 'WSL default outbound -> Block' $Action
     }
-    $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
-    if (-not $r) {
-        New-NetFirewallHyperVRule -Name $script:VmRule -DisplayName 'VeroScudo - WSL outbound' -Direction Outbound -Action Allow -VMCreatorId $script:WslCreator -Enabled False | Out-Null
-        $r = Get-NetFirewallHyperVRule -Name $script:VmRule
-        Write-VeroLog 'Hyper-V rule created: WSL outbound' $Action
-    }
-    $want = if ($Allow) { 'True' } else { 'False' }
-    if ([string]$r.Enabled -ne $want) {
-        Set-NetFirewallHyperVRule -Name $script:VmRule -Enabled $want
-        Write-VeroLog "WSL outbound -> $(if ($Allow) { 'allowed' } else { 'blocked' })" $Action
-    }
 }
 function Restore-VeroVmAccess {
     $p = Get-VeroPath
     if (-not (Test-VeroHyperVFirewall)) { Remove-Item $p.VmBackup -Force -ErrorAction SilentlyContinue; return }   # nothing was ever changed
-    $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
-    if ($r) { Remove-NetFirewallHyperVRule -Name $script:VmRule }
+    # the default first, the allow rule after it: Off never leaves WSL a moment without network; a default that could not be
+    # restored keeps the rule (WSL keeps its network) and is retried
+    $restored = $true
     if (Test-Path $p.VmBackup) {
         $orig = [string](Get-Content $p.VmBackup -Raw | ConvertFrom-Json).DefaultOutboundAction
         # a saved Block came from VeroScudo itself (seen live: WSL stayed offline whenever VeroScudo was off)
@@ -328,8 +338,10 @@ function Restore-VeroVmAccess {
         try {
             Set-NetFirewallHyperVVMSetting -Name $script:WslCreator -DefaultOutboundAction $orig
             Remove-Item $p.VmBackup -Force                                   # only once it is really restored
-        } catch { Write-VeroLog "ERROR: WSL default outbound not restored ($orig): $($_.Exception.Message) - will retry" 'core' }
+        } catch { $restored = $false; Write-VeroLog "ERROR: WSL default outbound not restored ($orig): $($_.Exception.Message) - will retry" 'core' }
     }
+    $r = Get-NetFirewallHyperVRule -Name $script:VmRule -ErrorAction SilentlyContinue
+    if ($r -and $restored) { Remove-NetFirewallHyperVRule -Name $script:VmRule }
 }
 
 function Enable-VeroEmergencyBlock {
@@ -454,6 +466,7 @@ function Get-VeroSyncPlan {
     $tun = if ($ForceDown) { [uint64]0 } else { Get-VeroTunnelLuid $Config.Profile -Type $type }
     $srv = & $th.ServerPermit $Config $Action                             # what the filters may let this type's client reach
     $ips = @($srv.Ips); $eps = $srv.Endpoints; $app = [string]$srv.App
+    $apps = @(if ($srv.ContainsKey('Apps')) { $srv.Apps })
     $vm = Test-VeroVmWanted $Config
     $wsl = if ($vm) { Get-VeroWslLuid } else { [uint64]0 }
     $sw = Get-VeroSwitchLuid                                               # Get-VeroFilterSpec decides when it is open
@@ -463,7 +476,7 @@ function Get-VeroSyncPlan {
     $noDns = (-not $tun) -and @($dns).Count -eq 0
     if ($noDns -and -not $script:NoDnsLogged) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
     $script:NoDnsLogged = $noDns                                              # once per change, not every 15 s
-    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -SwitchLuid $sw -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind
+    $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -SwitchLuid $sw -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind -ProgramApps $apps
     @{ Type = $type; Handler = $th; ForceDown = [bool]$ForceDown; Tunnel = $tun; Ips = @($ips); Dns = @($dns); Vm = $vm; Wsl = $wsl; Switch = $sw; Specs = @($specs) }
 }
 

@@ -1,8 +1,8 @@
 """Exit location: where your traffic leaves the tunnel (Settings > Behaviour, "Show exit location") - shared by the Linux
 and the macOS tray, the same rules as the Windows tray (VeroScudoTray.ps1, ConvertTo-VeroExitView in VeroScudo.Tray.psm1).
 
-Asked only right after VeroScudo reaches Protected (connect, reconnect, switch) or when you click Refresh - so the request
-goes through the tunnel and never shows your real address. ipinfo.io first (city, country, IP, provider), Cloudflare's
+Asked right after VeroScudo reaches Protected (connect, reconnect, switch), and when you click Refresh while a VPN tunnel
+is up (also with VeroScudo off) - so the request goes through the tunnel and never shows your real address. ipinfo.io first (city, country, IP, provider), Cloudflare's
 trace page as the fallback (IP and country only); 6 s per request, given up after 20 s. In a background thread: the
 window never waits for the network. Cached per user in tray.json (`exitInfo`); shown grey with its time while not
 protected or for another profile."""
@@ -23,7 +23,8 @@ IPINFO_URL = "https://ipinfo.io/json"
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 TIMEOUT = 6.0               # one request
 GIVE_UP = 20.0              # the whole lookup
-NOT_PROTECTED = "checked only while the VPN is connected (Protected)"
+NO_TUNNEL = "no VPN tunnel is up - nothing to check"
+HIDDIFY_NOTE = "Hiddify spreads traffic over several servers - the exit IP can differ per connection."
 
 
 # ---------------------------------------------------------------- the lookup
@@ -79,7 +80,8 @@ class ExitFetch:
 
     def __init__(self, pref: Path | None = None, get=_get) -> None:
         self.pref, self._get = pref, get
-        self.failure = ""
+        self.failure = ""                # why the last lookup failed
+        self.refused = ""                # why the last Refresh was not done (no tunnel)
         self._job: dict | None = None
 
     @property
@@ -97,7 +99,7 @@ class ExitFetch:
         if not self.enabled() or self._job is not None or not profile:
             return False
         job: dict = {"profile": profile, "started": time.time() if now is None else now, "result": None}
-        self.failure = ""
+        self.failure = self.refused = ""
 
         def run() -> None:
             job["result"] = lookup(self._get)
@@ -105,6 +107,14 @@ class ExitFetch:
         self._job = job
         job["thread"].start()
         return True
+
+    def refresh(self, profile: str, tunnel_up: bool) -> bool:
+        """The Refresh link: allowed whenever a VPN tunnel is up (VeroScudo on or off) - without one the answer would show
+        your real address, so it is refused (`refused` says why, shown next to the old values)."""
+        if not tunnel_up:
+            self.failure, self.refused = "", NO_TUNNEL
+            return False
+        return self.start(profile)
 
     def poll(self, now: float | None = None) -> bool:
         """Collects a finished lookup (or gives up); True when something changed that the window should show."""
@@ -139,6 +149,7 @@ class ExitView:
     right: str = ""           # the IP, or 'IP - HH:MM' when not fresh, or 'checking...'
     fresh: bool = False       # looked up through the tunnel that is up now: normal colour; else grey
     tip: str = ""
+    notice: bool = False      # `right` carries 'refresh failed' or a refusal: the front ends give it more room
 
 
 def _parse_time(text: str) -> datetime | None:
@@ -150,29 +161,45 @@ def _parse_time(text: str) -> datetime | None:
 
 
 def exit_view(info: dict | None, state: str, profile: str, protected_since: float = 0.0, checking: bool = False,
-              failure: str = "", preview: bool = False) -> ExitView:
+              failure: str = "", preview: bool = False, refused: str = "", tunnel_up: bool = False,
+              kind: str | None = None) -> ExitView:
     """The exit-location line - ConvertTo-VeroExitView of the Windows tray. Fresh = looked up through the tunnel that is
-    up now (protected, same profile, after it came up); otherwise grey with its time. `preview`: screenshots (always
-    fresh). Pure."""
+    up now (protected - or a tunnel up with VeroScudo off - same profile, after it came up); otherwise grey with its time.
+    Always says what happens: 'checking...' while a lookup runs; a failed lookup or a refused Refresh keeps the old values
+    and adds 'refresh failed' / the refusal's reason. `kind` 'hiddify': a note that the exit IP can differ per connection.
+    `preview`: screenshots (always fresh). Pure."""
     c = info if isinstance(info, dict) else {}
+    note = HIDDIFY_NOTE if kind == "hiddify" else ""
     if not c.get("ip"):
         if checking:
             msg = "Checking where your traffic leaves..."
-        elif failure:
-            msg = f"Location not available - {failure}"
+        elif failure or refused:
+            msg = f"Location not available - {failure or refused}"
         else:
             msg = "Location: shown once the VPN is connected"
-        return ExitView(False, msg)
+        return ExitView(False, msg, tip=note)
     t = _parse_time(c.get("time", ""))
     ts = t.timestamp() if t else 0.0
-    fresh = state == "protected" and bool(profile) and str(c.get("profile", "")) == profile and (preview or ts >= protected_since)
+    fresh = ((state == "protected" or tunnel_up) and bool(profile) and str(c.get("profile", "")) == profile
+             and (preview or ts >= protected_since))
     code = str(c.get("country", ""))
     place = " / ".join(x for x in (country_name(code), str(c.get("city", ""))) if x)
     hhmm = t.astimezone().strftime("%H:%M") if t else "?"
-    right = "checking..." if checking else (str(c["ip"]) if fresh else f"{c['ip']} - {hhmm}")
     when = t.astimezone().strftime("%Y-%m-%d %H:%M") if t else "?"
     tip = f"{c['ip']}  {c.get('org', '')}".rstrip() + f"\nfrom {c.get('source', '')}, {when}, profile {c.get('profile', '')}"
-    return ExitView(True, "", code.upper(), place, right, fresh, tip)
+    if checking:
+        right = "checking..."
+    elif failure:
+        right = f"{c['ip']} - {hhmm} - refresh failed"
+        tip += f"\nRefresh failed: {failure}"
+    elif refused:
+        right = f"{c['ip']} - {hhmm} - {refused}"
+        tip += f"\nNot refreshed: {refused}"
+    else:
+        right = str(c["ip"]) if fresh else f"{c['ip']} - {hhmm}"
+    if note:
+        tip += f"\n{note}"
+    return ExitView(True, "", code.upper(), place, right, fresh, tip, bool(failure or refused) and not checking)
 
 
 def report_line(xv: ExitView) -> str:

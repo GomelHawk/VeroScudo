@@ -112,7 +112,8 @@ function Invoke-VeroActionOff {
                       Remove-Item $p.Renew -Force -ErrorAction SilentlyContinue
                       $type = Get-VeroConfigType $Config
                       # OpenVPN runs only under VeroScudo: always stop it (also mid-connect); the others only when connected
-                      if ((Get-VeroTypeHandler $type).HangUpOnOffAlways -or (Test-VeroVpnConnected $Config.Profile -Type $type)) {
+                      if ($type -eq 'hiddify') { Write-VeroLog "kill-switch off - Hiddify stays as it is (connect and disconnect it in Hiddify)" $Action }
+                      elseif ((Get-VeroTypeHandler $type).HangUpOnOffAlways -or (Test-VeroVpnConnected $Config.Profile -Type $type)) {
                           Invoke-VeroHangUp $Config.Profile $type; Write-VeroLog "disconnected '$($Config.Profile)' by user (off; source: VeroScudo Off)" $Action }
 }
 
@@ -157,7 +158,11 @@ function Invoke-VeroActionWatchdog {
                 try {
                     Invoke-VeroCheck -Action $Action
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
-                    try { $sc = try { Get-VeroConfig } catch { $null }; Update-VeroStats -Up ([bool]$sc -and (Test-VeroStatsUp)) -Id $(if ($sc) { $sc.ProfileId } else { '' }) -Name $(if ($sc) { $sc.Profile } else { '' }) } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+                    try {
+                        $sc = try { Get-VeroConfig } catch { $null }; $armedNow = Test-VeroArmed
+                        $upNow = [bool]$sc -and $armedNow -and (Test-VeroVpnConnected $sc.Profile -Type $sc.Type)
+                        Update-VeroStats -Up $upNow -Down ([bool]$sc -and $armedNow -and -not $upNow) -Id $(if ($sc) { $sc.ProfileId } else { '' }) -Name $(if ($sc) { $sc.Profile } else { '' })
+                    } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
                     try { [IO.File]::WriteAllText((Get-VeroPath).Heartbeat, [string][int64](Get-VeroEpoch)) } catch { Write-Verbose 'heartbeat not written' }
                 } catch {
                     if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries

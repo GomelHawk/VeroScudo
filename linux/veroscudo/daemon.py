@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import quality, stats
+from . import hiddify, quality, stats
 from .backend import firewall, nm
 from .config import Config, config_path
 from .state import Decision, StateStore, decide
@@ -35,6 +35,10 @@ class Guard:
         self._cfg_stamp = self._stamp()
         self.quality = quality.Monitor(self.store.home / "quality.json")   # Settings > Connection; read by the tray
         self.stats = stats.Recorder(self.store.state)                      # tray > Statistics: VPN time and quality per minute
+        hiddify.register(cfg.profiles)                                     # (Config.load does it on every reload)
+        self._hiddify_hosts: dict = {}           # Hiddify server host name -> (addresses, when looked up)
+        self._hiddify_good: dict = {}            # profile id -> the last good permit set (a broken file keeps it)
+        self._hiddify_said: dict = {}            # what was logged last per topic - each problem is logged once
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -78,6 +82,8 @@ class Guard:
         working and a lookup that fails while blocked still leaves the last known addresses."""
         if cfg.server_ips:
             return list(cfg.server_ips)
+        if cfg.current.vpn_type == hiddify.KIND:
+            return []                                          # its servers are endpoints (hiddify_endpoints)
         cache = self.store.server_cache(cfg.profile)
         cached = self.cached_server_ips(cfg)
         merged = list(dict.fromkeys(nm.resolve(cfg.server) + cached))[:8]
@@ -94,6 +100,48 @@ class Guard:
                 return f.read_text().split()
         return []
 
+    def _say_once(self, topic: str, msg: str | None, level: int = logging.WARNING) -> None:
+        if msg and self._hiddify_said.get(topic) != msg:
+            log.log(level, msg)
+        self._hiddify_said[topic] = msg
+
+    def hiddify_endpoints(self, cfg: Config) -> tuple:
+        """A Hiddify profile's permits outside the tunnel, parsed from Hiddify's LIVE config on every pass: each proxy
+        server (TCP and UDP) and each direct DNS server, host names resolved (a failed lookup keeps the last good addresses).
+        A file that cannot be read or parsed keeps the last good set (else the cached one from the state folder)."""
+        p = cfg.current
+        if p.vpn_type != hiddify.KIND:
+            return ()
+        cache = self.store.server_cache(cfg.profile)
+        try:
+            eps, dropped = hiddify.endpoints(hiddify.read_config(p.config_path))
+        except (OSError, ValueError) as e:                     # never the file's content in the log (it holds a secret)
+            self._say_once("read", f"Hiddify's config {p.config_path} cannot be used ({type(e).__name__}: "
+                                   f"{str(e)[:80] if isinstance(e, OSError) else 'invalid'}) - keeping the last good servers")
+            return tuple(self._hiddify_good.get(p.id) or self.cached_hiddify_endpoints(cfg))
+        self._say_once("read", None)
+        self._say_once("dropped", f"Hiddify: {len(dropped)} server entr{'y' if len(dropped) == 1 else 'ies'} not allowed "
+                                  f"(private, local or invalid address, or over {hiddify.MAX_ENDPOINTS}): "
+                                  f"{', '.join(dropped[:5])}{' ...' if len(dropped) > 5 else ''}" if dropped else None)
+        resolved = hiddify.resolve_endpoints(eps, nm.resolve, self._hiddify_hosts)
+        if not resolved:
+            self._say_once("none", "Hiddify: no usable server in its config - Hiddify itself stays blocked")
+            return tuple(self._hiddify_good.get(p.id) or self.cached_hiddify_endpoints(cfg))
+        self._say_once("none", None)
+        if resolved != self._hiddify_good.get(p.id):
+            self._hiddify_good[p.id] = resolved
+            try:
+                cache.write_text(hiddify.dump_cache(resolved))
+            except OSError:
+                pass
+        return tuple(resolved)
+
+    def cached_hiddify_endpoints(self, cfg: Config) -> list:
+        try:
+            return hiddify.parse_cache(self.store.server_cache(cfg.profile).read_text())
+        except OSError:
+            return []
+
     def desired_ruleset(self, tunnel_up: bool) -> tuple[str, str | None]:
         """The ruleset for the current state and the tunnel interface it allows (None: blocked - the tunnel is down, or up
         without an interface the backend will trust)."""
@@ -103,7 +151,7 @@ class Guard:
         vm = self.vm_wanted()
         bridges = tuple(nm.vm_bridges())                       # re-read on every pass: a bridge created later is picked up within 15 s
         return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and vm, dns=dns, bridges=bridges,
-                                       vms_free=not vm), tun
+                                       vms_free=not vm, endpoints=self.hiddify_endpoints(cfg)), tun
 
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
         """Applies the ruleset when it differs from what is in force or when it is no longer in force (a `nft flush ruleset`
@@ -138,11 +186,14 @@ class Guard:
         if not self.store.armed:
             return
         cfg = self.cfg
-        ips = list(cfg.server_ips) or self.cached_server_ips(cfg)
+        hid = cfg.current.vpn_type == hiddify.KIND               # Hiddify: its last good servers, from the state folder
+        ips = [] if hid else list(cfg.server_ips) or self.cached_server_ips(cfg)
+        eps = tuple(self.cached_hiddify_endpoints(cfg)) if hid else ()
         with self.store.firewall_lock():
-            firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy()))
+            firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy(), endpoints=eps))
             self.store.set_applied(cfg.profile, None)
-        log.info("boot: armed - kill-switch ON before the network starts (server %s)", ", ".join(ips) or "not cached")
+        shown = ips or [f"{a}:{p}" for a, p, _ in eps]
+        log.info("boot: armed - kill-switch ON before the network starts (server %s)", ", ".join(shown[:8]) or "not cached")
 
     # ---- actions -------------------------------------------------------------
     def arm(self) -> None:
@@ -175,6 +226,9 @@ class Guard:
             log.info("reconnect requested, but a reconnect is already running - it continues")
             return
         cfg = self.cfg
+        if cfg.current.vpn_type == hiddify.KIND:
+            log.info("Reconnect: '%s' is a Hiddify profile - %s", cfg.profile, hiddify.RECONNECT_HINT)
+            return
         self.resume_after_password()
         log.info("RECONNECT requested by you: traffic blocked, taking down '%s', redialing", cfg.profile)
         self.renew_marker.write_text(str(time.time()))
@@ -203,7 +257,7 @@ class Guard:
 
     def off(self) -> None:
         self.renew_marker.unlink(missing_ok=True)
-        connected = nm.is_connected(self.cfg.profile)
+        connected = nm.is_connected(self.cfg.profile) and self.cfg.current.vpn_type != hiddify.KIND   # Hiddify stays up
         if connected:                                      # only when a down-event will follow and consume it
             self.off_marker.write_text(str(time.time()))
         self.disarm()
@@ -301,6 +355,12 @@ class Guard:
                     break
                 attempt += 1
                 self.enable_killswitch(tunnel_up=False)
+                if self.cfg.current.vpn_type == hiddify.KIND:   # connected in Hiddify only: wait for its tunnel, never dial
+                    self._say_once("wait", hiddify.NOT_CONNECTED, logging.INFO)
+                    if self.attempts is not None and attempt >= self.attempts:
+                        break
+                    time.sleep(self.cfg.retry_seconds)
+                    continue
                 if nm.is_stale(self.cfg.profile):            # WireGuard: activated but silent - take it down for a fresh start
                     log.info("WireGuard '%s': no handshake for over 3 minutes - restarting it", self.cfg.profile)
                     self.store.record_drop(self.cfg.profile, "no WireGuard handshake for 3 min")
@@ -308,7 +368,10 @@ class Guard:
                 if nm.up(self.cfg.profile):
                     nm.wait_connected(self.cfg.profile)
                 if nm.is_connected(self.cfg.profile):
-                    log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
+                    if self.cfg.current.vpn_type == hiddify.KIND:
+                        log.info("Hiddify connected again - traffic goes through it")       # nothing was dialed
+                    else:
+                        log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
                     break
                 log.info("attempt %d failed", attempt)
                 if self.attempts is not None and attempt >= self.attempts:
@@ -321,12 +384,14 @@ class Guard:
         finally:
             self.store.release_lock()
         if self.store.armed and nm.is_connected(self.cfg.profile):
+            self._say_once("wait", None)                       # the next drop is told again
             self.enable_killswitch(tunnel_up=True)
 
     def watchdog(self) -> None:
         self.reload_config()
-        up = bool(self.store.armed) and nm.is_connected(self.cfg.profile)
-        self.record_minute(up)
+        armed = bool(self.store.armed)
+        up = armed and nm.is_connected(self.cfg.profile)
+        self.record_minute(up, down=armed and not up)
         if self.store.armed:
             self.enable_killswitch(up)
             if not up and not self.store.lock_alive() and not self.store.auth_failed(self.cfg.profile):
@@ -335,10 +400,11 @@ class Guard:
             log.info("disarmed but kill-switch still active - restoring")
             self.disable_killswitch(unless_armed=True)
 
-    def record_minute(self, up: bool) -> None:
-        """Statistics: VeroScudo's own VPN up right now (armed and the active profile connected; other VPNs do not count)."""
+    def record_minute(self, up: bool, down: bool = False) -> None:
+        """Statistics: VeroScudo's own VPN up right now (armed and the active profile connected; other VPNs do not count),
+        or down: armed, but the active profile is not connected (a minute with only down passes is shown as bad)."""
         try:
-            self.stats.tick(up, self.cfg.current.id, self.cfg.profile)
+            self.stats.tick(up, self.cfg.current.id, self.cfg.profile, down=down)
         except OSError:
             log.exception("statistics")
 
@@ -352,7 +418,7 @@ class Guard:
             if self.quality.samples or self.quality.path.exists():
                 self.quality.reset()
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
-        results = quality.run_round(chk.targets)
+        results = quality.run_round(chk.targets, tls=cfg.current.vpn_type == hiddify.KIND)   # Hiddify answers ping/TCP itself
         try:
             self.stats.checks(len(results), sum(1 for ok, _ in results if not ok), cfg.current.id, cfg.profile)
         except OSError:

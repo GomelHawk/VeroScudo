@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import hiddify
 from .netutil import IFNAME as _IFNAME
 from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's contract)
 
@@ -45,7 +46,11 @@ def vm_bridges() -> list[str]:
 def iface(profile: str) -> str | None:
     """The tunnel interface of an active VPN connection (tun0, wg0, ppp0 ...). Only GENERAL.IP-IFACE: for a 'vpn'
     connection GENERAL.DEVICES is the *underlying* card, and allowing that would open the kill-switch completely.
-    Anything that is not a virtual interface is refused (None = stay blocked)."""
+    Anything that is not a virtual interface is refused (None = stay blocked). A Hiddify profile: the tun device that holds
+    the address of Hiddify's tun inbound, while Hiddify runs (hiddify.py)."""
+    if hiddify.is_profile(profile):
+        t = hiddify.iface(profile)
+        return t if t and is_virtual(t) else None
     v = _nmcli("-g", "GENERAL.IP-IFACE", "connection", "show", profile)
     if v and v != "--" and is_virtual(v):
         return v
@@ -61,6 +66,8 @@ _wg_first_seen: dict[str, float] = {}
 def kind(profile: str) -> str | None:
     """'wireguard', 'openvpn', 'vpn' (another VPN plugin) or the connection type; None when there is no such connection.
     Cached per process: a connection's type does not change."""
+    if hiddify.is_profile(profile):
+        return hiddify.KIND
     if profile not in _kinds:
         t = _nmcli("-g", "connection.type", "connection", "show", profile)
         if t == "vpn":
@@ -114,7 +121,10 @@ def wg_health(profile: str) -> str:
 
 
 def is_connected(profile: str) -> bool:
-    """Activated - and for WireGuard also handshaking: a dead WireGuard link stays 'activated' in NetworkManager."""
+    """Activated - and for WireGuard also handshaking: a dead WireGuard link stays 'activated' in NetworkManager.
+    A Hiddify profile: Hiddify runs and its tunnel interface is up with its address."""
+    if hiddify.is_profile(profile):
+        return iface(profile) is not None
     if _nmcli("-g", "GENERAL.STATE", "connection", "show", profile) != "activated":
         _wg_first_seen.pop(profile, None)
         return False
@@ -164,8 +174,8 @@ def parse_active(text: str) -> list[tuple[str, str, str]]:
 def tunnel_owners() -> dict[str, str]:
     """Tunnel interface -> the NetworkManager connection that owns it, for the active VPN and WireGuard connections - so the
     tray can name another VPN and offer to disconnect it. A 'vpn' connection's DEVICE is the card underneath, so its tunnel
-    comes from GENERAL.IP-IFACE (iface)."""
-    out = {}
+    comes from GENERAL.IP-IFACE (iface). Hiddify's tunnel (imported or not) is named hiddify.LABEL."""
+    out = {t: hiddify.LABEL for t in hiddify.owners() if is_virtual(t)}
     for name, ctype, device in parse_active(_nmcli("-f", "NAME,TYPE,DEVICE", "connection", "show", "--active")):
         if ctype in ("wireguard", "tun") and device and device != "--":
             out[device] = name
@@ -207,6 +217,9 @@ def check(cfg) -> list[str]:
     what NetworkManager will use (the kill-switch would then block the VPN itself)."""
     out = []
     for p in cfg.profiles:
+        if p.vpn_type == hiddify.KIND:
+            out += hiddify.check_profile(p.name, p.config_path)
+            continue
         k = kind(p.name)
         if k is None:
             out.append(f"{p.name}: no NetworkManager connection with this name")
@@ -227,6 +240,9 @@ def check(cfg) -> list[str]:
 
 
 def up(profile: str) -> bool:
+    """Connects the profile. A Hiddify profile is connected in Hiddify only: nothing to do - True when it is up already."""
+    if hiddify.is_profile(profile):
+        return is_connected(profile)
     r = subprocess.run(["nmcli", "connection", "up", "id", profile], check=False, capture_output=True, text=True)
     return r.returncode == 0
 
@@ -242,6 +258,8 @@ def wait_connected(profile: str, seconds: float = 10.0) -> bool:
 
 
 def down(profile: str) -> bool:
+    if hiddify.is_profile(profile):
+        return True                     # VeroScudo never stops Hiddify
     r = subprocess.run(down_argv(profile), check=False, capture_output=True, text=True)
     return r.returncode == 0
 
@@ -286,7 +304,8 @@ def watch(profiles, on_up, on_down, on_auth=None) -> None:
     """Blocks. Calls on_up(profile) when a watched profile activates, on_down(profile, user_requested) when it deactivates,
     on_auth(profile, 'missing'|'rejected') when it failed for its password (before on_down).
     `profiles` is a callable returning the current set of names (config can change while running).
-    Uses libnm (python3-gi + gir1.2-nm-1.0) for the deactivation reason; falls back to polling without reasons."""
+    Uses libnm (python3-gi + gir1.2-nm-1.0) for the deactivation reason; falls back to polling without reasons.
+    Hiddify profiles are not NetworkManager connections: they are polled (a drop is never "user requested" - strict)."""
     try:
         import gi  # type: ignore
         gi.require_version("NM", "1.0")
@@ -295,12 +314,16 @@ def watch(profiles, on_up, on_down, on_auth=None) -> None:
         _watch_polling(profiles, on_up, on_down)
         return
 
+    import threading
+
+    threading.Thread(target=_watch_polling, args=(lambda: {p for p in profiles() if hiddify.is_profile(p)}, on_up, on_down),
+                     daemon=True, name="hiddify-watch").start()
     client = NM.Client.new(None)
     tracked: dict[str, bool] = {}
 
     def hook(ac):
         name = ac.get_id()
-        if name not in profiles() or ac.get_path() in tracked:
+        if name not in profiles() or hiddify.is_profile(name) or ac.get_path() in tracked:
             return
         tracked[ac.get_path()] = True
 
@@ -414,8 +437,9 @@ def wireguard_endpoint(keyfile_text: str) -> tuple[str, int]:
 
 
 def discover() -> list[dict]:
-    """Every VPN / WireGuard connection NetworkManager knows, described for import (needs root for WireGuard endpoints)."""
-    out = []
+    """Every VPN / WireGuard connection NetworkManager knows, described for import (needs root for WireGuard endpoints),
+    and Hiddify when the invoking user has it."""
+    out = hiddify.discover()
     for line in _nmcli("-f", "NAME,TYPE", "connection", "show").splitlines():
         parts = re.split(r"(?<!\\):", line)
         if len(parts) < 2:

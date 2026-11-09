@@ -34,6 +34,8 @@ UPDATE_ABOUT = "Asks GitHub for the latest version, never while blocked. Nothing
 EXIT_ABOUT = "Shows the country and IP your traffic leaves from (asks ipinfo.io after each connect)."
 BEHAVIOUR_NOTE = ("The exit location switch is saved at once (your account only). Each other change asks for an "
                   "administrator's password and takes effect within 15 seconds.")
+CHECK_HTTPS_HINT = ("HTTPS checks the real way to a web service (any answer counts) - e.g. api.anthropic.com. No account or "
+                    "key is used.")
 REPO_URL = "https://github.com/GomelHawk/VeroScudo"
 EXPECT_SECONDS = 120          # "Connecting" may last this long; then the tray says plainly that it is not connected yet
 STATES = ("protected", "blocked", "off", "attention")
@@ -93,6 +95,10 @@ def tray_state(f: Facts) -> View:
             text += f" Note: another tunnel runs next to it ({', '.join(f.others)}) - its traffic is blocked."
             return View("attention", "Protected", text, True, True)
         return View("protected", "Protected", text, True, True)
+    if f.kind == "hiddify" and f.expect != "switch":     # VeroScudo never dials Hiddify: it waits for you (as Windows)
+        return View("blocked", "Blocked - waiting for Hiddify",
+                    "Hiddify is not connected. Nothing leaves this computer until you connect it in Hiddify (or turn VeroScudo "
+                    "off).", True, False)
     title, text = {
         "connect": ("Connecting", f"Kill-switch on: traffic is blocked until {name} is connected."),
         "switch": ("Switching", f"Switching to {name}. Traffic stays blocked until it is connected."),
@@ -128,6 +134,8 @@ def connection_text(f: Facts, v: View) -> str:
     if not f.configured or (v.state == "attention" and not v.armed):
         return "-"
     if v.state == "blocked" or (v.armed and not v.connected):
+        if f.kind == "hiddify" and f.expect != "switch":
+            return "waiting for Hiddify"
         return {"connect": "connecting", "switch": "switching", "reconnect": "reconnecting"}.get(f.expect or "", "redialing")
     if v.state == "off" or not v.armed:
         return "connected (VPN off)" if v.connected else "-"
@@ -160,6 +168,8 @@ def connection_view(f: Facts, v: View, chk: CheckConfig | None = None) -> ConnVi
         window = chk.window_minutes if chk else "?"
         tip = (f"{q.checks} checks in the last {window} min: {q.lost} lost ({q.loss_pct:g}%)"
                + (f", median {q.rtt_ms} ms" if q.rtt_ms is not None else ""))
+    if q is not None and q.checks > 0 and q.targets:                  # which address loses the checks
+        tip = "\n".join(x for x in (tip, *(f"{label}: {lost} of {checks} lost" for label, checks, lost in q.targets)) if x)
     if chk:
         tip = "\n".join(x for x in (tip, f"Every {chk.interval_seconds} s: " + ", ".join(t.label() for t in chk.targets)) if x)
     return ConnView(text, tone, quality_word(f, v), tip)
@@ -197,9 +207,20 @@ class MenuState:
     reconnect: bool
 
 
-def menu_state(v: View) -> MenuState:
-    """Turn on: whenever not protected. Turn off: armed or a tunnel is up. Reconnect: armed. Pure (as on Windows)."""
-    return MenuState(on=v.state != "protected", off=v.armed or v.connected, reconnect=v.armed)
+RECONNECT_HIDDIFY = "Connect and reconnect in Hiddify"     # = hiddify.RECONNECT_HINT; the tooltip of the disabled Reconnect
+
+
+def offers_off(v: View, kind: str | None = None) -> bool:
+    """Turn off is offered while armed, or while a tunnel is up that Off would hang up - never Hiddify's: VeroScudo does not
+    disconnect it, so with VeroScudo off and Hiddify connected the button says Turn VPN on (seen live on Windows: it said
+    Turn VPN off, and Off did nothing). Pure (as on Windows)."""
+    return v.armed or (v.connected and kind != "hiddify")
+
+
+def menu_state(v: View, kind: str | None = None) -> MenuState:
+    """Turn on: whenever not protected. Turn off: offers_off. Reconnect: armed - never for a Hiddify profile (VeroScudo does
+    not start or stop Hiddify: RECONNECT_HIDDIFY). Pure (as on Windows)."""
+    return MenuState(on=v.state != "protected", off=offers_off(v, kind), reconnect=v.armed and kind != "hiddify")
 
 
 def transition_notice(last: str | None, v: View, expect: str | None, name: str) -> tuple[str, str, str] | None:
@@ -260,10 +281,11 @@ def expired_notice(name: str) -> tuple[str, str, str]:
 
 
 def status_rows(f: Facts, v: View, awake: bool, tunnel: str | None, last_drop: str | None = None,
-                foreign: tuple | list | None = None, exit_line: str | None = None) -> list[tuple[str, str]]:
+                foreign: tuple | list | None = None, exit_line: str | None = None,
+                service: str | None = None) -> list[tuple[str, str]]:
     """The status window's table (and the Copy report). `last_drop`: last_drop_text's line (shown when given);
     `foreign`: other VPNs as foreign_list found them (else the names in f.others); `exit_line`: the exit location for the
-    Copy report (exitinfo.report_line). Pure."""
+    Copy report (exitinfo.report_line); `service`: the status page's line (statuspage.service_view), when it is on. Pure."""
     rows = [
         ("VPN profile", f"{f.name} ({kind_label(f.kind)})" if f.configured else "-"),
         ("State", v.title),
@@ -282,6 +304,8 @@ def status_rows(f: Facts, v: View, awake: bool, tunnel: str | None, last_drop: s
         rows.append(("Other VPNs", other))
     if exit_line is not None:
         rows.append(("Exit", exit_line))
+    if service is not None:
+        rows.append(("Service", service))
     return rows
 
 
@@ -320,6 +344,9 @@ def clear_stamp(now: float | None = None) -> str:
 
 
 # ---------------------------------------------------------------- other VPNs (Windows: Get-VeroForeignVpn and its notices)
+HIDDIFY_OWNER = "Hiddify (VPN mode)"      # = hiddify.LABEL (nm.tunnel_owners names Hiddify's tunnel so)
+
+
 @dataclass(frozen=True)
 class Foreign:
     name: str                             # the connection's name, or the interface when no connection owns it
@@ -339,7 +366,8 @@ class Foreign:
 def foreign_list(tunnels: list[str], owners: dict[str, str], own_iface: str | None, own_name: str,
                  profiles: tuple | list = ()) -> list[Foreign]:
     """Other VPNs next to the active profile: up tunnel interfaces (nm.other_tunnels) and active VPN connections
-    (nm.tunnel_owners: interface -> connection), without the active profile's own. Pure."""
+    (nm.tunnel_owners: interface -> connection), without the active profile's own. Hiddify's tunnel (owner
+    "Hiddify (VPN mode)") is a VPN app's: named, never "disconnected" by VeroScudo, configured or not. Pure."""
     out, seen = [], set()
     for ifc in list(tunnels) + sorted(owners):
         if ifc in seen or (own_iface and ifc == own_iface):
@@ -347,6 +375,9 @@ def foreign_list(tunnels: list[str], owners: dict[str, str], own_iface: str | No
         seen.add(ifc)
         conn = owners.get(ifc)
         if conn is not None and conn == own_name:
+            continue
+        if conn == HIDDIFY_OWNER:
+            out.append(Foreign(conn, ifc, None, False))
             continue
         out.append(Foreign(conn or ifc, ifc, conn, conn in profiles if conn else False))
     return out
@@ -365,6 +396,8 @@ def foreign_notice(x: Foreign) -> tuple[str, str]:
                 "the tray menu (VPN profile), or disconnect it.")
     elif x.connection:
         body = f'"{x.name}" connected, but it is not a VeroScudo profile.\nIts traffic is blocked. Disconnect it, or import it in Settings.'
+    elif x.name != x.iface:
+        body = f'{x.name} ({x.iface}) is up next to VeroScudo.\nIts traffic is blocked. Disconnect it in that app.'
     else:
         body = f'A VPN app\'s tunnel ({x.iface}) is up next to VeroScudo.\nIts traffic is blocked. Disconnect it in that app.'
     return "VeroScudo - another VPN", body
@@ -558,7 +591,8 @@ def env_icons(default: Path) -> Path:
 STATS_TITLE = "VeroScudo - Statistics"
 STATS_HEADING = "Last 7 days"
 STATS_NOTE = "One bar = 10 minutes. Hover a bar for its time and numbers."
-STATS_LEGEND = (("good", "Good (or connected, not rated)"), ("unstable", "Unstable"), ("bad", "Bad"), ("off", "Not connected"))
+STATS_LEGEND = (("good", "Good (or connected, not rated)"), ("unstable", "Unstable"), ("bad", "Bad or could not connect"),
+                ("off", "Not connected"))
 STATS_FOOT = ("Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; "
               "without it, connected time is green.")
 # the chart's geometry in points, top-down, the Windows card's: 144 bars x 4 (3 + 1 gap) = 576 wide, one row per day

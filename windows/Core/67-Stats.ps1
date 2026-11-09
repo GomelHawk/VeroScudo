@@ -1,7 +1,8 @@
 ﻿# ---------------------------------------------------------------- statistics: 7 days of VPN time and connection quality
 # The watchdog notes, minute by minute, which VeroScudo profile was up and - when the connection check is on - how many of
 # its checks were sent and lost in that minute. One file per local day, state\stats\yyyy-MM-dd.jsonl, one line per minute
-# and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1.
+# and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1;
+# a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing).
 # Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
 # profile's lasting id (Get-VeroProfileId), so a renamed profile keeps its history; "p" is its name at that minute, so a
 # removed profile is still shown by its last name. A minute without a line = VPN off, PC asleep or VeroScudo off. JSON with
@@ -33,8 +34,9 @@ function ConvertTo-VeroJsonString([string]$Text) {
 
 function Format-VeroStatsLine {
     <# One minute of one profile -> its line. Pure. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0)
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0, [switch]$Down)
     $head = '{{"m":{0},"id":{1},"p":{2}' -f $Minute, (ConvertTo-VeroJsonString $Id), (ConvertTo-VeroJsonString $Name)
+    if ($Down) { return $head + ',"down":1}' }
     if ($Sent -gt 0) { '{0},"sent":{1},"lost":{2}}}' -f $head, $Sent, $Lost } else { $head + '}' }
 }
 
@@ -42,7 +44,11 @@ function Save-VeroStatsMinute {
     <# Appends the collected minute to its day's file: one line per profile that was up in it. #>
     $s = $script:StatsMinute
     if (-not $s) { return }
-    $lines = @(foreach ($id in $s.P.Keys) { $v = $s.P[$id]; if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost } })
+    $lines = @(foreach ($id in $s.P.Keys) {
+        $v = $s.P[$id]
+        if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost }
+        elseif ($v.Down) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Down }      # on, but no tunnel all minute
+    })
     if ($lines.Count -eq 0) { return }
     $dir = Get-VeroStatsDir
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -62,16 +68,17 @@ function Select-VeroStatsMinute([datetime]$Now) {
 }
 
 function Get-VeroStatsSlot($Minute, [string]$Id, [string]$Name) {
-    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Sent = 0; Lost = 0; Name = $Name } }
+    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Down = $false; Sent = 0; Lost = 0; Name = $Name } }
     $Minute.P[$Id].Name = $Name
     $Minute.P[$Id]
 }
 
 function Update-VeroStats {
     <# The watchdog's 15-second pass: was VeroScudo's VPN up right now, on which profile? Also removes old files once a day. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Up, [string]$Id = '', [string]$Name = '', [datetime]$Now = (Get-Date))
+    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Up, [string]$Id = '', [string]$Name = '', [bool]$Down = $false, [datetime]$Now = (Get-Date))
     $s = Select-VeroStatsMinute $Now
     if ($Up -and $Id) { (Get-VeroStatsSlot $s $Id $Name).Up = $true }
+    elseif ($Down -and $Id) { (Get-VeroStatsSlot $s $Id $Name).Down = $true }     # on, but the active profile is not connected
     if ($script:StatsPruned -ne $s.Date) { Remove-VeroOldStats -Now $Now; $script:StatsPruned = $s.Date }
 }
 
@@ -96,7 +103,7 @@ function Remove-VeroOldStats {
     }
 }
 
-$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+))?\}\s*$'
+$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+))?(,"down":1)?\}\s*$'
 function ConvertFrom-VeroStatsText {
     <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost } } }; Names = @{ <id> = its last name } }. Several
        lines for one minute (the watchdog restarted) are added up; a broken line or one without an id is skipped. Pure. #>
@@ -113,7 +120,11 @@ function ConvertFrom-VeroStatsText {
         $lost = if ($mt.Groups[5].Success) { [Math]::Min([int]$mt.Groups[5].Value, $sent) } else { 0 }
         if (-not $data.ContainsKey($id)) { $data[$id] = @{} }
         $day = $data[$id]
-        if ($day.ContainsKey($m)) { $day[$m].Sent += $sent; $day[$m].Lost += $lost } else { $day[$m] = @{ Sent = $sent; Lost = $lost } }
+        $down = $mt.Groups[6].Success                                    # on, not connected - an up line for the minute wins
+        if ($day.ContainsKey($m)) {
+            $day[$m].Sent += $sent; $day[$m].Lost += $lost
+            if (-not $down) { $day[$m].Down = $false }
+        } else { $day[$m] = @{ Sent = $sent; Lost = $lost; Down = $down } }
         $names[$id] = $decoded[$raw]
     }
     @{ Data = $data; Names = $names }
@@ -159,26 +170,34 @@ function Get-VeroStatsState {
 }
 
 function ConvertTo-VeroStatsDay {
-    <# One day's minutes -> its row: bars of -BucketMinutes each (State, Start minute, UpMinutes, Sent, Lost) and the day's
-       totals: VpnMinutes (minutes with the VPN up) and GoodPct (the share of that time in good bars - 'up' bars count as
-       good: the VPN worked and nothing was measured). -UntilMinute: today - later bars are 'future'. Pure. #>
+    <# One day's minutes -> its row: bars of -BucketMinutes each (State, Start minute, UpMinutes, DownMinutes, Sent, Lost) and
+       the day's totals: VpnMinutes (connected), DownMinutes (on but not connected) and GoodPct (good bars' connected minutes
+       out of connected + not connected - 'up' bars count as good: the VPN worked and nothing was measured). A bar with 2 or
+       more minutes on but not connected is bad (a redial that keeps failing). -UntilMinute: today - later bars are 'future'.
+       Pure. #>
     [CmdletBinding()] param([hashtable]$Minutes = @{}, [ValidateRange(1, 60)][int]$BucketMinutes = 10, [int]$UntilMinute = 1440)
     $bars = New-Object System.Collections.Generic.List[object]
-    $vpn = 0; $good = 0
+    $vpn = 0; $good = 0; $downAll = 0
     for ($start = 0; $start -lt 1440; $start += $BucketMinutes) {
-        $up = 0; $sent = 0; $lost = 0
+        $up = 0; $down = 0; $sent = 0; $lost = 0
         for ($m = $start; $m -lt [Math]::Min($start + $BucketMinutes, 1440); $m++) {
-            if ($Minutes.ContainsKey($m)) { $up++; $sent += $Minutes[$m].Sent; $lost += $Minutes[$m].Lost }
+            if (-not $Minutes.ContainsKey($m)) { continue }
+            $x = $Minutes[$m]
+            if ($x.ContainsKey('Down') -and $x.Down) { $down++ } else { $up++; $sent += $x.Sent; $lost += $x.Lost }
         }
-        $state = if ($start -ge $UntilMinute -and $up -eq 0) { 'future' } else { Get-VeroStatsState -UpMinutes $up -Sent $sent -Lost $lost }
-        $vpn += $up
+        $state = if ($start -ge $UntilMinute -and $up -eq 0 -and $down -eq 0) { 'future' }
+                 elseif ($down -ge 2) { 'bad' }
+                 else { Get-VeroStatsState -UpMinutes $up -Sent $sent -Lost $lost }
+        $vpn += $up; $downAll += $down
         if ($state -eq 'good' -or $state -eq 'up') { $good += $up }
-        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; Sent = $sent; Lost = $lost })
+        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; DownMinutes = $down; Sent = $sent; Lost = $lost })
     }
+    $all = $vpn + $downAll
     [pscustomobject]@{
-        Bars       = $bars.ToArray()
-        VpnMinutes = $vpn
-        GoodPct    = $(if ($vpn -gt 0) { [Math]::Round(100.0 * $good / $vpn, 0) } else { $null })
+        Bars        = $bars.ToArray()
+        VpnMinutes  = $vpn
+        DownMinutes = $downAll
+        GoodPct     = $(if ($all -gt 0) { [Math]::Round(100.0 * $good / $all, 0) } else { $null })
     }
 }
 
@@ -188,6 +207,12 @@ function Format-VeroStatsBar {
     $t = { param($m) '{0:00}:{1:00}' -f [int][Math]::Floor($m / 60), ($m % 60) }
     $span = '{0}-{1}' -f (& $t $Bar.Start), (& $t ([Math]::Min($Bar.Start + $BucketMinutes, 1440)))
     $dash = [char]0x2013
+    $dn = if ($Bar.PSObject.Properties['DownMinutes']) { [int]$Bar.DownMinutes } else { 0 }
+    if ($dn -ge 2) {
+        $txt = "$span  could not connect $dn of $BucketMinutes min (VeroScudo on)"
+        if ($Bar.UpMinutes -gt 0) { $txt += "; connected $($Bar.UpMinutes) of $BucketMinutes min" }
+        return $txt
+    }
     switch ($Bar.State) {
         'future' { return $span }
         'off'    { return "$span  not connected" }
@@ -200,10 +225,14 @@ function Format-VeroStatsBar {
 }
 
 function Format-VeroStatsTotal {
-    <# A day's summary: "connected 9 h 40 min - good 87 %" / "not used". Pure. #>
+    <# A day's summary: "connected 9 h 40 min - good 87 %" (+ " - no connection 12 min") / "not used". Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Day)
-    if ($Day.VpnMinutes -le 0) { return 'not used' }
-    $h = [int][Math]::Floor($Day.VpnMinutes / 60); $min = $Day.VpnMinutes % 60
-    $dur = if ($h -gt 0) { "$h h $min min" } else { "$min min" }
-    "connected $dur $([char]0x00B7) good $($Day.GoodPct) %"
+    $dur = { param($n) $h = [int][Math]::Floor($n / 60); $mm = $n % 60; if ($h -gt 0) { "$h h $mm min" } else { "$mm min" } }
+    $dot = [char]0x00B7
+    $down = if ($Day.PSObject.Properties['DownMinutes']) { [int]$Day.DownMinutes } else { 0 }
+    if ($Day.VpnMinutes -le 0 -and $down -le 0) { return 'not used' }
+    if ($Day.VpnMinutes -le 0) { return "no connection $(& $dur $down) $dot good 0 %" }
+    $txt = "connected $(& $dur $Day.VpnMinutes) $dot good $($Day.GoodPct) %"
+    if ($down -gt 0) { $txt += " $dot no connection $(& $dur $down)" }
+    $txt
 }

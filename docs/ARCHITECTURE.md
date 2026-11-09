@@ -75,15 +75,26 @@ that is one table, `$script:TypeHandler` in `windows/Core/95-TypeHandlers.ps1` (
 entry per type and one scriptblock per operation; the shared code calls `& $h.Op args` and never asks "which type is
 this" itself. A new type is a new entry in that table plus its own functions.
 
-| | `ras` (default, stable) | `openvpn` (beta) | `wireguard` (beta) |
-|---|---|---|---|
-| client | Windows built-in (RAS) | `openvpn.exe` (OpenVPN community), run by VeroScudo | WireGuard for Windows (tunnel service `WireGuardTunnel$<name>`) |
-| up = | the RAS adapter is up | the runner saw `CONNECTED` and that tunnel address sits on an up tunnel adapter (TAP/Wintun/DCO) | the service runs **and** the last handshake is < 3 min old (the adapter itself is allowed while the service runs) |
-| adapter (LUID) | the `Ppp` adapter named like the profile | the tunnel adapter holding the CONNECTED address | the `WireGuard` adapter named like the tunnel |
-| server permit | per tunnel type (SSTP/IKEv2/L2TP/PPTP ports), TCP from `svchost.exe` | every `remote` of the `.ovpn` on its protocol/port, only from `openvpn.exe` (DCO off by default; `"dco": true` drops the program condition) | UDP to the endpoint (no program: the kernel driver sends it); the address the tunnel really uses is learned while it runs |
-| dial | `RasDial` with the stored credential | start the runner task, wait for CONNECTED | start / install the tunnel service; a silent tunnel is removed and installed again (fresh name lookup) |
-| hang up | `rasdial /disconnect` | stop request -> the runner sends `signal SIGTERM` | `wireguard.exe /uninstalltunnelservice` (what the app's *Deactivate* does) |
-| password | DPAPI per user, `RasDial` | the same store, sent over the management connection | none (keys in the WireGuard app) |
+| | `ras` (default, stable) | `openvpn` (beta) | `wireguard` (beta) | `hiddify` (beta, kill-switch only) |
+|---|---|---|---|---|
+| client | Windows built-in (RAS) | `openvpn.exe` (OpenVPN community), run by VeroScudo | WireGuard for Windows (tunnel service `WireGuardTunnel$<name>`) | the Hiddify app in **VPN mode** (sing-box core inside `Hiddify.exe`); proxy modes are not supported |
+| up = | the RAS adapter is up | the runner saw `CONNECTED` and that tunnel address sits on an up tunnel adapter (TAP/Wintun/DCO) | the service runs **and** the last handshake is < 3 min old (the adapter itself is allowed while the service runs) | `Hiddify.exe` runs **and** its Wintun adapter `sing-tun Tunnel` is up |
+| adapter (LUID) | the `Ppp` adapter named like the profile | the tunnel adapter holding the CONNECTED address | the `WireGuard` adapter named like the tunnel | the `sing-tun` adapter |
+| server permit | per tunnel type (SSTP/IKEv2/L2TP/PPTP ports), TCP from `svchost.exe` | every `remote` of the `.ovpn` on its protocol/port, only from `openvpn.exe` (DCO off by default; `"dco": true` drops the program condition) | UDP to the endpoint (no program: the kernel driver sends it); the address the tunnel really uses is learned while it runs | **the program, not servers**: `Hiddify.exe` and `HiddifyCli.exe` from its administrators-only install folder may reach any address (outbound only) - its ~60 servers change with each subscription and use TCP and UDP; nothing when the folder is writable by users |
+| dial | `RasDial` with the stored credential | start the runner task, wait for CONNECTED | start / install the tunnel service; a silent tunnel is removed and installed again (fresh name lookup) | **never** - you connect in Hiddify; VeroScudo waits (logged once, then every ~5 min); Reconnect is greyed out |
+| hang up | `rasdial /disconnect` | stop request -> the runner sends `signal SIGTERM` | `wireguard.exe /uninstalltunnelservice` (what the app's *Deactivate* does) | **never** - Off only disarms; any drop (also your disconnect in Hiddify) keeps everything blocked until its tunnel is back or VeroScudo is off |
+| password | DPAPI per user, `RasDial` | the same store, sent over the management connection | none (keys in the WireGuard app) | none (servers and keys in the Hiddify app) |
+
+**Hiddify (VPN mode).** Import: Settings > *Import from Windows...* offers Hiddify when it is installed (refused with a note
+in proxy mode - `flutter.service-mode` in its settings). Linux/macOS (`linux/veroscudo/hiddify.py`): nftables and pf cannot
+allow by program, so the permit is the servers of Hiddify's **live** sing-box config (`configPath` -> `current-config.json`):
+every proxy outbound's `server:server_port` for TCP and UDP plus its direct DNS servers, host names resolved; read every pass
+with limits (64 endpoints, 2 MB, a regular file owned by root or that user, no private/loopback/link-local/multicast
+addresses; a broken file keeps the last good set). The guard (root) reads a user-owned file here: that user can already turn
+VeroScudo off through the passwordless rule, so this opens nothing new. Up = a Hiddify process and an up tun/utun device
+holding the tun inbound's address. Profile entry: Windows `{"profile":"Hiddify","type":"hiddify"}`, Linux/macOS
+`{"profile":"Hiddify","vpnType":"hiddify","configPath":"..."}`. A Hiddify tunnel that is not the active profile is shown as
+*Hiddify (VPN mode)* (Windows did not recognise its `sing-tun` adapter at all before 1.4).
 
 **OpenVPN runner.** The elevated task `\VeroScudo\OpenVPN` (one per session, mutex) runs `openvpn.exe` for the active
 profile while armed: your file first, then VeroScudo's options so they win - `--management 127.0.0.1 <random port>
@@ -326,8 +337,14 @@ or IPv6 /16 (never `0.0.0.0/0`, `Any`).
 Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how good the connection is while protected.
 
 - **Who checks:** the guard - the Windows watchdog loop (`Core/66-Quality.ps1`), the Linux/macOS daemon's `quality` thread
-  (`linux/veroscudo/quality.py`). Every `intervalSeconds` it checks each address once, in parallel: an ICMP echo (*ping*)
-  or a TCP connection to the port (*TCP*). 3 s per check.
+  (`linux/veroscudo/quality.py`). Every `intervalSeconds` it checks each address once, in parallel: an ICMP echo (*ping*),
+  a TCP connection to the port (*TCP*), or **HTTPS**: TCP + TLS handshake + one `HEAD /` without credentials, where any
+  HTTP answer counts - the real way to a web service (e.g. `api.anthropic.com`; no account or key is ever used). 3 s per
+  check, 5 s for TLS. Each address's own losses are kept and listed in the CONNECTION tooltip ("api.anthropic.com
+  (HTTPS): 3 of 18 lost").
+- **Hiddify profiles:** Hiddify's TUN answers pings and completes TCP handshakes itself, locally, also when none of its
+  servers works (seen live: <1 ms to a fake-DNS address). For them every check is a TLS handshake (ping targets on port
+  443); only a real server answers it.
 - **Only while armed and connected:** the checks go through the tunnel like any other traffic; nothing in the
   kill-switch is opened for them. While blocked, off or redialing there is no rating - the samples are dropped, and a
   new connection (or another profile) starts a new rating. An address in the local network is blocked like the rest of
@@ -366,11 +383,25 @@ how long the profile was connected that day and *good %* (the share of that time
 - **Format:** one file per local day, `stats/yyyy-MM-dd.jsonl` in the state folder (Windows `state\stats`, Linux
   `/var/lib/veroscudo/stats`, macOS the same; readable by the user, kept across reboots), one line per minute and profile
   with the VPN up: `{"m":605,"id":"3f2a9c0d1e2b","p":"Work"}` (up, check off) or the same with `"sent":3,"lost":1`;
-  `p` is the profile's name at that minute (JSON, ASCII escapes). A minute without a line: VPN off, the computer asleep
+  `p` is the profile's name at that minute (JSON, ASCII escapes). A minute VeroScudo was **on but could not connect** (the
+  active profile redialing, or Hiddify not connected) is recorded as `{"m":...,"id":...,"p":...,"down":1}`; an up line for
+  the same minute wins. A minute without a line: VPN off, the computer asleep
   or VeroScudo off. Raw counts rather than colours, so the window can group them into any bar width and a later change of
   the thresholds re-rates old days. About 30 KB a day; files older than 8 days are removed by the guard.
 - **Colours:** the connection check's thresholds per bar - green under 10 % lost, amber 10-50 %, brown over 50 %; grey =
-  this profile not connected. With the check off there is nothing to rate: connected time is green.
+  this profile not connected. With the check off there is nothing to rate: connected time is green. A bar with **2 or more
+  minutes on but not connected** is brown too ("could not connect N of 10 min"); the day's line adds *· no connection
+  42 min*, and *good %* is counted over connected + not-connected time.
+
+## Service status page
+
+Optional, per user (Settings > Connection, saved at once): an Atlassian Statuspage `.../api/v2/status.json` - Anthropic's
+by default - fetched by the tray by the same rules as the exit location: once after each connect (Protected) and on
+*Refresh* (6 s timeout). Shown as a card under the exit location, in the same style - it is secondary information, so the
+badge is neutral like the country code: **OK** operational, **!** a minor incident, **!!** major/critical, **?** not
+reachable or not checked yet - then the page's name, its description with the time of the check, and *Refresh*. The Copy report
+gets *"Anthropic: All Systems Operational"*. It tells a service's own outage from your connection. https only, at most 300
+characters.
 
 ## Tray app
 

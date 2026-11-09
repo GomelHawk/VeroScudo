@@ -280,3 +280,74 @@ def test_stats_week_reads_the_guards_folder_per_profile(mac):
                                                                   '{"m":2,"id":"h","p":"Home"}\n')
     assert mac.stats_week("w")[0][1].vpn_minutes == 2 and mac.stats_week("h")[0][1].vpn_minutes == 1
     assert ("h", "Home (removed)") in mac.stats_choices()
+
+
+def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
+    from veroscudo import exitinfo, statuspage
+    mac.settings_(None)
+    ui = mac.win_ui
+    assert mac.mod.METHOD_TITLES == ("Ping", "TCP port", "HTTPS") and mac.mod.method_of(2) == "https"
+    # HTTPS chosen in the first row: saved with its port (own stand-ins: the fake AppKit gives every field the same mock)
+    ui["rows"] = [tuple(mock.MagicMock() for _ in range(3)) for _ in range(3)]
+    ui["en"], ui["every"], ui["over"] = mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
+    ui["rows"][0][0].stringValue.return_value = "api.example.com"
+    ui["rows"][0][1].indexOfSelectedItem.return_value = 2
+    ui["rows"][0][2].stringValue.return_value = "443"
+    for h, m, p in ui["rows"][1:]:
+        h.stringValue.return_value = ""
+        m.indexOfSelectedItem.return_value = 1
+        p.stringValue.return_value = "443"
+    ui["en"].state.return_value = 1
+    ui["every"].stringValue.return_value = "10"
+    ui["over"].stringValue.return_value = "1"
+    mac.settingsMethod_(None)
+    ui["rows"][0][2].setEnabled_.assert_called_with(True)
+    mac.settingsSave_(None)
+    tag, argvs = mac.started[-1]
+    assert tag == "admin:set" and '{"host": "api.example.com", "method": "https", "port": 443}' in argvs[0][-1]
+    # the status page: your own setting, saved at once; a non-https address is refused
+    monkeypatch.setattr(statuspage, "_get", lambda u, t: b'{"page":{"name":"Example Service"},'
+                                                         b'"status":{"indicator":"minor","description":"Degraded"}}')
+    mac.status_page._get = statuspage._get
+    btn = mock.MagicMock()
+    btn.state.return_value = 1
+    mac.settingsStatusPage_(btn)
+    assert mac.status_page.enabled()
+    mac.status_page._job["thread"].join(5)
+    mac.refresh()
+    alerts = []
+    mac.alert = lambda title, text, *a: alerts.append((title, text))
+    field = mock.MagicMock()
+    field.stringValue.return_value = "http://status.example.com"
+    mac.settingsStatusUrl_(field)
+    assert alerts == [("Not saved", "The status page must be an https:// address")]
+    mac.status_(None)
+    mac.st_win.isVisible.return_value = True
+    assert not mac.status_page.checking                          # opening the window fetches nothing (after each connect / Refresh)
+    mac.refresh()
+    mac.update_status()
+    assert "Service      Example Service: Degraded" in mac.copy_report()
+    # the status window: the service card under the exit line ("!" on amber), no Service row in the table
+    st = mac.st
+    st["svc"].setHidden_.assert_called_with(False)
+    st["sbadge"].setStringValue_.assert_any_call("!")
+    st["sname"].setStringValue_.assert_any_call("Example Service")
+    assert any(str(c.args[0]).startswith("Degraded · ") for c in st["sright"].setStringValue_.call_args_list)
+    assert "Service" not in [k for k, *_ in st["rows"][0]]
+    # its Refresh: a fetch now, "checking..." until it ends
+    mac.statusRefreshService_(None)
+    assert mac.status_page.checking and mac.status_page.view().right == "checking..."
+    st["sright"].setStringValue_.assert_called_with("checking...")
+    mac.status_page._job["thread"].join(5)
+    mac.refresh()
+    assert not mac.status_page.checking and mac.status_page.view().right.startswith("Degraded · ")
+    # turned off: the card goes away
+    btn.state.return_value = 0
+    mac.settingsStatusPage_(btn)
+    mac.update_status()
+    st["svc"].setHidden_.assert_called_with(True)
+    # Refresh without a tunnel: refused, with the reason on screen
+    mac.fake.connected = {}
+    mac.refresh()
+    mac.statusRefreshExit_(None)
+    assert mac.exit.refused == exitinfo.NO_TUNNEL

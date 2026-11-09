@@ -73,6 +73,26 @@ $script:TypeHandler = @{
         ForeignText   = { param($F) "WireGuard tunnel '$($F.Name)' is active$(if ($F.Configured) { ' (another VeroScudo profile)' } else { ' (not a VeroScudo profile)' })" }
         ForeignHangUp = { param($F) Invoke-VeroWgHangUp -ProfileName $F.Id }
     }
+    hiddify = @{
+        # kill-switch only (84-Hiddify.ps1): Hiddify connects, disconnects and reconnects itself - VeroScudo only blocks
+        Label = 'Hiddify'; DefaultPort = 443; PasswordCapable = $false; HasDco = $false; OwnLayer = 'sing-box|sing-tun|Hiddify'; HangUpOnOffAlways = $false
+        NamePattern = $null; NameHint = ''; ServerRequired = $false; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $false
+        OnDiskAuth    = { }
+        ServerText    = { 'servers of the Hiddify app' }
+        SwitchNotice  = { param($ProfileName) "'$ProfileName' is a Hiddify profile: connect, disconnect and reconnect it in Hiddify (VPN mode). While its tunnel is down, nothing else leaves this PC." }
+        IsConnected   = { Test-VeroHiddifyConnected }                         # one Hiddify per PC: the profile name does not matter
+        TunnelLuid    = { Get-VeroHiddifyTunnelLuid }
+        ServerPermit  = { param($Config, $Action) Get-VeroHiddifyPermit -Config $Config -Action $Action }
+        ResolveIps    = { @() }
+        RasTunnelType = { 'Automatic' }
+        CrlWindow     = { $false }
+        Dial          = { param($Config, $Action) Invoke-VeroHiddifyDial -Config $Config -Action $Action }
+        HangUp        = { }                                                   # never: Hiddify is yours to disconnect
+        DialFailure   = { "Hiddify $(if (Test-VeroHiddifyRunning) { 'runs, its tunnel is down (VPN mode off or not connected)' } else { 'is not running' })" }
+        StatusDetail  = { "Hiddify $(if (Test-VeroHiddifyRunning) { 'running' } else { 'not running' }), tunnel $(if (Get-VeroHiddifyNic) { 'up' } else { 'down' })" }
+        ForeignText   = { param($F) "Hiddify is connected in VPN mode$(if ($F.Configured) { ' (another VeroScudo profile)' } else { ' (not a VeroScudo profile)' }) - VeroScudo cannot disconnect it, use Hiddify" }
+        ForeignHangUp = { }
+    }
 }
 function Get-VeroTypeHandler {
     <# The handler table of a profile type ('' = the built-in client, like Get-VeroConfigType). Unknown: throw - config

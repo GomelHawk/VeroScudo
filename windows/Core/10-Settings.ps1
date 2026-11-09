@@ -64,6 +64,6 @@ $script:Schtasks     = (Get-VeroSystemDir System) + '\schtasks.exe'
 $script:HomeOverride = $null                                            # tests only (Set-VeroHome); never read from the environment
 $script:UserOverride = $null                                            # tests only (Set-VeroHome -UserDir)
 $script:ReleasePrefix = 'https://github.com/GomelHawk/VeroScudo/releases/'
-$script:Types        = @('ras', 'openvpn', 'wireguard')
+$script:Types        = @('ras', 'openvpn', 'wireguard', 'hiddify')
 $script:WgStaleSeconds = 180                                            # WireGuard re-handshakes every 2 min on a live link
 $script:WgGraceSeconds = 30                                             # a just-started tunnel has not handshaken yet

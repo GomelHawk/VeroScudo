@@ -70,6 +70,30 @@ def test_exit_view_without_a_location_says_why():
     assert v.place == "XX" and v.right == "198.51.100.7 - ?"
 
 
+def test_exit_refresh_whenever_a_tunnel_is_up_and_always_visible_feedback(tmp_path):
+    t = datetime(2026, 11, 5, 10, 33).astimezone()
+    info = {"ip": "203.0.113.25", "country": "PL", "source": "ipinfo.io", "profile": "Work", "time": t.isoformat()}
+    since = t.timestamp() - 5
+    # VeroScudo off, the tunnel up: fresh too (a Refresh went through it); and in the amber "Protected + note" state
+    assert exitinfo.exit_view(info, "off", "Work", since, tunnel_up=True).fresh
+    assert exitinfo.exit_view(info, "attention", "Work", since, tunnel_up=True).fresh
+    v = exitinfo.exit_view(info, "protected", "Work", since, failure="ipinfo.io: timed out")
+    assert v.right == "203.0.113.25 - 10:33 - refresh failed" and "ipinfo.io: timed out" in v.tip
+    v = exitinfo.exit_view(info, "off", "Work", since, refused=exitinfo.NO_TUNNEL)
+    assert v.right == "203.0.113.25 - 10:33 - no VPN tunnel is up - nothing to check" and exitinfo.NO_TUNNEL in v.tip
+    assert exitinfo.exit_view(info, "off", "Work", since, checking=True, failure="x").right == "checking..."
+    v = exitinfo.exit_view(None, "off", "Work", refused=exitinfo.NO_TUNNEL)
+    assert v.text == "Location not available - no VPN tunnel is up - nothing to check"
+    hid = exitinfo.exit_view(info, "protected", "Work", since, kind="hiddify")
+    assert hid.tip.endswith("\nHiddify spreads traffic over several servers - the exit IP can differ per connection.")
+    assert exitinfo.HIDDIFY_NOTE not in exitinfo.exit_view(info, "protected", "Work", since, kind="vpn").tip
+    f = exitinfo.ExitFetch(tmp_path / "tray.json", get=lambda u, t: IPINFO)
+    assert not f.refresh("Work", tunnel_up=False) and f.refused == exitinfo.NO_TUNNEL and not f.checking
+    assert f.refresh("Work", tunnel_up=True) and f.refused == "" and f.checking
+    f._job["thread"].join(5)
+    assert f.poll() and f.info()["ip"] == "203.0.113.25"
+
+
 def test_country_names():
     assert countries.country_name("PL") == "Poland" and countries.country_name("gb") == "United Kingdom"
     assert countries.country_name("ZZ") == "ZZ" and countries.country_name("") == ""

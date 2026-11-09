@@ -14,7 +14,7 @@
 #>
 param(
     [string]$ProfileName, [string]$Server, [string]$UserName, [int]$Port = 0,
-    [ValidateSet('ras', 'openvpn', 'wireguard')][string]$Type = 'ras',
+    [ValidateSet('ras', 'openvpn', 'wireguard', 'hiddify')][string]$Type = 'ras',
     [string]$OpenVpnConfig,          # openvpn: the .ovpn to import (checked, key files inlined, stored admin-only)
     [string]$WireGuardConfig,        # wireguard: optional .conf to read the endpoint from and check (the tunnel itself lives in the WireGuard app)
     [switch]$Dco,                    # openvpn: keep the kernel data channel (the server permit is then not tied to openvpn.exe)
@@ -67,6 +67,10 @@ function New-ProfileEntry([string]$Name, [string]$Kind, [string]$Srv, [int]$Prt,
         foreach ($w in $r.Warnings) { Write-Warning $w }
         if ($r.Auth -and -not $User) { $User = Read-Host 'VPN username for this OpenVPN profile' }
         return [pscustomobject]@{ Profile = $Name; Type = 'openvpn'; Server = ''; Port = 1194; Username = $User; ServerIps = @(); Auth = $r.Auth; Dco = $KeepDco }
+    }
+    if ($Kind -eq 'hiddify') {                                              # VPN mode of the Hiddify app: nothing to import, it keeps its servers
+        if (-not (Get-VeroHiddifyDir)) { throw 'Hiddify is not installed (Program Files\Hiddify\Hiddify.exe not found).' }
+        return [pscustomobject]@{ Profile = $Name; Type = 'hiddify'; Server = ''; Port = 443; Username = ''; ServerIps = @(); Auth = $false; Dco = $false }
     }
     if ($Kind -eq 'wireguard') {
         if ($WgConf) {

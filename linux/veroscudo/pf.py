@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Config, server_rules
-from .firewall import IFNAME, DnsPolicy, split_families
+from .firewall import IFNAME, DnsPolicy, group_endpoints, split_families
 
 ANCHOR = "com.apple/250.VeroScudo"
 TOKEN = Path("/var/run/veroscudo-pf.token")
@@ -29,8 +29,10 @@ _BASE = [
 
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
-                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False) -> str:
-    """`bridges` (scutil.vm_bridges: the host side of NAT/host-only VMs, e.g. bridge100) are passed in every state, both
+                   dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False,
+                   endpoints: tuple = ()) -> str:
+    """`endpoints` (a Hiddify profile): (address, port, protocols) Hiddify itself must reach outside the tunnel, in every
+    state - firewall.render_ruleset says the same. `bridges` (scutil.vm_bridges: the host side of NAT/host-only VMs, e.g. bridge100) are passed in every state, both
     ways: VM <-> host (DHCP and DNS from the vmnet service) stays on this machine. With the VM setting on, a VM's way out is
     then judged like the host's own traffic on the interface it leaves by - the tunnel while it is up, nothing else while it
     is down (the forwarded packet meets the rules below on en0/utun). `vms_free` (Settings: VMs not protected): packets that
@@ -74,6 +76,10 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 lines.append(f"pass out quick {fam} proto {proto} to {{ {', '.join(lst)} }} port {plist} {kb}")
             else:
                 lines.append(f"pass out quick {fam} proto {proto} to {{ {', '.join(lst)} }} {kb}")
+    for ver, port, protos, addrs in group_endpoints(endpoints):
+        fam = "inet" if ver == 4 else "inet6"
+        proto = protos[0] if len(protos) == 1 else "{ " + " ".join(protos) + " }"
+        lines.append(f"pass out quick {fam} proto {proto} to {{ {', '.join(addrs)} }} port {port} {kb}")
     for fam, lst in (("inet", lan4), ("inet6", lan6)):
         for cidr in lst:
             lines.append(f"pass quick {fam} to {cidr} {kb}")

@@ -105,7 +105,7 @@ def do_import(names: list[str]) -> int:
         if not found:
             print("no VPN connection found - create one in the system's VPN settings first")
         for d in found:
-            what = f"{d['vpn_type'] or d['protocol']}  {d['server'] or '-'}:{d['port']}" if d["server"] and not d.get("unsupported") else "-"
+            what = importer.summary(d) if importer.importable(d) else "-"
             print(f"  {d['name']:<28} {what}{'  - ' + d['note'] if d['note'] else ''}")
         print("import: sudo veroscudo import <connection> [<connection> ...]")
         return 0
@@ -151,10 +151,10 @@ def manual_profile() -> str:
 def choose(found: list[dict]) -> list[str] | None:
     """Numbered list of the system's VPN connections; returns [name], or None for "type it in by hand". Only an importable
     connection can be chosen."""
-    usable = [d for d in found if d["server"] and not d.get("unsupported")]
+    usable = [d for d in found if importer.importable(d)]
     print("VPN connections on this computer:")
     for i, d in enumerate(found, 1):
-        what = f"{d['vpn_type'] or d['protocol']}  {d['server']}:{d['port']}" if d in usable else "cannot be used"
+        what = importer.summary(d) if d in usable else "cannot be used"
         print(f"  {i:>2}) {d['name']:<28} {what}{'  - ' + d['note'] if d['note'] else ''}")
     print("   0) none of these - type the settings in")
     while True:

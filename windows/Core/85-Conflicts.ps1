@@ -2,7 +2,7 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
 # ---------------------------------------------------------------- conflicts: other VPNs and kill-switches next to VeroScudo
-$script:KillSwitchWords = 'WireGuard|OpenVPN|PrivateVPN|Hiddify|sing-box|NordVPN|ExpressVPN|Mullvad|Proton|Surfshark|Private Internet Access|CyberGhost|Windscribe|IVPN|Astrill|Cloudflare WARP'
+$script:KillSwitchWords = 'WireGuard|OpenVPN|PrivateVPN|Hiddify|sing-box|sing-tun|NordVPN|ExpressVPN|Mullvad|Proton|Surfshark|Private Internet Access|CyberGhost|Windscribe|IVPN|Astrill|Cloudflare WARP'
 function Get-VeroConflict {
     <# Read-only: what else is tunnelling or filtering next to VeroScudo. Each item is one human-readable line. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config)
@@ -96,6 +96,12 @@ function Get-VeroForeignVpn {
         if ([string]$nic.NetworkInterfaceType -eq 'Ppp') { continue }                                       # Windows VPN: listed by name above
         if ($ownNics -contains [string]$nic.Id) { continue }
         if ([string]$nic.Description -like 'WireGuard*' -and ($wgUp -contains $nic.Name -or ($type -eq 'wireguard' -and $nic.Name -eq $Config.Profile))) { continue }
+        if ([string]$nic.Description -match $script:HiddifyTunPattern) {          # Hiddify in VPN mode: named, never "an app's tunnel"
+            if ($type -ne 'hiddify') {
+                $out.Add([pscustomobject]@{ Name = 'Hiddify (VPN mode)'; Kind = 'hiddify'; Configured = [bool]@($Config.Profiles | Where-Object Type -eq 'hiddify'); CanDisconnect = $false; Id = 'hiddify' })
+            }
+            continue
+        }
         $isOvpnAdapter = [string]$nic.Description -match 'TAP-Windows|Wintun|OpenVPN|Data Channel Offload|ovpn-dco'
         if ($isOvpnAdapter -and ($ownRunner -or $ovpnForeign.Count -gt 0)) { continue }
         $out.Add([pscustomobject]@{ Name = "$($nic.Name) ($($nic.Description))"; Kind = 'app'; Configured = $false; CanDisconnect = $false; Id = [string]$nic.Name })

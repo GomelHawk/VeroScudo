@@ -26,14 +26,14 @@ def test_up_minute_without_checks_and_flush(tmp_path):
 def test_profile_names_are_escaped_as_ascii_json():
     line = stats.format_line(5, "aaa", 'Офис "VPN"', 2, 0)
     assert line == '{"m":5,"id":"aaa","p":"\\u041e\\u0444\\u0438\\u0441 \\"VPN\\"","sent":2,"lost":0}'
-    assert stats.parse(line) == ({"aaa": {5: (2, 0)}}, {"aaa": 'Офис "VPN"'})
+    assert stats.parse(line) == ({"aaa": {5: (2, 0, False)}}, {"aaa": 'Офис "VPN"'})
 
 
 def test_parse_adds_repeats_skips_garbage_caps_lost_and_keeps_the_last_name():
     d, names = stats.parse('{"m":605,"id":"w","p":"W","sent":3,"lost":1}\n{"m":605,"id":"w","p":"W2","sent":2,"lost":0}\n'
                            'garbage\n{"m":606,"id":"w","p":"W2"}\n{"m":1500,"id":"w","p":"W"}\n'
                            '{"m":7,"id":"w","p":"W2","sent":1,"lost":9}\n{"m":8,"p":"old build"}\n{"m":9,"id":"h","p":"H"}\n')
-    assert d == {"w": {605: (5, 1), 606: (0, 0), 7: (1, 1)}, "h": {9: (0, 0)}}
+    assert d == {"w": {605: (5, 1, False), 606: (0, 0, False), 7: (1, 1, False)}, "h": {9: (0, 0, False)}}
     assert names == {"w": "W2", "h": "H"}
 
 
@@ -94,3 +94,47 @@ def test_renamed_profile_keeps_its_history_and_a_removed_one_its_last_name(tmp_p
     assert stats.choices([], config, "n") == [("n", "New")]                    # the active one even before it has data
     week = stats.week(tmp_path, "w", datetime(2026, 11, 7, 12, 0))
     assert week[0][1].vpn_minutes == 1 and week[2][1].vpn_minutes == 1        # both names, one history
+
+
+# ---------------------------------------------------------------- VeroScudo on, but not connected: "down" minutes
+def test_recorder_writes_a_down_minute_only_without_an_up_pass(tmp_path):
+    r = stats.Recorder(tmp_path)
+    t = datetime(2026, 11, 7, 10, 5, 0)
+    r.tick(False, "aaa", "Work", t, down=True)
+    r.tick(False, "aaa", "Work", t.replace(second=15), down=True)
+    r.tick(False, "aaa", "Work", t.replace(minute=6), down=True)
+    r.tick(True, "aaa", "Work", t.replace(minute=6, second=30))           # reconnected within the minute: up wins
+    r.tick(False, "aaa", "Work", t.replace(minute=7))                     # off: nothing
+    r.flush()
+    assert (tmp_path / "stats" / "2026-11-07.jsonl").read_text() == \
+        '{"m":605,"id":"aaa","p":"Work","down":1}\n{"m":606,"id":"aaa","p":"Work"}\n'
+    assert stats.format_line(605, "aaa", "Work", down=True) == '{"m":605,"id":"aaa","p":"Work","down":1}'
+
+
+def test_parse_up_line_wins_over_a_down_line():
+    d, _ = stats.parse('{"m":5,"id":"w","p":"W","down":1}\n{"m":5,"id":"w","p":"W","sent":3,"lost":0}\n'
+                       '{"m":6,"id":"w","p":"W","down":1}\n{"m":6,"id":"w","p":"W","down":1}\n'
+                       '{"m":7,"id":"w","p":"W"}\n{"m":7,"id":"w","p":"W","down":1}\n')
+    assert d == {"w": {5: (3, 0, False), 6: (0, 0, True), 7: (0, 0, False)}}
+
+
+def test_two_down_minutes_make_a_bar_bad_and_count_against_good():
+    m = {i: (0, 0, True) for i in range(3)}                            # bar 0: 3 down
+    m.update({i: (6, 0, False) for i in range(10, 20)})                   # bar 1: 10 good
+    m[20], m[21] = (0, 0, True), (6, 0, False)                            # bar 2: 1 down, 1 good: not bad
+    m.update({30: (0, 0, True), 31: (0, 0, True), 32: (6, 0, False)})     # bar 3: 2 down + 1 connected
+    day = stats.day_row(m, until=40)
+    assert [b.state for b in day.bars[:5]] == ["bad", "good", "good", "bad", "future"]
+    assert day.vpn_minutes == 12 and day.down_minutes == 6
+    assert day.good_pct == round(100 * 11 / 18)                           # bar 3's minute is in a bad bar
+    assert stats.bar_text(day.bars[0]) == "00:00-00:10  could not connect 3 of 10 min (VeroScudo on)"
+    assert stats.bar_text(day.bars[3]) == "00:30-00:40  could not connect 2 of 10 min (VeroScudo on); connected 1 of 10 min"
+    assert stats.bar_text(stats.Bar(860, "bad", 0, 0, 0, 4), 15) == "14:20-14:35  could not connect 4 of 15 min (VeroScudo on)"
+
+
+def test_total_texts_with_down_minutes():
+    assert stats.total_text(stats.Day([], 566, 93, 12)) == "connected 9 h 26 min · good 93 % · no connection 12 min"
+    assert stats.total_text(stats.Day([], 0, 0, 65)) == "no connection 1 h 5 min · good 0 %"
+    assert stats.total_text(stats.Day([], 0, None, 0)) == "not used"
+    only_down = stats.day_row({i: (0, 0, True) for i in range(12)})
+    assert only_down.good_pct == 0 and stats.total_text(only_down) == "no connection 12 min · good 0 %"

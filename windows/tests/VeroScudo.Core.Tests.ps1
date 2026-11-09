@@ -2091,6 +2091,30 @@ Describe 'Connection check: a real TCP check against a local listener' {
     }
 }
 
+Describe 'Connection check: TLS for Hiddify (its TUN answers TCP and ping itself)' {
+    It 'a connection that is accepted and then dropped counts for TCP, not for TLS' {
+        $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $l.Start()
+        $port = $l.LocalEndpoint.Port
+        # accept and close at once - what Hiddify's TUN does when none of its servers answers
+        $ps = [powershell]::Create().AddScript({ param($L) for ($i = 0; $i -lt 4; $i++) { try { $c = $L.AcceptTcpClient(); $c.Close() } catch { break } } }).AddArgument($l)
+        $h = $ps.BeginInvoke()
+        try {
+            $t = @([pscustomobject]@{ Host = '127.0.0.1'; Method = 'tcp'; Port = $port })
+            @(Invoke-VeroProbeRound -Targets $t)[0].Ok | Should -BeTrue
+            @(Invoke-VeroProbeRound -Targets $t -Tls -TimeoutMs 3000)[0].Ok | Should -BeFalse
+        } finally { $l.Stop(); try { $null = $ps.EndInvoke($h) } catch { Write-Verbose 'listener stopped' }; $ps.Dispose() }
+    }
+    It 'a Hiddify profile is checked with TLS, the others with their own method' {
+        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Hiddify","type":"hiddify"}],"connectionCheck":{"enabled":true,"intervalSeconds":15}}'
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroProbeRound { [pscustomobject]@{ Ok = $true; RttMs = 20 } }
+        Update-VeroQuality | Out-Null
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroProbeRound -Times 1 -Exactly -ParameterFilter { $Tls -and $TimeoutMs -eq 5000 }
+        Remove-TestFile @((Get-VeroPath).Config, (Get-VeroPath).Quality)
+    }
+}
+
 Describe 'Statistics: minutes per profile, day rows, bar texts' {
     BeforeEach {
         InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
@@ -2199,5 +2223,162 @@ Describe 'Profile ids: statistics follow a profile across a rename' {
         $renamed.Id | Should -Be (Get-VeroProfileId -Name 'Work')
         $new.Id | Should -Match '^[0-9a-f]{12}$'
         $new.Id | Should -Not -Be $renamed.Id
+    }
+}
+
+Describe 'Hiddify (VPN mode): kill-switch only' {
+    BeforeAll {
+        $script:cfgH = Get-VeroConfig -Raw '{"profiles":[{"profile":"Hiddify","type":"hiddify"},{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}],"activeProfile":"Hiddify"}'
+        $script:cfgR = Get-VeroConfig -Raw '{"profiles":[{"profile":"CorporateVPN","server":"vpn.example.com","username":"u"}]}'
+        $script:tun = [pscustomobject]@{ Name = 'tun0'; Description = 'sing-tun Tunnel'; NetworkInterfaceType = 'Unknown'; OperationalStatus = 'Up'; Id = '{0DCCC63E-5622-3880-1E09-7CC9C46AD7B4}' }
+        $script:apps = @('C:\Program Files\Hiddify\Hiddify.exe', 'C:\Program Files\Hiddify\HiddifyCli.exe')
+    }
+    It 'a profile needs no server, username or password, and is stored as type hiddify' {
+        $script:cfgH.Profile | Should -Be 'Hiddify'; $script:cfgH.Type | Should -Be 'hiddify'
+        Test-VeroNeedsPassword $script:cfgH | Should -BeFalse
+        @((ConvertTo-VeroProfileObject @($script:cfgH.Profiles)[0]).Keys) | Should -Be @('profile', 'id', 'type')
+    }
+    It 'the filters let only the Hiddify programs out - to anywhere, outbound only - plus its tunnel' {
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgH -PermitKind 'program' -ProgramApps $script:apps -TunnelLuid 77)
+        $app = @($t | Where-Object { $_ -like 'VPN app*' })
+        $app.Count | Should -Be 4                                              # 2 programs x connect v4/v6
+        foreach ($x in $app) { $x | Should -Match "$($script:F.App)=.*Hiddify(Cli)?\.exe"; $x | Should -Not -Match $script:F.Addr }
+        @($t | Where-Object { $_ -like 'VPN server*' }).Count | Should -Be 0
+        @($t | Where-Object { $_ -like 'VPN tunnel*' }).Count | Should -Be 4
+    }
+    It 'no program known: nothing but the tunnel is allowed (never a program-less permit)' {
+        $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgH -PermitKind 'program' -ProgramApps @())
+        @($t | Where-Object { $_ -like 'VPN app*' -or $_ -like 'VPN server*' }).Count | Should -Be 0
+    }
+    It 'the permit comes from the programs in an administrators-only folder' {
+        Mock -ModuleName VeroScudo.Core Get-VeroHiddifyApps { $script:apps }
+        $p = InModuleScope VeroScudo.Core { Get-VeroHiddifyPermit -Config (Get-VeroConfig -Raw '{"profiles":[{"profile":"Hiddify","type":"hiddify"}]}') }
+        $p.Kind | Should -Be 'program'; @($p.Apps).Count | Should -Be 2; @($p.Ips).Count | Should -Be 0
+    }
+    It 'connected = Hiddify runs and its sing-tun adapter is up; the tunnel is that adapter' {
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:tun }
+        Mock -ModuleName VeroScudo.Core Get-Process { [pscustomobject]@{ Name = 'Hiddify'; Id = 1 } }
+        Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeTrue
+        Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Not -Be 0
+        Mock -ModuleName VeroScudo.Core Get-Process { }
+        Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeFalse          # adapter left behind, app gone: not a tunnel
+        Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be 0
+    }
+    It 'VeroScudo never dials or hangs up Hiddify' {
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyConnected { $true }
+        { Invoke-VeroDial -Config $script:cfgH -Action 'test' } | Should -Not -Throw
+        InModuleScope VeroScudo.Core { & (Get-VeroTypeHandler 'hiddify').HangUp 'Hiddify' } | Should -BeNullOrEmpty
+    }
+    It "is detected as 'Hiddify (VPN mode)' when another profile is active (live: sing-tun was not recognised at all)" {
+        Mock -ModuleName VeroScudo.Core Get-VeroWindowsVpn { }
+        Mock -ModuleName VeroScudo.Core Get-Service { }
+        Mock -ModuleName VeroScudo.Core Get-Process { }
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:tun }
+        InModuleScope VeroScudo.Core -Parameters @{ N = $script:tun } { param($N) Test-VeroTunnelAdapter $N } | Should -BeTrue
+        $f = @(Get-VeroForeignVpn -Config $script:cfgR)
+        $f.Count | Should -Be 1; $f[0].Kind | Should -Be 'hiddify'; $f[0].Name | Should -Be 'Hiddify (VPN mode)'; $f[0].CanDisconnect | Should -BeFalse
+        Format-VeroForeignVpn $f[0] | Should -Match 'Hiddify is connected in VPN mode \(not a VeroScudo profile\)'
+        @(Get-VeroForeignVpn -Config $script:cfgH).Count | Should -Be 0              # the active profile's own tunnel
+    }
+    It "its own WFP layer is expected while it is the active profile, a warning otherwise" {
+        @(Select-VeroForeignWfp -Type 'hiddify' -Providers @('sing-box')).Count | Should -Be 0
+        @(Select-VeroForeignWfp -Type 'ras' -Providers @('sing-box')).Count | Should -Be 1
+    }
+    It 'Off leaves Hiddify as it is and does not claim to have disconnected it (live: it logged "disconnected")' {
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $true }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroHangUp { throw 'must not hang up Hiddify' }
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { $script:hidLog += @($Message) }
+        $script:hidLog = @()
+        Invoke-VeroAction -Action off -Config $script:cfgH
+        @($script:hidLog | Where-Object { $_ -match 'disconnected' }).Count | Should -Be 0
+        @($script:hidLog | Where-Object { $_ -match 'Hiddify stays as it is' }).Count | Should -Be 1
+    }
+    It 'turns on when Hiddify connects (an edge, like a Windows VPN you connect yourself) - never right after Off' {
+        Mock -ModuleName VeroScudo.Core Invoke-VeroArmConnected { }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        Mock -ModuleName VeroScudo.Core Test-VeroLockAlive { $false }
+        Mock -ModuleName VeroScudo.Core Test-VeroRecentOff { $false }
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { $script:cfgH }
+        InModuleScope VeroScudo.Core { $script:HiddifySeen = $null }
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyConnected { $false }
+        Update-VeroHiddifyWatch -Config $script:cfgH | Should -BeFalse                  # first look
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyConnected { $true }
+        Update-VeroHiddifyWatch -Config $script:cfgH | Should -BeTrue                   # came up
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroArmConnected -Times 1 -Exactly
+        Update-VeroHiddifyWatch -Config $script:cfgH | Should -BeFalse                  # still up: no edge
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyConnected { $false }
+        Update-VeroHiddifyWatch -Config $script:cfgH | Out-Null
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyConnected { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroRecentOff { $true }
+        Update-VeroHiddifyWatch -Config $script:cfgH | Should -BeFalse                  # just turned off: stays off
+    }
+    It 'reads the mode from Hiddify settings: only VPN mode can be protected' {
+        $ad = Join-Path (Get-VeroPath).State 'hiddify-appdata'
+        New-Item -ItemType Directory -Path (Join-Path $ad 'Hiddify\hiddify') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $ad 'Hiddify\hiddify\shared_preferences.json') -Value '{"flutter.service-mode":"vpn","flutter.locale":"en"}'
+        Get-VeroHiddifyMode -AppData $ad | Should -Be 'vpn'
+        Set-Content -LiteralPath (Join-Path $ad 'Hiddify\hiddify\shared_preferences.json') -Value '{"flutter.service-mode":"proxy"}'
+        Get-VeroHiddifyMode -AppData $ad | Should -Be 'proxy'
+        Get-VeroHiddifyMode -AppData (Join-Path $ad 'nothing') | Should -BeNullOrEmpty
+        Remove-TestFile @(Join-Path $ad 'Hiddify\hiddify\shared_preferences.json')
+    }
+}
+
+Describe 'Statistics: VeroScudo on but no connection counts as bad' {
+    BeforeEach {
+        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
+        $script:statsDir = Join-Path (Get-VeroPath).State 'stats'
+        if (Test-Path $script:statsDir) { Remove-TestFile @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object FullName) }
+    }
+    It 'writes a down minute for the active profile, and an up line wins over it' {
+        $t = [datetime]'2026-11-07 10:05:10'
+        Update-VeroStats -Up $false -Down $true -Id 'aaa' -Name 'Work' -Now $t
+        Update-VeroStats -Up $false -Down $true -Id 'aaa' -Name 'Work' -Now $t.AddSeconds(60)
+        Update-VeroStats -Up $true -Id 'aaa' -Name 'Work' -Now $t.AddSeconds(75)          # 10:06: connected again
+        Update-VeroStats -Up $false -Now $t.AddSeconds(120)
+        @(Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl')) | Should -Be @('{"m":605,"id":"aaa","p":"Work","down":1}', '{"m":606,"id":"aaa","p":"Work"}')
+        $r = ConvertFrom-VeroStatsText -Text ('{"m":605,"id":"aaa","p":"Work","down":1}' + "`n" + '{"m":605,"id":"aaa","p":"Work","sent":3,"lost":0}')
+        $r.Data['aaa'][605].Down | Should -BeFalse; $r.Data['aaa'][605].Sent | Should -Be 3
+    }
+    It 'a bar with 2+ minutes without a connection is bad and says so; good % counts that time' {
+        $m = @{}
+        foreach ($i in 0..9) { $m[$i] = @{ Sent = 3; Lost = 0; Down = $false } }
+        foreach ($i in 10..16) { $m[$i] = @{ Sent = 0; Lost = 0; Down = $true } }
+        foreach ($i in 17..19) { $m[$i] = @{ Sent = 3; Lost = 0; Down = $false } }
+        $m[25] = @{ Sent = 0; Lost = 0; Down = $true }                                  # one minute: not "could not connect" yet
+        $day = ConvertTo-VeroStatsDay -Minutes $m
+        @($day.Bars[0..2] | ForEach-Object State) | Should -Be @('good', 'bad', 'off')
+        $day.VpnMinutes | Should -Be 13; $day.DownMinutes | Should -Be 8; $day.GoodPct | Should -Be 48   # 10 of 21
+        Format-VeroStatsBar -Bar $day.Bars[1] | Should -Be '00:10-00:20  could not connect 7 of 10 min (VeroScudo on); connected 3 of 10 min'
+        Format-VeroStatsTotal -Day $day | Should -Be ("connected 13 min {0} good 48 % {0} no connection 8 min" -f [char]0x00B7)
+        Format-VeroStatsTotal -Day ([pscustomobject]@{ VpnMinutes = 0; DownMinutes = 12; GoodPct = 0 }) | Should -Be ("no connection 12 min {0} good 0 %" -f [char]0x00B7)
+    }
+}
+
+Describe 'Connection check: HTTPS method and per-address results' {
+    It 'accepts https with a port, writes it back, and names each address' {
+        $c = ConvertFrom-VeroCheckConfig ('{"enabled":true,"targets":[{"host":"api.example.com","method":"https"},{"host":"203.0.113.5","method":"https","port":8443},{"host":"1.1.1.1","method":"ping"}]}' | ConvertFrom-Json)
+        @($c.Targets | ForEach-Object { Get-VeroCheckLabel $_ }) | Should -Be @('api.example.com (HTTPS)', '203.0.113.5:8443 (HTTPS)', '1.1.1.1 (ping)')
+        (ConvertTo-VeroCheckObject $c).targets[1].port | Should -Be 8443
+        (ConvertTo-VeroCheckObject $c).targets[0].method | Should -Be 'https'
+        { ConvertFrom-VeroCheckConfig ('{"targets":[{"host":"x.example.com","method":"ftp"}]}' | ConvertFrom-Json) } | Should -Throw "*'ping', 'tcp' or 'https'*"
+        $f = ConvertFrom-VeroCheckForm -Enabled $true -IntervalSeconds 10 -WindowMinutes 1 -Rows @(@{ Text = 'https://api.example.com/v1'; Method = 'https'; Port = 443 })
+        $f.Targets[0].Method | Should -Be 'https'; $f.Targets[0].Host | Should -Be 'api.example.com'; $f.Targets[0].Port | Should -Be 443
+    }
+    It 'counts each address in the window' {
+        $s = @(@{ T = 100.0; Ok = $true; Ti = 0 }, @{ T = 100.0; Ok = $false; Ti = 1 }, @{ T = 110.0; Ok = $true; Ti = 0 }, @{ T = 110.0; Ok = $false; Ti = 1 }, @{ T = 10.0; Ok = $false; Ti = 0 })
+        $t = @((New-Object psobject -Property @{ Host = '1.1.1.1'; Method = 'tcp'; Port = 443 }), (New-Object psobject -Property @{ Host = 'api.example.com'; Method = 'https'; Port = 443 }))
+        $per = @(Get-VeroQualityPerTarget -Samples $s -Targets $t -Now 120 -WindowSeconds 60)
+        $per[0].label | Should -Be '1.1.1.1:443'; $per[0].checks | Should -Be 2; $per[0].lost | Should -Be 0
+        $per[1].label | Should -Be 'api.example.com (HTTPS)'; $per[1].lost | Should -Be 2
+    }
+    It 'an HTTPS target to a port that does not speak TLS is not reached' {
+        $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $l.Start()
+        $port = $l.LocalEndpoint.Port
+        $ps = [powershell]::Create().AddScript({ param($L) for ($i = 0; $i -lt 2; $i++) { try { $c = $L.AcceptTcpClient(); $c.Close() } catch { break } } }).AddArgument($l)
+        $h = $ps.BeginInvoke()
+        try { @(Invoke-VeroProbeRound -Targets @([pscustomobject]@{ Host = '127.0.0.1'; Method = 'https'; Port = $port }))[0].Ok | Should -BeFalse }
+        finally { $l.Stop(); try { $null = $ps.EndInvoke($h) } catch { Write-Verbose 'listener stopped' }; $ps.Dispose() }
     }
 }

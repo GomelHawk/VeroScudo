@@ -10,7 +10,8 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import quality
+from . import hiddify, quality
+from .hiddify import valid_config_path
 
 DEFAULT_CONFIG = Path("/etc/veroscudo/config.json")
 _HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
@@ -55,12 +56,15 @@ def is_host(value: str) -> bool:
 
 
 # what each VPN type needs to reach its server: (protocol, ports). ESP / GRE are IP protocols without ports.
-VPN_TYPES = {"", "openvpn", "wireguard", "sstp", "l2tp", "ikev2", "ipsec", "pptp", "openconnect"}
+# "hiddify": Hiddify in VPN (TUN) mode - no server of its own here; its servers come from Hiddify's live config (hiddify.py)
+VPN_TYPES = {"", "openvpn", "wireguard", "sstp", "l2tp", "ikev2", "ipsec", "pptp", "openconnect", "hiddify"}
 
 
 def server_rules(p: Profile) -> list[tuple[str, tuple[int, ...]]]:
     """The protocol/port pairs the kill-switch allows to the VPN server, per VPN type. Pure."""
     t = p.vpn_type
+    if t == "hiddify":
+        return []                                                # per-endpoint permits instead (render_ruleset `endpoints`)
     if t == "l2tp":
         return [("udp", (500, 4500, 1701)), ("esp", ())]
     if t in ("ikev2", "ipsec"):
@@ -86,6 +90,7 @@ class Profile:
     server_ips: tuple[str, ...] = ()   # pinned addresses: when set, nothing is resolved
     vpn_type: str = ""             # "" = protocol/port above; else the VPN's own ports (server_rules): l2tp, ikev2, ipsec, pptp, ...
     id: str = ""                   # lasting id (profile_id): statistics follow it across a rename
+    config_path: str = ""          # vpnType "hiddify": Hiddify's live sing-box config (.../data/current-config.json)
 
 
 @dataclass(frozen=True)
@@ -144,6 +149,15 @@ class Config:
             raise ValueError("config.json: vpn.profile is required")
         if len(name) > 255 or _BAD_NAME.search(name):
             raise ValueError(f"config.json: invalid VPN profile name {name!r}")
+        vtype = str(p.get("vpnType", "")).lower()
+        if vtype not in VPN_TYPES:
+            raise ValueError(f"config.json: vpnType must be one of {', '.join(sorted(VPN_TYPES))} (profile '{name}')")
+        if vtype == "hiddify":
+            path = p.get("configPath")
+            if not valid_config_path(path):
+                raise ValueError(f"config.json: configPath must be the absolute path of Hiddify's current-config.json "
+                                 f"(profile '{name}')")
+            return Profile(name, "", "", 443, "tcp", (), vtype, profile_id(name, p.get("id")), str(path))
         server = str(p.get("server") or "")
         if not server:
             raise ValueError(f"config.json: vpn.server is required (profile '{name}')")
@@ -161,9 +175,6 @@ class Config:
                 pins.append(str(ipaddress.ip_address(str(ip))))
             except ValueError:
                 raise ValueError(f"config.json: invalid serverIps entry {ip!r} (profile '{name}')") from None
-        vtype = str(p.get("vpnType", "")).lower()
-        if vtype not in VPN_TYPES:
-            raise ValueError(f"config.json: vpnType must be one of {', '.join(sorted(VPN_TYPES))} (profile '{name}')")
         return Profile(name, server, str(p.get("username", "")), port, proto, tuple(pins), vtype, profile_id(name, p.get("id")))
 
     @staticmethod
@@ -207,4 +218,6 @@ class Config:
         p = path or config_path()
         if not p.exists():
             raise FileNotFoundError(f"VeroScudo config not found: {p} (run install.sh)")
-        return Config.from_text(p.read_text(), active)
+        cfg = Config.from_text(p.read_text(), active)
+        hiddify.register(cfg.profiles)                       # the backends get profile names; this maps them to Hiddify's file
+        return cfg

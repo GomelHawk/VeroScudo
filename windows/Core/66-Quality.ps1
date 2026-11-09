@@ -1,7 +1,8 @@
 ﻿# VeroScudo core, part 66: connection quality - optional checks through the tunnel while protected (config connectionCheck).
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 # Same rules on every platform (Linux/macOS: linux/veroscudo/quality.py; docs/ARCHITECTURE.md "Connection check"):
-#  - every intervalSeconds (10-100) the watchdog checks each address once: ping, or a TCP connection to a port;
+#  - every intervalSeconds (10-100) the watchdog checks each address once: ping, a TCP connection to a port, or HTTPS (a TLS
+#    handshake and one HEAD request without credentials - any HTTP answer counts: the real way to a web service);
 #  - every check counts: loss = failed checks / all checks of the last windowMinutes (1-10), never fewer than 3 rounds;
 #  - below 10 % lost: good; 10-50 %: unstable; above 50 %: bad;
 #  - no rating ("checking") until one full window has passed since the rating started: it starts over on every connect,
@@ -12,7 +13,17 @@ $script:CheckDefaultHost = '1.1.1.1'
 $script:CheckMinChecks = 3
 
 function New-VeroCheckTarget([string]$HostName, [string]$Method = 'tcp', [int]$Port = 443) {
-    [pscustomobject]@{ Host = $HostName; Method = $Method; Port = $(if ($Method -eq 'tcp') { $Port } else { 443 }) }
+    [pscustomobject]@{ Host = $HostName; Method = $Method; Port = $(if ($Method -in 'tcp', 'https') { $Port } else { 443 }) }
+}
+
+function Get-VeroCheckLabel($Target) {
+    <# How an address is named in the tooltip and the log: "host (ping)", "host:port", "host (HTTPS)" / "host:port (HTTPS)".
+       Pure (= Target.label on Linux/macOS). #>
+    switch ([string]$Target.Method) {
+        'ping'  { "$($Target.Host) (ping)" }
+        'https' { if ([int]$Target.Port -eq 443) { "$($Target.Host) (HTTPS)" } else { "$($Target.Host):$($Target.Port) (HTTPS)" } }
+        default { "$($Target.Host):$($Target.Port)" }
+    }
 }
 
 function ConvertFrom-VeroCheckConfig {
@@ -35,9 +46,9 @@ function ConvertFrom-VeroCheckConfig {
         $h = if ($t.PSObject.Properties['host']) { ([string]$t.host).Trim() } else { '' }
         if (-not $h -or -not (Test-VeroHost $h)) { throw "config.json: invalid connectionCheck host '$h'" }
         $m = if ($t.PSObject.Properties['method']) { ([string]$t.method).ToLowerInvariant() } else { 'tcp' }
-        if ($m -notin 'ping', 'tcp') { throw "config.json: connectionCheck method must be 'ping' or 'tcp'" }
+        if ($m -notin 'ping', 'tcp', 'https') { throw "config.json: connectionCheck method must be 'ping', 'tcp' or 'https'" }
         $port = 443
-        if ($m -eq 'tcp' -and $t.PSObject.Properties['port']) {
+        if ($m -in 'tcp', 'https' -and $t.PSObject.Properties['port']) {
             if (-not [int]::TryParse([string]$t.port, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { throw "config.json: connectionCheck port must be 1-65535 ($h)" }
         }
         New-VeroCheckTarget $h $m $port
@@ -52,7 +63,7 @@ function ConvertTo-VeroCheckObject {
     [CmdletBinding()] param([Parameter(Mandatory)]$Check)
     [ordered]@{
         enabled = [bool]$Check.Enabled; intervalSeconds = [int]$Check.IntervalSeconds; windowMinutes = [int]$Check.WindowMinutes
-        targets = @($Check.Targets | ForEach-Object { if ($_.Method -eq 'tcp') { [ordered]@{ host = $_.Host; method = 'tcp'; port = [int]$_.Port } } else { [ordered]@{ host = $_.Host; method = 'ping' } } })
+        targets = @($Check.Targets | ForEach-Object { if ($_.Method -in 'tcp', 'https') { [ordered]@{ host = $_.Host; method = [string]$_.Method; port = [int]$_.Port } } else { [ordered]@{ host = $_.Host; method = 'ping' } } })
     }
 }
 
@@ -94,10 +105,10 @@ function ConvertFrom-VeroCheckForm {
         if (-not $h) { if ($i -eq 1) { $h = $script:CheckDefaultHost } else { continue } }
         if (-not (Test-VeroHost $h)) { throw "Address ${i}: '$(([string]$r.Text).Trim())' is not an IP address, host name or URL." }
         $m = ([string]$r.Method).ToLowerInvariant(); if (-not $m) { $m = 'tcp' }
-        if ($m -notin 'ping', 'tcp') { throw "Address ${i}: choose Ping or TCP." }
+        if ($m -notin 'ping', 'tcp', 'https') { throw "Address ${i}: choose Ping, TCP port or HTTPS." }
         $p = if ($r.Port) { [int]$r.Port } else { 443 }
-        if ($m -eq 'tcp' -and $a.Port -and $p -eq 443) { $p = [int]$a.Port }
-        if ($m -eq 'tcp' -and ($p -lt 1 -or $p -gt 65535)) { throw "Address ${i}: the port must be 1-65535." }
+        if ($m -in 'tcp', 'https' -and $a.Port -and $p -eq 443) { $p = [int]$a.Port }
+        if ($m -in 'tcp', 'https' -and ($p -lt 1 -or $p -gt 65535)) { throw "Address ${i}: the port must be 1-65535." }
         $targets.Add((New-VeroCheckTarget $h $m $p))
     }
     if ($targets.Count -eq 0) { $targets.Add((New-VeroCheckTarget $script:CheckDefaultHost 'tcp' 443)) }
@@ -140,36 +151,69 @@ function Format-VeroQuality {
 }
 
 function Invoke-VeroProbeRound {
-    <# Every address once, in parallel: ping (ICMP echo) or a TCP connection. Returns one @{ Ok; RttMs } per target. #>
-    [CmdletBinding()] param([object[]]$Targets, [int]$TimeoutMs = 3000)
+    <# Every address once, in parallel: ping (ICMP echo) or a TCP connection. Returns one @{ Ok; RttMs } per target.
+       -Tls (Hiddify profiles): a TLS handshake instead, on the target's TCP port (443 for a ping target). Hiddify's TUN answers
+       pings and completes TCP handshakes itself, locally, also when none of its servers works (seen live: <1 ms to a
+       fake-DNS address) - only a real server can answer a TLS handshake. A certificate that does not match (a bare IP, a
+       private name) still proves the server answered: that counts as reached; a closed or reset connection does not. #>
+    [CmdletBinding()] param([object[]]$Targets, [int]$TimeoutMs = 3000, [switch]$Tls)
+    $anyHttps = @($Targets | Where-Object { $_.Method -eq 'https' }).Count -gt 0
+    if ($anyHttps -and $TimeoutMs -lt 5000) { $TimeoutMs = 5000 }          # TLS + one request: a few round trips
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $jobs = @(foreach ($t in $Targets) {
-        $j = @{ Target = $t; Task = $null; Client = $null; Ms = $null }
+        $j = @{ Target = $t; Task = $null; Client = $null; Ssl = $null; Stage = 'tcp'; Ms = $null; Ok = $false; Https = $false; Buf = $null }
         try {
-            if ($t.Method -eq 'ping') { $j.Client = New-Object System.Net.NetworkInformation.Ping; $j.Task = $j.Client.SendPingAsync([string]$t.Host, $TimeoutMs) }
+            $j.Https = ($t.Method -eq 'https')
+            if ($t.Method -eq 'ping' -and -not $Tls) { $j.Stage = 'ping'; $j.Client = New-Object System.Net.NetworkInformation.Ping; $j.Task = $j.Client.SendPingAsync([string]$t.Host, $TimeoutMs) }
             else {
+                $port = if ($t.Method -eq 'ping') { 443 } else { [int]$t.Port }
                 $fam = if ([string]$t.Host -match ':') { [System.Net.Sockets.AddressFamily]::InterNetworkV6 } else { [System.Net.Sockets.AddressFamily]::InterNetwork }
-                $j.Client = New-Object System.Net.Sockets.TcpClient($fam); $j.Task = $j.Client.ConnectAsync([string]$t.Host, [int]$t.Port)
+                $j.Client = New-Object System.Net.Sockets.TcpClient($fam); $j.Task = $j.Client.ConnectAsync([string]$t.Host, $port)
             }
         } catch { $j.Task = $null }
         $j
     })
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $pending = 0
-        foreach ($j in $jobs) { if ($j.Task -and $null -eq $j.Ms) { if ($j.Task.IsCompleted) { $j.Ms = $sw.ElapsedMilliseconds } else { $pending++ } } }
+        foreach ($j in $jobs) {
+            if (-not $j.Task -or $null -ne $j.Ms) { continue }
+            if (-not $j.Task.IsCompleted) { $pending++; continue }
+            $failed = $j.Task.IsFaulted -or $j.Task.IsCanceled
+            if ($j.Stage -eq 'tls' -and $j.Https -and -not $failed) {
+                try {                                                   # HTTPS: one HEAD request, no credentials - any HTTP answer counts
+                    $req = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: $($j.Target.Host)`r`nUser-Agent: VeroScudo`r`nConnection: close`r`n`r`n")
+                    $j.Ssl.Write($req, 0, $req.Length); $j.Ssl.Flush()
+                    $j.Buf = New-Object byte[] 64
+                    $j.Task = $j.Ssl.ReadAsync($j.Buf, 0, $j.Buf.Length); $j.Stage = 'http'; $pending++
+                } catch { $j.Ms = $sw.ElapsedMilliseconds }
+                continue
+            }
+            if ($j.Stage -eq 'tcp' -and ($Tls -or $j.Https) -and -not $failed -and $j.Client.Connected) {
+                try {                                                   # connected (maybe only to Hiddify's TUN): now the handshake
+                    $j.Ssl = New-Object System.Net.Security.SslStream($j.Client.GetStream(), $false)
+                    $j.Task = $j.Ssl.AuthenticateAsClientAsync([string]$j.Target.Host); $j.Stage = 'tls'; $pending++
+                } catch { $j.Ms = $sw.ElapsedMilliseconds }
+                continue
+            }
+            $j.Ms = $sw.ElapsedMilliseconds
+            switch ($j.Stage) {
+                'ping' { if (-not $failed -and [string]$j.Task.Result.Status -eq 'Success') { $j.Ok = $true; $j.Ms = [int]$j.Task.Result.RoundtripTime } }
+                'tcp'  { $j.Ok = (-not $failed) -and [bool]$j.Client.Connected }
+                'tls'  {
+                    $inner = if ($j.Task.Exception) { $j.Task.Exception.GetBaseException() } else { $null }
+                    $j.Ok = (-not $failed) -or ($inner -is [System.Security.Authentication.AuthenticationException])   # the server answered
+                }
+                'http' { $j.Ok = (-not $failed) -and [int]$j.Task.Result -ge 5 -and [Text.Encoding]::ASCII.GetString($j.Buf, 0, 5) -eq 'HTTP/' }
+            }
+        }
         if ($pending -eq 0) { break }
         Start-Sleep -Milliseconds 20
     }
     foreach ($j in $jobs) {
-        $ok = $false; $rtt = $null
-        if ($j.Task -and $null -ne $j.Ms -and -not $j.Task.IsFaulted -and -not $j.Task.IsCanceled) {
-            if ($j.Target.Method -eq 'ping') {
-                $r = $j.Task.Result
-                if ([string]$r.Status -eq 'Success') { $ok = $true; $rtt = [int]$r.RoundtripTime }
-            } else { $ok = [bool]$j.Client.Connected; if ($ok) { $rtt = [int]$j.Ms } }
-        }
+        $ok = [bool]($j.Ok -and $null -ne $j.Ms)
+        try { if ($j.Ssl) { $j.Ssl.Dispose() } } catch { Write-Verbose 'probe cleanup' }
         try { if ($j.Client -is [System.Net.Sockets.TcpClient]) { $j.Client.Close() } elseif ($j.Client) { $j.Client.Dispose() } } catch { Write-Verbose 'probe cleanup' }
-        [pscustomobject]@{ Ok = $ok; RttMs = $rtt }
+        [pscustomobject]@{ Ok = $ok; RttMs = $(if ($ok) { [int]$j.Ms } else { $null }) }
     }
 }
 
@@ -207,16 +251,18 @@ function Update-VeroQuality {
     if ($key -ne $script:QualityKey -or $down -gt $script:QualityStarted) {   # new connection, other profile or other rules: start over
         $script:QualitySamples.Clear(); $script:QualityKey = $key; $script:QualityStarted = $now; $script:QualityLast = ''
     }
-    $round = @(Invoke-VeroProbeRound -Targets $chk.Targets)
-    foreach ($r in $round) { $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs }) }
+    $hid = [string]$cfg.Type -eq 'hiddify'                                  # Hiddify answers ping/TCP itself: TLS handshakes instead
+    $round = @(Invoke-VeroProbeRound -Targets $chk.Targets -Tls:$hid -TimeoutMs $(if ($hid) { 5000 } else { 3000 }))
+    for ($ti = 0; $ti -lt $round.Count; $ti++) { $r = $round[$ti]; $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs; Ti = $ti }) }
     try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
     $win = Get-VeroCheckWindow $chk
     $keep = @($script:QualitySamples.ToArray() | Where-Object { ($now - [double]$_.T) -le ($win + 1) })   # .ToArray(): @(<List>) throws on PowerShell 5.1
     $script:QualitySamples.Clear(); foreach ($s in $keep) { $script:QualitySamples.Add($s) }
     $q = Measure-VeroQuality -Samples $script:QualitySamples.ToArray() -Now $now -WindowSeconds $win -Since $script:QualityStarted
     $p = (Get-VeroPath).Quality
+    $per = @(Get-VeroQualityPerTarget -Samples $script:QualitySamples.ToArray() -Targets @($chk.Targets) -Now $now -WindowSeconds $win)
     $json = [ordered]@{ profile = $cfg.Profile; state = $q.State; lossPct = $q.LossPct; rttMs = $q.RttMs; checks = $q.Checks; lost = $q.Lost
-                        intervalSeconds = $chk.IntervalSeconds; windowMinutes = $chk.WindowMinutes; updated = $now } | ConvertTo-Json -Compress
+                        intervalSeconds = $chk.IntervalSeconds; windowMinutes = $chk.WindowMinutes; updated = $now; targets = $per } | ConvertTo-Json -Compress -Depth 4
     [IO.File]::WriteAllText("$p.new", $json)
     Move-Item -LiteralPath "$p.new" -Destination $p -Force
     if ($q.State -ne 'checking' -and $q.State -ne $script:QualityLast) {
@@ -224,6 +270,15 @@ function Update-VeroQuality {
         $script:QualityLast = $q.State
     }
     [int]$chk.IntervalSeconds
+}
+
+function Get-VeroQualityPerTarget {
+    <# Each address's share of the window: @{ label; checks; lost } - the tooltip shows which address fails. Pure. #>
+    [CmdletBinding()] param([object[]]$Samples = @(), [object[]]$Targets = @(), [Parameter(Mandatory)][double]$Now, [Parameter(Mandatory)][double]$WindowSeconds)
+    for ($i = 0; $i -lt $Targets.Count; $i++) {
+        $mine = @($Samples | Where-Object { $_ -and $_.ContainsKey('Ti') -and $_.Ti -eq $i -and ($Now - [double]$_.T) -le $WindowSeconds })
+        [ordered]@{ label = (Get-VeroCheckLabel $Targets[$i]); checks = $mine.Count; lost = @($mine | Where-Object { -not $_.Ok }).Count }
+    }
 }
 
 function Read-VeroQuality {
@@ -236,6 +291,7 @@ function Read-VeroQuality {
     try {
         $age = $Now - [double]$j.updated
         if ($age -gt [Math]::Max(3 * [int]$j.intervalSeconds, 30) -or $age -lt -60) { return $null }
-        [pscustomobject]@{ State = [string]$j.state; LossPct = [double]$j.lossPct; RttMs = $(if ($null -ne $j.rttMs) { [int]$j.rttMs } else { $null }); Checks = [int]$j.checks; Lost = [int]$j.lost }
+        $per = @(if ($j.PSObject.Properties['targets']) { $j.targets | ForEach-Object { $_ } | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Label = [string]$_.label; Checks = [int]$_.checks; Lost = [int]$_.lost } } })
+        [pscustomobject]@{ State = [string]$j.state; LossPct = [double]$j.lossPct; RttMs = $(if ($null -ne $j.rttMs) { [int]$j.rttMs } else { $null }); Checks = [int]$j.checks; Lost = [int]$j.lost; Targets = $per }
     } catch { $null }
 }
