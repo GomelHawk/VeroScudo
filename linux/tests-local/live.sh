@@ -76,13 +76,25 @@ off_addrs() {
 }
 off_addr() { off_addrs | grep -Fxq -- "$1"; }
 off_list() { off_addrs | sort -u | paste -sd' '; }
-carries() {      # the tunnel carries traffic: an exit address not seen without VPN, within 20 s
+carries() {      # the tunnel carries traffic: an exit address not seen without VPN, within ~45 s
   local i x
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 15); do
     x=$(exit_ip); [ -n "$x" ] && ! off_addr "$x" && return 0
     sleep 1; : "$i"
   done
   return 1
+}
+
+kill_vpn() {     # the VPN dies: its process killed (WireGuard: its interface removed); TUN = the tunnel, "" when skipped
+  TUN=$(field tunnel)
+  case "$TYPE:$TUN" in
+    hiddify:*) pkill -KILL -i hiddify; say "killed Hiddify (tunnel $TUN)" ;;
+    wireguard:*) ip link delete dev "$TUN"; say "removed the WireGuard interface $TUN" ;;
+    openvpn:?*) pkill -KILL -x openvpn; say "killed openvpn (tunnel $TUN)" ;;
+    *:ppp*) pkill -KILL -x pppd; say "killed pppd (tunnel $TUN)" ;;
+    *:tun*|*:vpn*) pkill -KILL -x openconnect; say "killed openconnect (tunnel $TUN)" ;;
+    *) say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"; TUN="" ;;
+  esac
 }
 
 probe_loop() {   # one line per probe: time phase state-before state-after ip ping dns
@@ -112,6 +124,7 @@ probe_now() {   # one quick probe right now (the loop may miss a short blocked w
 # shellcheck disable=SC2329  # called by the EXIT trap
 cleanup() {
   [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null
+  nft delete table inet vstest 2>/dev/null && say "the test's own block of the VPN server removed"
   if [ -n "$NIC" ] && ! ip link show dev "$NIC" | grep -q '[<,]UP[,>]'; then ip link set dev "$NIC" up; say "network card $NIC brought back up"; fi
   rm -f "$SAMPLES" "$SAMPLES.phase" "$SAMPLES.target" "$SAMPLES.real"
 }
@@ -173,8 +186,8 @@ if [ "$TYPE" = hiddify ]; then
 else
   if t=$(wait_state protected 90); then say "protected after $t s"; else fail "not protected within 90 s"; fi
 fi
-sleep 15
-VPN_IP=$(exit_ip)
+VPN_IP=""
+for _ in $(seq 15); do VPN_IP=$(exit_ip); [ -n "$VPN_IP" ] && break; sleep 2; done   # up to ~45 s for the first answer
 say "exit address while protected: ${VPN_IP:-none}"
 [ -n "$VPN_IP" ] || fail "no answer through the tunnel"
 [ -z "$VPN_IP" ] || ! off_addr "$VPN_IP" || fail "exit address is the one without VPN - traffic does not go through the VPN"
@@ -199,15 +212,7 @@ sleep 10
 
 # ---- 3 The VPN dies
 phase 3-vpn-dies
-TUN=$(field tunnel)
-case "$TYPE:$TUN" in
-  hiddify:*) pkill -KILL -i hiddify; say "killed Hiddify (tunnel $TUN)" ;;
-  wireguard:*) ip link delete dev "$TUN"; say "removed the WireGuard interface $TUN" ;;
-  openvpn:?*) pkill -KILL -x openvpn; say "killed openvpn (tunnel $TUN)" ;;
-  *:ppp*) pkill -KILL -x pppd; say "killed pppd (tunnel $TUN)" ;;
-  *:tun*|*:vpn*) pkill -KILL -x openconnect; say "killed openconnect (tunnel $TUN)" ;;
-  *) say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"; TUN="" ;;
-esac
+kill_vpn
 if [ -n "$TUN" ]; then
   if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; probe_now; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
   if [ "$TYPE" = hiddify ]; then
@@ -245,6 +250,40 @@ carries || fail "protected, but the tunnel carries nothing"
 sleep 10
 
 # ---- 5 You hang up
+# ---- 4b The VPN server goes away while the network stays up: VeroScudo must stay blocked the whole time, nothing gets out
+if [ "$TYPE" != hiddify ]; then
+  phase 4b-unreachable
+  srv=$(nft list table inet veroscudo 2>/dev/null | grep -E 'daddr \{.*\} (udp|tcp) dport' | grep -v 'dport 53 ' \
+        | grep -oE '\{[^}]*\}' | tr -d '{},' | xargs)
+  if [ -z "$srv" ]; then
+    fail "no VPN server address found in the kill-switch"
+  else
+    v4=$(tr ' ' '\n' <<<"$srv" | grep -v : | paste -sd, -); v6=$(tr ' ' '\n' <<<"$srv" | grep : | paste -sd, -)
+    {
+      echo "table inet vstest {"
+      echo "  chain out { type filter hook output priority -50; policy accept;"
+      [ -n "$v4" ] && echo "    ip daddr { $v4 } drop"
+      [ -n "$v6" ] && echo "    ip6 daddr { $v6 } drop"
+      echo "  }"
+      echo "}"
+    } | nft -f - && say "VPN server unreachable (the test drops $srv)"
+    kill_vpn
+    if [ -n "$TUN" ]; then
+      if t=$(wait_state blocked 60); then
+        say "blocked $t s after the VPN died with its server unreachable"
+        for _ in 1 2 3; do probe_now; sleep 5; done                  # VeroScudo redials in vain meanwhile
+        [ "$(state)" = blocked ] || say "note: state '$(state)' while the server is unreachable"
+      else
+        fail "not blocked within 60 s with the VPN server unreachable (state '$(state)')"
+      fi
+    fi
+    nft delete table inet vstest && say "VPN server reachable again"
+    if t=$(wait_state protected 150); then say "protected again after $t s"; else fail "not protected again within 150 s"; fi
+    carries || fail "protected, but the tunnel carries nothing"
+  fi
+  sleep 10
+fi
+
 phase 5-hangup
 if [ "$TYPE" = hiddify ]; then
   say "Hiddify: your own disconnect keeps the block (step 2) - nothing more to do here"
