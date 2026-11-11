@@ -36,7 +36,19 @@ todo() { printf '\a'; say ">>> DO NOW: $*"; }                    # Hiddify: what
 field() { veroscudo status 2>/dev/null | awk -F' *: ' -v k="$1" '$1 == k {print $2; exit}'; }   # one line of the status
 state() { field state; }
 exit_ip() { curl -s --max-time 3 https://ifconfig.me || true; }
-fail() { FAILS+=("$PHASE: $*"); say "FAIL $PHASE: $*"; }
+fail() { FAILS+=("$PHASE: $*"); say "FAIL $PHASE: $*"; diag; }
+diag() {   # the network state at a failure, into the log - before anything changes it (no clipboard in a VM)
+  {
+    echo "--- state at the failure ($PHASE)"
+    veroscudo status 2>&1 | head -6
+    echo "ip rule:"; ip rule 2>&1
+    echo "routes:"; ip route show table all 2>&1 | grep -v -E "^(local|broadcast|multicast) |table local" | head -20
+    echo "WireGuard:"; wg show 2>&1 | grep -E "interface|endpoint|handshake|transfer" || echo "(none)"
+    echo "marks (NetworkManager 0xcafd / VeroScudo 0x5653):"; nft list ruleset 2>/dev/null | grep -c -E "cafd|0x5653"
+    echo "ping 1.1.1.1 (whatever is in force now):"; ping -c 2 -W 2 1.1.1.1 2>&1 | tail -2
+    echo "---"
+  } >> "$LOG" 2>&1
+}
 phase() { PHASE=$1; echo "$1" > "$SAMPLES.phase"; say "=== $1"; }
 
 wait_state() {   # $1 wanted state, $2 timeout s -> prints the seconds it took; 1 = timeout
