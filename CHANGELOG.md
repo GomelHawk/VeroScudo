@@ -5,6 +5,11 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed: Linux, macOS - restarting a silent WireGuard turned protection off
+- When a WireGuard tunnel had no handshake for 3 minutes, the guard took it down to start it fresh - and NetworkManager
+  reports that take-down as user-requested, so the guard read it as your Off and disarmed. Its own restart now carries
+  the same marker as Reconnect: it stays armed and blocked until the tunnel is back.
+
 ### Fixed: Linux - a WireGuard connection could not be imported
 - **"no peer endpoint in the connection"**, in the tray and with `sudo veroscudo import`, for a WireGuard connection that
   was not connected: its file was looked up with `nmcli connection show <name>`, which names the file only while the

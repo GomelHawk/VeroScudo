@@ -406,3 +406,26 @@ def test_connected_clears_the_password_pause(env):
 def test_nm_reason_names():
     assert nm.auth_reason("NO_SECRETS") == "missing" and nm.auth_reason("LOGIN_FAILED") == "rejected"
     assert nm.auth_reason("USER_DISCONNECTED") is None
+
+
+def test_restarting_a_silent_wireguard_is_not_your_off(env, monkeypatch):
+    """The guard takes a silent WireGuard down itself; NetworkManager reports that down as user-requested. It must not
+    disarm (it did: protection went off until the next On)."""
+    g, calls, _ = env
+    nm = calls["nm"]
+    g.arm()
+    stale = {"once": True}
+
+    def is_stale(p):
+        s, stale["once"] = stale["once"], False
+        return s
+    monkeypatch.setattr(nm, "is_stale", is_stale)
+    real_down = nm.down
+
+    def down(p):
+        real_down(p)
+        g.on_event_down(p, user_requested=True)            # what NetworkManager says about our own take-down
+        return True
+    monkeypatch.setattr(nm, "down", down)
+    g.reconnect()
+    assert g.store.armed and calls["up"] == ["Work"]
