@@ -86,6 +86,17 @@ probe_loop() {   # one line per probe: time phase state-before state-after ip pi
   done
 }
 
+probe_now() {   # one quick probe right now (the loop may miss a short blocked window: a fast redial)
+  local tgt s1 ip p d s2
+  tgt=$(cat "$SAMPLES.target")
+  s1=$(state); s1=${s1:-none}
+  ip=$(curl -s --max-time 2 https://ifconfig.me || true); [ -n "$ip" ] || ip=BLOCKED
+  if ping -c1 -W1 "$tgt" >/dev/null 2>&1; then p=ping-ok; else p=ping-blocked; fi
+  if dig +time=1 +tries=1 "@$tgt" example.com >/dev/null 2>&1; then d=dns-ok; else d=dns-blocked; fi
+  s2=$(state); s2=${s2:-none}
+  echo "$(date +%T) $(cat "$SAMPLES.phase") $s1 $s2 $ip $p $d" >> "$SAMPLES"
+}
+
 # shellcheck disable=SC2329  # called by the EXIT trap
 cleanup() {
   [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null
@@ -186,7 +197,7 @@ case "$TYPE:$TUN" in
   *) say "tunnel '${TUN:-none}': no VPN process to kill for this type - step skipped"; TUN="" ;;
 esac
 if [ -n "$TUN" ]; then
-  if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
+  if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; probe_now; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
   if [ "$TYPE" = hiddify ]; then
     todo "start Hiddify again and connect (VPN mode)"
     if t=$(wait_state protected 240); then say "protected $t s after the request"; else fail "not protected within 240 s"; fi

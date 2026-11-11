@@ -401,8 +401,9 @@ class Guard:
                     time.sleep(self.cfg.retry_seconds)
                     continue
                 if nm.is_stale(self.cfg.profile):            # WireGuard: activated but silent - take it down for a fresh start
-                    log.info("WireGuard '%s': no handshake for over 3 minutes - restarting it", self.cfg.profile)
-                    self.store.record_drop(self.cfg.profile, "no WireGuard handshake for 3 min")
+                    # stale = no handshake within 3 minutes, or none at all 30 s after it started (nm.wg_state)
+                    log.info("WireGuard '%s': silent - no recent handshake with its server - restarting it", self.cfg.profile)
+                    self.store.record_drop(self.cfg.profile, "WireGuard silent (no handshake)")
                     # our own take-down: NetworkManager reports it as user-requested - the renew marker keeps it from
                     # reading as your Off
                     self.renew_marker.write_text(str(time.time()))
