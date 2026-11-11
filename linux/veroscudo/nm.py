@@ -450,6 +450,38 @@ def wireguard_endpoint(keyfile_text: str) -> tuple[str, int]:
     return "", 0
 
 
+def connection_file(name: str) -> str:
+    """The keyfile of connection `name`, from the connection list - `nmcli connection show <name>` prints GENERAL.FILENAME
+    only while the connection is active, so an inactive WireGuard connection had no file and no endpoint."""
+    for line in _nmcli("-g", "NAME,FILENAME", "connection", "show").splitlines():
+        parts = re.split(r"(?<!\\):", line, maxsplit=1)
+        if len(parts) == 2 and unescape(parts[0]) == name:
+            return unescape(parts[1])
+    return ""
+
+
+def wireguard_endpoint_nm(name: str) -> tuple[str, int] | None:
+    """The first peer endpoint of WireGuard connection `name`, asked from NetworkManager itself (libnm). Works for the user
+    too - the connection file is root's only, so reading it failed in the tray and the connection looked unimportable.
+    None when libnm is missing or does not know it; ("", 0) when it has no peer endpoint."""
+    try:
+        import gi  # type: ignore
+        gi.require_version("NM", "1.0")
+        from gi.repository import NM  # type: ignore
+    except (ImportError, ValueError):
+        return None
+    try:
+        for c in NM.Client.new(None).get_connections():
+            if c.get_id() != name:
+                continue
+            s = c.get_setting_by_name("wireguard")
+            ep = s.get_peer(0).get_endpoint() if s is not None and s.get_peers_len() > 0 else None
+            return split_address(ep) if ep else ("", 0)
+    except Exception:  # noqa: BLE001 - any libnm trouble: fall back to the connection file
+        return None
+    return None
+
+
 def discover() -> list[dict]:
     """Every VPN / WireGuard connection NetworkManager knows, described for import (needs root for WireGuard endpoints),
     and Hiddify when the invoking user has it."""
@@ -461,12 +493,16 @@ def discover() -> list[dict]:
         name, ctype = parts[0].replace("\\:", ":"), parts[1]
         if ctype == "wireguard":
             d = {"name": name, "vpn_type": "wireguard", "server": "", "port": 51820, "protocol": "udp", "username": "", "note": ""}
-            path = unescape(_nmcli("-g", "GENERAL.FILENAME", "connection", "show", name))
-            try:
-                host, port = wireguard_endpoint(Path(path).read_text()) if path else ("", 0)
-            except OSError:
-                host, port = "", 0
-                d["note"] = "run as root to read the WireGuard endpoint"
+            ep = wireguard_endpoint_nm(name)
+            if ep is not None and ep[0]:
+                host, port = ep
+            else:                                      # no libnm: the connection file (root only)
+                path = connection_file(name)
+                try:
+                    host, port = wireguard_endpoint(Path(path).read_text()) if path else ("", 0)
+                except OSError:
+                    host, port = "", 0
+                    d["note"] = "run as root to read the WireGuard endpoint"
             d.update(server=host, port=port or 51820)
             if not host and not d["note"]:
                 d["note"] = "no peer endpoint in the connection"

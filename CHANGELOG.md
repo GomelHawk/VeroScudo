@@ -5,6 +5,12 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed: Linux - a WireGuard connection could not be imported
+- **"no peer endpoint in the connection"**, in the tray and with `sudo veroscudo import`, for a WireGuard connection that
+  was not connected: its file was looked up with `nmcli connection show <name>`, which names the file only while the
+  connection is active. The endpoint now comes from NetworkManager itself (libnm) - which also works in the tray, where
+  the root-only connection file cannot be read - and otherwise from the file the connection list names.
+
 ### Fixed: Linux - SSTP, L2TP and PPTP connections stayed blocked
 - **The VPN connected, but VeroScudo kept blocking everything.** For pppd-based NetworkManager plugins (SSTP, L2TP,
   PPTP) NetworkManager reports the card underneath (`eth0`) as the connection's interface, not the tunnel (`ppp0`).

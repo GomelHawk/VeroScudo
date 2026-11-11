@@ -159,3 +159,25 @@ def test_every_profile_gets_a_lasting_id_that_survives_a_rename():
     out = json.loads(importer.set_option(json.dumps(j), "updateCheck", "true"))
     assert out["profiles"][0]["id"] == profile_id("Work") and out["profiles"][2]["id"] not in ids
     assert len(out["profiles"][2]["id"]) == 12
+
+
+def test_wireguard_endpoint_comes_from_networkmanager_so_the_tray_can_import_it(monkeypatch):
+    """The connection file is root's only: as the user (the tray's import list) the endpoint must come from libnm, else
+    the WireGuard connection showed as 'no peer endpoint' and could not be picked."""
+    monkeypatch.setattr(nm.hiddify, "discover", list)
+    monkeypatch.setattr(nm, "_nmcli", lambda *a: "wg-home:wireguard\n" if a[:3] == ("-f", "NAME,TYPE", "connection") else "")
+    monkeypatch.setattr(nm, "wireguard_endpoint_nm", lambda name: ("203.0.113.9", 51821))
+    monkeypatch.setattr(nm, "Path", lambda p: pytest.fail("the root-only file must not be read"))
+    d = nm.discover()
+    assert d == [{"name": "wg-home", "vpn_type": "wireguard", "server": "203.0.113.9", "port": 51821, "protocol": "udp",
+                  "username": "", "note": ""}]
+
+
+def test_the_keyfile_of_an_inactive_connection_comes_from_the_connection_list(monkeypatch):
+    """`nmcli connection show <name>` prints GENERAL.FILENAME only while active: the list's FILENAME column is used."""
+    listing = "Office\\: L2TP:/etc/NetworkManager/system-connections/office.nmconnection\n" \
+              "wg-home:/etc/NetworkManager/system-connections/wg-home-1a2b.nmconnection\n"
+    monkeypatch.setattr(nm, "_nmcli", lambda *a: listing if a == ("-g", "NAME,FILENAME", "connection", "show") else "")
+    assert nm.connection_file("wg-home") == "/etc/NetworkManager/system-connections/wg-home-1a2b.nmconnection"
+    assert nm.connection_file("Office: L2TP") == "/etc/NetworkManager/system-connections/office.nmconnection"
+    assert nm.connection_file("nope") == ""
