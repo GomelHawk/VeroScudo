@@ -33,6 +33,6 @@ Export-ModuleMember -Function ConvertTo-VeroNetworkPrefix, Get-VeroVmAclRule, Se
     Get-VeroVersion, Test-VeroNewerVersion, Test-VeroReleaseUrl, Get-VeroLatestRelease, Set-VeroHome, Get-VeroPath,
     Get-VeroConfig, Get-VeroProfileId, Set-VeroProfileIds, ConvertTo-VeroConfigJson, Save-VeroConfig, Test-VeroCidr, Write-VeroLog, Test-VeroArmed, Set-VeroArmed, Set-VeroActiveProfile,
     Test-VeroVpnConnected, Get-VeroRasCode, Get-VeroRasVerdict, Get-VeroRasTermination, Get-VeroDecision, Resolve-VeroServerIp,
-    Get-VeroFilterSpec, Get-VeroTunnelLuid, Get-VeroDnsServer, Get-VeroWslLuid, Get-VeroSwitchLuid, Test-VeroVmWanted, Sync-VeroKillSwitch, Disable-VeroKillSwitch,
+    Get-VeroFilterSpec, Test-VeroUsableServerIp, Get-VeroTunnelLuid, Get-VeroDnsServer, Get-VeroWslLuid, Get-VeroSwitchLuid, Test-VeroVmWanted, Sync-VeroKillSwitch, Disable-VeroKillSwitch,
     Remove-VeroLegacyFirewall, Test-VeroKillSwitchPresent, Test-VeroNative, Import-VeroNative, Set-VeroVmAccess, Restore-VeroVmAccess,
     Get-VeroCredential, Invoke-VeroDial, Enter-VeroLock, Set-VeroWfpFilter, Get-VeroWfpCount, Clear-VeroWfpFilter, Invoke-VeroReconnect, Invoke-VeroCheck, Invoke-VeroSwitch, Get-VeroStatus, Invoke-VeroAction

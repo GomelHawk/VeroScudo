@@ -2388,3 +2388,10 @@ Describe 'Connection check: HTTPS method and per-address results' {
         finally { $l.Stop(); try { $null = $ps.EndInvoke($h) } catch { Write-Verbose 'listener stopped' }; $ps.Dispose() }
     }
 }
+
+Describe 'Server addresses: never a fake-DNS answer or loopback' {
+    It 'is the same rule as usable_server_ip on Linux/macOS' {
+        foreach ($bad in '198.18.0.81', '198.19.255.1', 'fc00::44', '127.0.0.1', '::1', '0.0.0.0', 'fe80::1', '224.0.0.1', 'x') { Test-VeroUsableServerIp $bad | Should -BeFalse -Because $bad }
+        foreach ($good in '203.0.113.5', '185.72.199.130', '10.0.0.5', '192.168.1.10', '2001:db8::1', 'fd00::5') { Test-VeroUsableServerIp $good | Should -BeTrue -Because $good }
+    }
+}

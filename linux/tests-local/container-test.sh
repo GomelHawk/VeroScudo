@@ -27,18 +27,27 @@ ct_sh() { docker exec "$NAME" sh -c "$1"; }
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# systemd-binfmt is masked: binfmt_misc is shared with the host kernel, and the container's systemd would clear the host's
+# registrations (on WSL that removes WSLInterop - no Windows program starts any more until it is registered again).
 # the Ubuntu mirrors sometimes fail a download from CI runners (apt exit 100): apt retries each download, and the whole
 # build is tried up to 3 times - a build that fails every time still fails the test
+# the build uses the host's network (its DNS and routes - Docker's own build DNS can fail on CI runner images); on a
+# failure apt's own error lines are shown (docker build -q hid them)
 build() {
-  docker build -q -t "$TAG" - >/dev/null <<EOF
+  local out
+  out=$(docker build --network=host --progress=plain -t "$TAG" - 2>&1 <<EOF
 FROM $IMAGE
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get -o Acquire::Retries=5 update -q \
     && apt-get -o Acquire::Retries=5 install -y -q systemd systemd-sysv dbus sudo python3 iproute2 procps network-manager \
+    && systemctl mask systemd-binfmt.service proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount \
     && useradd -m -s /bin/bash tester \
     && printf '[keyfile]\nunmanaged-devices=interface-name:eth0\n' > /etc/NetworkManager/conf.d/10-ct.conf
 CMD ["/sbin/init"]
 EOF
+) && return 0
+  echo "$out" | grep -E "(^| )(E:|Err:|W:)|Could not|Temporary failure|Unable to|ERROR" | tail -15
+  return 1
 }
 for try in 1 2 3; do
   build && break

@@ -10,11 +10,26 @@ from pathlib import Path
 IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")         # a Linux/BSD interface name, and nothing that could end a rule line
 
 
-def resolve(server: str) -> list[str]:
-    """Every address of the VPN host (both families), link-local left out; [] when the lookup fails (blocked, offline)."""
+# fake-DNS ranges of sing-box / Hiddify (an answer from such a proxy, never a real server)
+FAKE_IP_NETS = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("fc00::/18"))
+
+
+def usable_server_ip(addr: str) -> bool:
+    """An address a VPN server can really have: not link-local, loopback, unspecified, multicast, or a fake-DNS answer.
+    Private ranges stay allowed - a company VPN server can sit in the local network. Pure."""
     try:
-        return sorted({ai[4][0] for ai in socket.getaddrinfo(server, None, socket.AF_UNSPEC)
-                       if not ipaddress.ip_address(ai[4][0].split("%")[0]).is_link_local})
+        ip = ipaddress.ip_address(addr.split("%")[0])
+    except ValueError:
+        return False
+    if ip.is_link_local or ip.is_loopback or ip.is_unspecified or ip.is_multicast:
+        return False
+    return not any(ip.version == n.version and ip in n for n in FAKE_IP_NETS)
+
+
+def resolve(server: str) -> list[str]:
+    """Every usable address of the VPN host (both families); [] when the lookup fails (blocked, offline)."""
+    try:
+        return sorted({ai[4][0] for ai in socket.getaddrinfo(server, None, socket.AF_UNSPEC) if usable_server_ip(ai[4][0])})
     except OSError:
         return []
 

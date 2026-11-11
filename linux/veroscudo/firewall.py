@@ -107,13 +107,18 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 if lst:
                     lines += [f"    {fam} daddr {{ {', '.join(lst)} }} udp dport 53 {keep}",
                               f"    {fam} daddr {{ {', '.join(lst)} }} tcp dport 53 {keep}"]
+    # WireGuard (NetworkManager): its packets carry fwmark 0xcafd, which NetworkManager saves into the conntrack mark
+    # (mangle OUTPUT, before this chain) and restores on the server's replies so they are routed outside the tunnel.
+    # Setting VeroScudo's ct mark here would overwrite it: the replies would be routed wrongly and dropped. So the
+    # WireGuard server's own address and port are allowed without our mark, and its replies explicitly in input.
+    wg = cfg.current.vpn_type == "wireguard"
     for fam, lst in (("ip", srv4), ("ip6", srv6)):
         if not lst:
             continue
         for proto, ports in server_rules(cfg.current):                  # VPN control/data channel + redialing, per VPN type
             if ports:
                 plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
-                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {keep}")
+                lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {'accept' if wg else keep}")
             else:
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} {keep}")
     for ver, port, protos, addrs in group_endpoints(endpoints):        # Hiddify: its servers and direct DNS servers
@@ -144,6 +149,9 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
             for proto, ports in server_rules(cfg.current):
                 if not ports:
                     lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} meta l4proto {proto} accept")
+                elif wg:                                                 # WireGuard: the server's replies (see output)
+                    plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
+                    lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} {proto} sport {plist} accept")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):                       # lanAllow: both directions
         for cidr in lst:
             lines.append(f"    {fam} saddr {cidr} accept")

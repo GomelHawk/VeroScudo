@@ -9,6 +9,7 @@ from pathlib import Path
 from . import hiddify, quality, stats
 from .backend import firewall, nm
 from .config import Config, config_path
+from .netutil import usable_server_ip
 from .state import Decision, StateStore, decide
 
 log = logging.getLogger("veroscudo")
@@ -88,7 +89,7 @@ class Guard:
         if cfg.current.vpn_type == hiddify.KIND:
             return []                                          # its servers are endpoints (hiddify_endpoints)
         ips = self.cached_server_ips(cfg) or self.lookup_server_ips(cfg)
-        live = [ip for ip in nm.live_endpoints(cfg.profile) if ip not in ips]
+        live = [ip for ip in nm.live_endpoints(cfg.profile) if ip not in ips and usable_server_ip(ip)]
         if live:                                               # WireGuard: the address it really uses (its own lookup)
             ips = list(dict.fromkeys(live + ips))[:8]
             self.store.server_cache(cfg.profile).write_text("\n".join(ips))
@@ -111,7 +112,7 @@ class Guard:
         """The last known addresses of the profile's server: the per-profile cache, else the 1.0 single file, else []."""
         for f in (self.store.server_cache(cfg.profile), self.store.server_ip):
             if f.exists():
-                return f.read_text().split()
+                return [ip for ip in f.read_text().split() if usable_server_ip(ip)]   # an older cache may hold fake-DNS answers
         return []
 
     def _say_once(self, topic: str, msg: str | None, level: int = logging.WARNING) -> None:

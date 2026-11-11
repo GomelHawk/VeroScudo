@@ -138,6 +138,23 @@ function Get-VeroSpecFingerprint([object[]]$Specs) {
     -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') })
 }
 
+function Test-VeroUsableServerIp {
+    <# An address a VPN server can really have: not link-local, loopback, unspecified, multicast, or a fake-DNS answer of
+       sing-box / Hiddify (198.18.0.0/15, fc00::/18). Private ranges stay allowed - a company VPN server can sit in the
+       local network. Pure (= usable_server_ip on Linux/macOS). #>
+    [CmdletBinding()] param([string]$Address)
+    $a = $null
+    if (-not [System.Net.IPAddress]::TryParse(($Address -split '%')[0], [ref]$a)) { return $false }
+    $b = $a.GetAddressBytes()
+    if ($a.AddressFamily -eq 'InterNetwork') {
+        if ($b[0] -eq 127 -or $b[0] -eq 0 -or $b[0] -ge 224 -or ($b[0] -eq 169 -and $b[1] -eq 254)) { return $false }
+        if ($b[0] -eq 198 -and ($b[1] -eq 18 -or $b[1] -eq 19)) { return $false }
+        return $true
+    }
+    if ($a.IsIPv6LinkLocal -or $a.IsIPv6Multicast -or $a.Equals([System.Net.IPAddress]::IPv6Loopback) -or $a.Equals([System.Net.IPAddress]::IPv6Any)) { return $false }
+    -not ($b[0] -eq 0xfc -and $b[1] -eq 0 -and ($b[2] -band 0xc0) -eq 0)
+}
+
 function Resolve-VeroServerIp {
     <# Pinned serverIps win. Otherwise resolve and merge with the cache (newest first, at most 8): a VPN host that moves
        keeps working, and a lookup that fails while blocked still leaves the last known addresses.
@@ -146,12 +163,12 @@ function Resolve-VeroServerIp {
     if (@($Config.ServerIps).Count -gt 0) { return @($Config.ServerIps) }
     $p = Get-VeroPath -VpnProfile $Config.Profile
     # [string]: Get-Content tags each line with its file path, and ConvertTo-Json would write those tags into wfp.json
-    $cached = @(if (Test-Path $p.ServerIp) { Get-Content $p.ServerIp | Where-Object { $_ } | ForEach-Object { [string]$_ } })
+    $cached = @(if (Test-Path $p.ServerIp) { Get-Content $p.ServerIp | Where-Object { $_ } | ForEach-Object { [string]$_ } | Where-Object { Test-VeroUsableServerIp $_ } })
     if ($CacheOnly) { return $cached }
     $fresh = @()
     try {
-        $fresh = @([System.Net.Dns]::GetHostAddresses($Config.Server) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' -and -not $_.IsIPv6LinkLocal } |
-                   ForEach-Object { $_.IPAddressToString })
+        $fresh = @([System.Net.Dns]::GetHostAddresses($Config.Server) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } |
+                   ForEach-Object { $_.IPAddressToString } | Where-Object { Test-VeroUsableServerIp $_ })
     } catch { Write-Verbose "DNS lookup of $($Config.Server) failed: $($_.Exception.Message)" }
     $all = @(@($fresh) + @($cached) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
     if ($all.Count -gt 0 -and (($all -join ',') -ne ($cached -join ','))) { Set-Content -Path $p.ServerIp -Value $all }
@@ -405,10 +422,10 @@ function Resolve-VeroEndpoint {
     $out = foreach ($r in $remotes) {
         $a = $null
         $ips = if ([System.Net.IPAddress]::TryParse($r.Host, [ref]$a)) { @($r.Host) } else {
-            $cached = @($cache[$r.Host] | Where-Object { $_ })
+            $cached = @($cache[$r.Host] | Where-Object { $_ -and (Test-VeroUsableServerIp ([string]$_)) })
             if ($CacheOnly) { $cached } else {
                 $fresh = @()
-                try { $fresh = @([System.Net.Dns]::GetHostAddresses($r.Host) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' -and -not $_.IsIPv6LinkLocal } | ForEach-Object { $_.IPAddressToString }) }
+                try { $fresh = @([System.Net.Dns]::GetHostAddresses($r.Host) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString } | Where-Object { Test-VeroUsableServerIp $_ }) }
                 catch { Write-Verbose "DNS lookup of $($r.Host) failed: $($_.Exception.Message)" }
                 $all = @(@($fresh) + @($cached) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
                 if (($all -join ',') -ne ($cached -join ',')) { $cache[$r.Host] = $all; $changed = $true }

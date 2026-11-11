@@ -5,6 +5,22 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed: Linux - WireGuard protected, but carried nothing (conntrack mark)
+- NetworkManager saves WireGuard's packet mark (0xcafd) in the connection-tracking mark and restores it on the server's
+  replies, so they are routed outside the tunnel. VeroScudo's kill-switch overwrote that mark with its own, the replies
+  were routed wrongly and dropped. The WireGuard server's address and port are now allowed without VeroScudo's mark, and
+  its replies are allowed explicitly; every other VPN type is unchanged.
+
+### Fixed: server addresses are never fake-DNS answers (Windows, Linux, macOS)
+- A proxy such as Hiddify with fake DNS answers every lookup with an address from 198.18.0.0/15 or fc00::/18; such
+  answers, loopback, unspecified and multicast addresses no longer enter or leave the server address cache. Private
+  ranges stay allowed (a company VPN server in the local network).
+
+### Test container (CI and local)
+- The image build uses the host's network and shows apt's own error lines when it fails; downloads are retried.
+- The container's systemd-binfmt is masked: binfmt_misc is shared with the host kernel, and the container cleared the
+  host's registrations - on WSL that removed WSLInterop, so no Windows program started any more.
+
 ### Fixed: Linux - WireGuard protected, but carried nothing
 - With a server name that has changing addresses (DNS round robin), WireGuard looks the name up itself and can get
   another address than VeroScudo - the kill-switch then blocked WireGuard's own packets. The guard now also allows the
