@@ -27,14 +27,24 @@ ct_sh() { docker exec "$NAME" sh -c "$1"; }
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-docker build -q -t "$TAG" - >/dev/null <<EOF
+# the Ubuntu mirrors sometimes fail a download from CI runners (apt exit 100): apt retries each download, and the whole
+# build is tried up to 3 times - a build that fails every time still fails the test
+build() {
+  docker build -q -t "$TAG" - >/dev/null <<EOF
 FROM $IMAGE
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -q && apt-get install -y -q systemd systemd-sysv dbus sudo python3 iproute2 procps network-manager \
+RUN apt-get -o Acquire::Retries=5 update -q \
+    && apt-get -o Acquire::Retries=5 install -y -q systemd systemd-sysv dbus sudo python3 iproute2 procps network-manager \
     && useradd -m -s /bin/bash tester \
     && printf '[keyfile]\nunmanaged-devices=interface-name:eth0\n' > /etc/NetworkManager/conf.d/10-ct.conf
 CMD ["/sbin/init"]
 EOF
+}
+for try in 1 2 3; do
+  build && break
+  [ "$try" -lt 3 ] || { echo "the test image could not be built (package download failed 3 times)"; exit 1; }
+  echo "image build failed (attempt $try) - retrying in 20 s"; sleep 20
+done
 docker run -d --name "$NAME" --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock -v "$ROOT:/src:ro" "$TAG" >/dev/null
 for _ in $(seq 60); do in_ct systemctl is-active -q NetworkManager 2>/dev/null && break; sleep 1; done
 
