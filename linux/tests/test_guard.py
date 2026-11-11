@@ -410,7 +410,7 @@ def test_nm_reason_names():
 
 def test_restarting_a_silent_wireguard_is_not_your_off(env, monkeypatch):
     """The guard takes a silent WireGuard down itself; NetworkManager reports that down as user-requested. It must not
-    disarm (it did: protection went off until the next On)."""
+    disarm."""
     g, calls, _ = env
     nm = calls["nm"]
     g.arm()
@@ -429,3 +429,22 @@ def test_restarting_a_silent_wireguard_is_not_your_off(env, monkeypatch):
     monkeypatch.setattr(nm, "down", down)
     g.reconnect()
     assert g.store.armed and calls["up"] == ["Work"]
+
+
+def test_wireguard_endpoint_it_really_uses_is_allowed_and_cached(env, monkeypatch):
+    """A server name with changing addresses: WireGuard looks it up itself and may get another address than VeroScudo. The
+    address the tunnel really uses is allowed and cached."""
+    g, calls, connected = env
+    nm = calls["nm"]
+    connected.add("Work")
+    monkeypatch.setattr(nm, "live_endpoints", lambda p: ["198.51.100.77"] if p == "Work" else [])
+    g.arm()
+    assert "198.51.100.77" in calls["apply"][-1]
+    assert "198.51.100.77" in g.cached_server_ips(g.cfg)                     # also for the next redial, before the interface exists
+
+
+def test_wg_show_endpoints_parsing():
+    from veroscudo import nm as realnm
+    text = "W31EZNwNi1bhP+Y1L+8QU6Q5snHFJWg+neN7J7934wQ=\t203.0.113.30:3389\nAbc=\t(none)\nDef=\t[2001:db8::7]:51820\n"
+    assert realnm.parse_wg_endpoints(text) == ["203.0.113.30", "2001:db8::7"]
+    assert realnm.parse_wg_endpoints("") == []

@@ -211,6 +211,7 @@ def guard(request, tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "nm", vpn)
     connected = {"up": True}
     monkeypatch.setattr(vpn, "is_connected", lambda p: connected["up"])
+    monkeypatch.setattr(vpn, "resolve", lambda s: ["203.0.113.5"])       # never the real DNS in a unit test
     rounds = []
     monkeypatch.setattr(quality, "run_round", lambda targets, tls=False: rounds.append(targets) or [(True, 20)] * len(targets))
     store = StateStore(tmp_path / "run", tmp_path / "lib")

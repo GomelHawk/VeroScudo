@@ -5,6 +5,12 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed: Linux - WireGuard protected, but carried nothing
+- With a server name that has changing addresses (DNS round robin), WireGuard looks the name up itself and can get
+  another address than VeroScudo - the kill-switch then blocked WireGuard's own packets. The guard now also allows the
+  address the tunnel really uses (`wg show <interface> endpoints`), caches it for the next redial, and applies the rules
+  again right after each redial brings the interface up.
+
 ### Fixed: Linux, macOS - restarting a silent WireGuard turned protection off
 - When a WireGuard tunnel had no handshake for 3 minutes, the guard took it down to start it fresh - and NetworkManager
   reports that take-down as user-requested, so the guard read it as your Off and disarmed. Its own restart now carries

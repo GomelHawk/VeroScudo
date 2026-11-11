@@ -160,6 +160,10 @@ def parse_bridges(text: str) -> list[str]:
     return out
 
 
+def live_endpoints(profile: str) -> list[str]:
+    return []                             # the macOS VPN services here are IKEv2/L2TP/IPSec: their server is the profile's
+
+
 def vm_bridges() -> list[str]:
     try:
         r = subprocess.run(["ifconfig"], check=False, capture_output=True, text=True, timeout=10)

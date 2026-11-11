@@ -121,6 +121,37 @@ def wg_handshakes(ifname: str) -> list[int] | None:
     return out
 
 
+def parse_wg_endpoints(text: str) -> list[str]:
+    """`wg show <if> endpoints` ("<peer key>\t<ip>:<port>" per peer, "(none)" before the first handshake) -> the IPs. Pure."""
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[1] == "(none)":
+            continue
+        host, _port = split_address(parts[1])
+        try:
+            out.append(str(ipaddress.ip_address(host)))
+        except ValueError:
+            continue
+    return list(dict.fromkeys(out))
+
+
+def live_endpoints(profile: str) -> list[str]:
+    """The server addresses a WireGuard tunnel really uses right now (root). The kill-switch allows them too: with a server
+    name that has changing addresses (DNS round robin), WireGuard's own lookup can differ from VeroScudo's, and its
+    packets would be blocked. [] for other kinds, without `wg`, or when the interface does not exist."""
+    if kind(profile) != "wireguard":
+        return []
+    ifname = iface(profile) or _nmcli("-g", "connection.interface-name", "connection", "show", profile)
+    if not ifname or not _IFNAME.match(ifname):
+        return []
+    try:
+        r = subprocess.run(["wg", "show", ifname, "endpoints"], check=False, capture_output=True, text=True)
+    except OSError:
+        return []
+    return parse_wg_endpoints(r.stdout) if r.returncode == 0 else []
+
+
 def wg_health(profile: str) -> str:
     """WireGuard: 'up' | 'starting' | 'stale'; 'unknown' when the handshakes cannot be read (then the activation state rules)."""
     ifname = iface(profile)

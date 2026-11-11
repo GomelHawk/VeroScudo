@@ -87,7 +87,13 @@ class Guard:
             return list(cfg.server_ips)
         if cfg.current.vpn_type == hiddify.KIND:
             return []                                          # its servers are endpoints (hiddify_endpoints)
-        return self.cached_server_ips(cfg) or self.lookup_server_ips(cfg)
+        ips = self.cached_server_ips(cfg) or self.lookup_server_ips(cfg)
+        live = [ip for ip in nm.live_endpoints(cfg.profile) if ip not in ips]
+        if live:                                               # WireGuard: the address it really uses (its own lookup)
+            ips = list(dict.fromkeys(live + ips))[:8]
+            self.store.server_cache(cfg.profile).write_text("\n".join(ips))
+            log.info("WireGuard '%s' uses %s - allowed and cached", cfg.profile, ", ".join(live))
+        return ips
 
     def lookup_server_ips(self, cfg: Config) -> list[str]:
         """Resolve and merge with the cache (newest first, at most 8): a moved VPN host keeps working and a lookup that
@@ -397,10 +403,11 @@ class Guard:
                     log.info("WireGuard '%s': no handshake for over 3 minutes - restarting it", self.cfg.profile)
                     self.store.record_drop(self.cfg.profile, "no WireGuard handshake for 3 min")
                     # our own take-down: NetworkManager reports it as user-requested - the renew marker keeps it from
-                    # reading as your Off (without it the guard disarmed itself here)
+                    # reading as your Off
                     self.renew_marker.write_text(str(time.time()))
                     nm.down(self.cfg.profile)
                 if nm.up(self.cfg.profile):
+                    self.enable_killswitch(tunnel_up=False)    # WireGuard: allow the address it just looked up itself
                     nm.wait_connected(self.cfg.profile)
                 if nm.is_connected(self.cfg.profile):
                     if self.cfg.current.vpn_type == hiddify.KIND:
