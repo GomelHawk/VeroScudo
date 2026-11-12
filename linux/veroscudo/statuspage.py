@@ -2,8 +2,11 @@
 and the macOS tray, the same rules as the Windows tray.
 
 Opt-in, per user (tray.json: `statusPage`, `statusPageUrl` - saved at once, no administrator's password). An Atlassian
-Statuspage summary (…/api/v2/status.json; Anthropic's by default) is fetched in a background thread every 5 minutes while
-the option is on, once when it is turned on and once when the status window opens; 6 s per request. Nothing is sent but a
+Statuspage summary (…/api/v2/status.json; Claude's by default) is fetched in a background thread once after each connect,
+when the option is turned on and on Refresh; 6 s per request. A fetch after a connect that fails is retried after 10 s and
+30 s ("checking..." meanwhile) - a tunnel that has just come up may not carry traffic yet; when the retries fail too, the
+last good answer stays shown with its time (the failure in the tooltip), like the exit location. A failed Refresh shows
+"not reachable" - you asked for a fresh answer. Nothing is sent but a
 plain GET (no account, no key, no cookies). The status window shows it as a card under the exit location - a badge (OK, !,
 !!, ?) coloured by the page's indicator, the page's name, "{description} · {HH:MM}" and a Refresh link; the Copy report gets a
 Service line."""
@@ -20,12 +23,14 @@ from urllib.parse import urlsplit
 from . import keepawake
 
 PREF_ON, PREF_URL = "statusPage", "statusPageUrl"
-DEFAULT_URL = "https://status.anthropic.com/api/v2/status.json"
+DEFAULT_URL = "https://status.claude.com/api/v2/status.json"
+OLD_DEFAULT = "https://status.anthropic.com/api/v2/status.json"   # redirects to DEFAULT_URL (an extra round trip): read as it
+RETRY_AFTER = (10.0, 30.0)  # a failed fetch after a connect: tried again after these seconds
 MAX_URL = 300
 INTERVAL = 300.0            # seconds between two fetches while on
 TIMEOUT = 6.0
 BAD_URL = "The status page must be an https:// address"
-ABOUT = "Atlassian Statuspage format (…/api/v2/status.json) - Anthropic's by default."
+ABOUT = "Atlassian Statuspage format (…/api/v2/status.json) - Claude's by default."
 LABEL = "Show a service status page in the status window"
 TONES = {"none": "good", "minor": "warn", "major": "bad", "critical": "bad"}
 
@@ -81,11 +86,13 @@ class ServiceView:
     right: str = ""
 
 
-def service_view(result: dict | None, url: str, checked: float | None = None, checking: bool = False) -> ServiceView:
+def service_view(result: dict | None, url: str, checked: float | None = None, checking: bool = False,
+                 failed: str = "") -> ServiceView:
     """The status window's service card. result: parse()'s answer, {'error': why} or None (not fetched yet); checking: a fetch
-    runs right now (Refresh) - the right-hand text says so. Pure (apart from the local time zone)."""
+    runs right now or a retry is due - the right-hand text says so; failed: a later check failed while `result` (an older
+    good answer) stays shown - it goes into the tooltip. Pure (apart from the local time zone)."""
     hhmm = time.strftime("%H:%M", time.localtime(checked)) if checked else "?"
-    tip = f"checked {hhmm} from {url}"
+    tip = f"checked {hhmm} from {url}" + (f"\nlater check failed: {failed}" if failed else "")
     host = host_of(url)
     if result is None:                                    # checked after each connect and on Refresh (as the exit location)
         word = "checking..." if checking else "not checked yet"
@@ -143,6 +150,10 @@ class StatusFetch:
         self.result: dict | None = None
         self.checked: float | None = None
         self.url_checked = ""
+        self.failed = ""                  # an automatic check failed while an older good answer stays shown
+        self._good: tuple[dict, float, str] | None = None     # the last good answer: (result, time, url)
+        self._retry: list[float] = []     # the retries left of the current automatic check
+        self._retry_at: float | None = None
         self._job: dict | None = None
 
     def enabled(self) -> bool:
@@ -150,7 +161,7 @@ class StatusFetch:
 
     def url(self) -> str:
         u = keepawake.get_pref(PREF_URL, DEFAULT_URL, self.pref)
-        return u if isinstance(u, str) and not url_error(u) else DEFAULT_URL
+        return u if isinstance(u, str) and not url_error(u) and u != OLD_DEFAULT else DEFAULT_URL
 
     def set_enabled(self, on: bool) -> None:
         keepawake.set_pref(PREF_ON, bool(on), self.pref)
@@ -172,13 +183,16 @@ class StatusFetch:
 
     @property
     def checking(self) -> bool:
-        return self._job is not None
+        return self._job is not None or self._retry_at is not None
 
-    def start(self, now: float | None = None) -> bool:
+    def start(self, now: float | None = None, auto: bool = False) -> bool:
+        """A fetch now. auto: after a connect - retried on failure (RETRY_AFTER), else a fresh request (Refresh)."""
         if not self.enabled() or self._job is not None:
             return False
+        if not auto:
+            self._retry, self._retry_at = [], None
         url = self.url()
-        job: dict = {"url": url, "started": time.time() if now is None else now, "result": None}
+        job: dict = {"url": url, "started": time.time() if now is None else now, "result": None, "auto": auto}
 
         def run() -> None:
             job["result"] = fetch(url, self._get)
@@ -191,28 +205,48 @@ class StatusFetch:
         now = time.time() if now is None else now
         return self.enabled() and self._job is None and (self.checked is None or now - self.checked >= INTERVAL)
 
+    def _finish(self, job: dict, result: dict, now: float) -> None:
+        self._job = None
+        if not result.get("error"):
+            self.result, self.checked, self.url_checked, self.failed = result, now, job["url"], ""
+            self._good, self._retry = (result, now, job["url"]), []
+            return
+        if job.get("auto") and self._retry:                   # a fresh tunnel may not carry traffic yet: try again
+            self._retry_at = now + self._retry.pop(0)
+            return
+        good = self._good
+        if job.get("auto") and good and good[2] == job["url"]:   # keep the last good answer, like the exit location
+            self.result, self.checked, self.url_checked = good
+            self.failed = str(result["error"])
+            return
+        self.result, self.checked, self.url_checked, self.failed = result, now, job["url"], ""
+
     def poll(self, now: float | None = None) -> bool:
         """Collects a finished fetch; True when there is something new to show."""
+        now = time.time() if now is None else now
         job = self._job
         if job is None or job["result"] is None:
-            if job is not None and (time.time() if now is None else now) - job["started"] > 3 * TIMEOUT:
-                self._job, self.result, self.checked = None, {"error": f"no answer within {TIMEOUT:g} s"}, job["started"]
-                self.url_checked = job["url"]
+            if job is not None and now - job["started"] > 3 * TIMEOUT:
+                self._finish(job, {"error": f"no answer within {TIMEOUT:g} s"}, now)
                 return True
             return False
-        self._job = None
-        self.result, self.url_checked = job["result"], job["url"]
-        self.checked = time.time() if now is None else now
+        self._finish(job, job["result"], now)
         return True
 
     def tick(self, now: float | None = None) -> bool:
-        """The tray's timer: collects a finished fetch. No fetch of its own: the same rules as the exit location - once after
-        each connect (on_connected) and on Refresh. True when the view changed."""
-        return self.poll(now)
+        """The tray's timer: collects a finished fetch and starts a retry that is due. No fetch of its own otherwise: the
+        same rules as the exit location - once after each connect (on_connected) and on Refresh. True when the view changed."""
+        now = time.time() if now is None else now
+        changed = self.poll(now)
+        if self._retry_at is not None and now >= self._retry_at:
+            self._retry_at = None
+            changed = self.start(now, auto=True) or changed
+        return changed
 
-    def on_connected(self) -> bool:
-        """VeroScudo reached Protected (a connect, a reconnect, a switch): look again, through the new tunnel."""
-        return self.start()
+    def on_connected(self, now: float | None = None) -> bool:
+        """VeroScudo reached Protected (a connect, a reconnect, a switch): look again, through the new tunnel - retried."""
+        self._retry, self._retry_at = list(RETRY_AFTER), None
+        return self.start(now, auto=True)
 
     def view(self) -> ServiceView | None:
         if not self.enabled():
@@ -220,7 +254,7 @@ class StatusFetch:
         url = self.url()
         if self.result is None or self.url_checked != url:
             return service_view(None, url, checking=self.checking)
-        return service_view(self.result, url, self.checked, self.checking)
+        return service_view(self.result, url, self.checked, self.checking, self.failed)
 
     def refresh(self) -> bool:
         """The card's Refresh link: a fetch now (unless one already runs or the option is off)."""

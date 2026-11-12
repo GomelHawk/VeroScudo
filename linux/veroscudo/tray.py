@@ -217,6 +217,8 @@ class Windows:
         # Clear empties this view only: the log stays (the record of what happened; root-owned, rotates by itself).
         # Open log still shows everything.
         evh.pack_end(self._link("Clear", self.app.clear_events), False, False, 0)
+        copy = self._link("Copy", self._copy)                # the report (state, exit, service, last events) to the clipboard
+        evh.pack_end(copy, False, False, 0)
         box.pack_start(evh, False, False, 0)
         tv = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
         sw = Gtk.ScrolledWindow()
@@ -224,9 +226,9 @@ class Windows:
         sw.set_shadow_type(Gtk.ShadowType.IN)
         sw.add(tv)
         box.pack_start(sw, True, True, 0)
-        onoff, redo, _log, copy = self._buttons(
+        onoff, redo, _log, _stats = self._buttons(
             box, ("Turn VPN on", lambda: self.app.toggle_on_off(), False), ("Reconnect", lambda: self.app.act("reconnect"), False),
-            ("Open log", lambda: self.app.open_log(), False), ("Copy report", self._copy, True))
+            ("Open log", lambda: self.app.open_log(), False), ("Statistics", self.show_stats, False))
         self.status = w
         self._st = {"img": img, "title": title, "text": text, "grid": grid, "tv": tv, "sw": sw, "onoff": onoff, "redo": redo,
                     "copy": copy, "rows": None, "loc": loc, "badge": badge, "place": place, "right": right, "other": other,
@@ -241,7 +243,7 @@ class Windows:
 
     def _copy(self) -> None:
         self.app.copy_report()
-        self._st["copy"].set_label("Copied")
+        self._st["copy"].set_markup("<small><a href='#'>Copied</a></small>")
 
     def update_status(self) -> None:
         if not self.status:

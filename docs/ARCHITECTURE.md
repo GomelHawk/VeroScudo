@@ -402,12 +402,15 @@ how long the profile was connected that day and *good %* (the share of that time
 
 ## Service status page
 
-Optional, per user (Settings > Connection, saved at once): an Atlassian Statuspage `.../api/v2/status.json` - Anthropic's
-by default - fetched by the tray by the same rules as the exit location: once after each connect (Protected) and on
-*Refresh* (6 s timeout). Shown as a card under the exit location, in the same style - it is secondary information, so the
+Optional, per user (Settings > Connection, saved at once): an Atlassian Statuspage `.../api/v2/status.json` -
+`status.claude.com` by default (the old default `status.anthropic.com` redirects there and is read as it) - fetched by the
+tray by the same rules as the exit location: once after each connect (Protected) and on *Refresh* (6 s timeout). A
+tunnel that has just come up may not carry traffic yet: a failed fetch after a connect is retried after 10 s and 30 s
+(*checking...* meanwhile); when those fail too, the last good answer stays shown with its time and the failure goes into
+the tooltip, like the exit location. A failed *Refresh* shows *not reachable* - a fresh answer was asked for. Shown as a card under the exit location, in the same style - it is secondary information, so the
 badge is neutral like the country code: **OK** operational, **!** a minor incident, **!!** major/critical, **?** not
-reachable or not checked yet - then the page's name, its description with the time of the check, and *Refresh*. The Copy report
-gets *"Anthropic: All Systems Operational"*. It tells a service's own outage from your connection. https only, at most 300
+reachable or not checked yet - then the page's name, its description with the time of the check, and *Refresh*. The copied report
+gets *"Claude: All Systems Operational"*. It tells a service's own outage from your connection. https only, at most 300
 characters.
 
 ## Tray app

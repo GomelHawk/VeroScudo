@@ -12,7 +12,7 @@ OK = b'{"page":{"id":"x","name":"Example Service","url":"https://status.example.
 
 def test_only_https_addresses_up_to_300_characters_are_saved():
     assert statuspage.url_error(statuspage.DEFAULT_URL) == ""
-    assert statuspage.DEFAULT_URL == "https://status.anthropic.com/api/v2/status.json"
+    assert statuspage.DEFAULT_URL == "https://status.claude.com/api/v2/status.json"
     for bad in ("http://status.example.com/api/v2/status.json", "status.example.com", "", "https://", "ftp://x.example.com",
                 "https://status.example.com/" + "a" * 300, "https://status example.com/"):
         assert statuspage.url_error(bad) == "The status page must be an https:// address", bad
@@ -119,4 +119,64 @@ def test_fetch_failures_say_not_reachable(tmp_path):
     sp.set_enabled(True)
     started = sp._job["started"]
     assert not sp.poll(now=started + 5)
-    assert sp.poll(now=started + 19) and sp.view().text == "status.anthropic.com: not reachable"
+    assert sp.poll(now=started + 19) and sp.view().text == "status.claude.com: not reachable"
+
+
+def _settle(sp, now):
+    sp._job["thread"].join(5)
+    return sp.tick(now=now)
+
+
+def test_a_failed_check_after_a_connect_is_retried_then_the_last_good_answer_stays(tmp_path):
+    """A tunnel that has just come up may not carry traffic yet: retried after 10 s and 30 s ("checking..." meanwhile);
+    when all fail, the last good answer stays with its time and the failure goes into the tooltip - like the exit
+    location. A failed Refresh says "not reachable" (a fresh answer was asked for)."""
+    answers = [OK]
+    def get(u, t):
+        a = answers.pop(0) if answers else None
+        if a is None:
+            raise OSError("timed out")
+        return a
+    sp = statuspage.StatusFetch(tmp_path / "tray.json", get=get)
+    sp.set_enabled(True)
+    _settle(sp, 1000.0)
+    assert sp.view().badge == "OK"
+    assert sp.on_connected(now=2000.0)
+    _settle(sp, 2001.0)
+    assert sp.checking and sp.view().right == "checking..."                 # retry 1 due at 2011
+    assert not sp.tick(now=2005.0) and sp._job is None
+    assert sp.tick(now=2011.0) and sp._job is not None                      # retry 1 runs
+    _settle(sp, 2012.0)
+    assert sp.checking and sp._retry_at == 2042.0                           # retry 2 due 30 s later
+    assert sp.tick(now=2042.0)
+    _settle(sp, 2043.0)
+    v = sp.view()
+    assert not sp.checking and v.badge == "OK" and v.right.startswith("All Systems Operational · ")
+    assert "later check failed: timed out" in v.tip
+    assert sp.refresh()
+    _settle(sp, 2100.0)
+    assert sp.view().right.startswith("not reachable · ")                    # Refresh: no retries, no old answer
+
+
+def test_a_retry_that_succeeds_shows_the_fresh_answer(tmp_path):
+    answers = [None, OK]
+    def get(u, t):
+        a = answers.pop(0)
+        if a is None:
+            raise OSError("timed out")
+        return a
+    sp = statuspage.StatusFetch(tmp_path / "tray.json", get=get)
+    keepawake.set_pref("statusPage", True, tmp_path / "tray.json")
+    assert sp.on_connected(now=100.0)
+    _settle(sp, 101.0)
+    assert sp.view().right == "checking..."                                 # never fetched before: no "not reachable" yet
+    sp.tick(now=111.0)
+    _settle(sp, 112.0)
+    assert sp.view().badge == "OK" and not sp.checking and sp.failed == ""
+
+
+def test_the_old_default_address_reads_as_the_new_one(tmp_path):
+    """status.anthropic.com redirects to status.claude.com - one round trip and TLS handshake less."""
+    pref = tmp_path / "tray.json"
+    keepawake.set_pref("statusPageUrl", statuspage.OLD_DEFAULT, pref)
+    assert statuspage.StatusFetch(pref).url() == statuspage.DEFAULT_URL

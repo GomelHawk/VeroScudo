@@ -179,15 +179,26 @@ function Update-ExitFetch {
 }
 
 # ---------------------------------------------------------------- service status page (opt-in, per user)
-# An Atlassian Statuspage (.../api/v2/status.json, Anthropic's by default): fetched in the background by the same rules as
+# An Atlassian Statuspage (.../api/v2/status.json, Claude's by default): fetched in the background by the same rules as
 # the exit location - once after each connect (Protected) and on Refresh, 6 s timeout. Tells a service's own outage from your connection (Claude Code hanging: their problem or yours?).
+# A fetch after a connect that fails is retried after 10 s and 30 s ("checking..." meanwhile) - a tunnel that has just come
+# up may not carry traffic yet; when the retries fail too, the last good answer stays shown with its time (the failure in
+# the tooltip), like the exit location. A failed Refresh shows "not reachable" - a fresh answer was asked for. (= statuspage.py)
 $global:SvcJob = $null; $global:SvcResult = $null; $global:SvcNext = [datetime]::MinValue
-$global:SvcDefaultUrl = 'https://status.anthropic.com/api/v2/status.json'
+$global:SvcRetry = @(); $global:SvcRetryAt = $null; $global:SvcGood = $null; $global:SvcFailed = ''
+$global:SvcDefaultUrl = 'https://status.claude.com/api/v2/status.json'
+$global:SvcOldDefaultUrl = 'https://status.anthropic.com/api/v2/status.json'     # redirects to the new one (an extra round trip): read as it
 function Test-StatusPageEnabled { [bool](Get-TrayPref).statusPage }
-function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u) { $u } else { $global:SvcDefaultUrl } }
-function Start-StatusPageFetch([switch]$Now) {
+function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u -and $u -ne $global:SvcOldDefaultUrl) { $u } else { $global:SvcDefaultUrl } }
+function Start-StatusPageAfterConnect {
+    <# VeroScudo reached Protected: look again through the new tunnel - retried on failure. #>
+    $global:SvcRetry = @(10, 30); $global:SvcRetryAt = $null
+    Start-StatusPageFetch -Now -Auto
+}
+function Start-StatusPageFetch([switch]$Now, [switch]$Auto) {
     if (-not (Test-StatusPageEnabled) -or $global:SvcJob -or $global:PreviewDir) { return }
     if (-not $Now -and (Get-Date) -lt $global:SvcNext) { return }
+    if (-not $Auto) { $global:SvcRetry = @(); $global:SvcRetryAt = $null }
     $global:SvcNext = (Get-Date).AddMinutes(5)
     $url = Get-StatusPageUrl
     $ps = [powershell]::Create()
@@ -197,16 +208,25 @@ function Start-StatusPageFetch([switch]$Now) {
               @{ Json = ([Text.Encoding]::UTF8.GetString($w.RawContentStream.ToArray())) } }
         catch { @{ Error = $_.Exception.Message } }
     }).AddArgument($url)
-    $global:SvcJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Url = $url; Started = (Get-Date) }
+    $global:SvcJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Url = $url; Started = (Get-Date); Auto = [bool]$Auto }
 }
 function Update-StatusPageFetch {
+    if ($global:SvcRetryAt -and (Get-Date) -ge $global:SvcRetryAt -and -not $global:SvcJob) { $global:SvcRetryAt = $null; Start-StatusPageFetch -Now -Auto }
     $j = $global:SvcJob; if (-not $j) { return }
     if ($j.Handle.IsCompleted -or ((Get-Date) - $j.Started).TotalSeconds -gt 15) {
         $out = $null
         if ($j.Handle.IsCompleted) { try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $out = @{ Error = $_.Exception.Message } } }
         else { try { $j.PS.Stop() } catch { Write-Verbose 'status page stop failed' }; $out = @{ Error = 'no answer within 15 s' } }
         $j.PS.Dispose(); $global:SvcJob = $null
-        $global:SvcResult = @{ Url = $j.Url; Time = (Get-Date); Json = $(if ($out) { $out.Json }); Error = $(if ($out) { $out.Error }) }
+        $res = @{ Url = $j.Url; Time = (Get-Date); Json = $(if ($out) { $out.Json }); Error = $(if ($out) { $out.Error }) }
+        $good = [bool]($res.Json -and -not $res.Error -and -not (ConvertTo-VeroStatusPageView -Json $res.Json -Url $res.Url).Text.EndsWith(': not reachable'))
+        if ($good) { $global:SvcResult = $res; $global:SvcGood = $res; $global:SvcFailed = ''; $global:SvcRetry = @(); return }
+        $why = if ($res.Error) { [string]$res.Error } else { 'not a status page answer' }
+        if ($j.Auto -and @($global:SvcRetry).Count -gt 0) {                     # a fresh tunnel may not carry traffic yet: try again
+            $global:SvcRetryAt = (Get-Date).AddSeconds([int]$global:SvcRetry[0]); $global:SvcRetry = @($global:SvcRetry | Select-Object -Skip 1); return
+        }
+        if ($j.Auto -and $global:SvcGood -and $global:SvcGood.Url -eq $j.Url) { $global:SvcResult = $global:SvcGood; $global:SvcFailed = $why; return }   # like the exit location
+        $global:SvcResult = $res; $global:SvcFailed = ''
     }
 }
 $global:PreviewSvc = $null
@@ -215,11 +235,11 @@ function Get-StatusPageView {
     if (-not (Test-StatusPageEnabled)) { return $null }
     $r = $global:SvcResult
     $u = Get-StatusPageUrl; $h = try { ([Uri]$u).Host } catch { $u }
-    if (-not $r -or $global:SvcJob) {
+    if (-not $r -or $global:SvcJob -or $global:SvcRetryAt) {
         $right = if ($global:SvcJob) { 'checking...' } else { 'not checked yet' }          # checked after each connect and on Refresh
         return [pscustomobject]@{ Text = "${h}: $right"; Tone = 'normal'; Tip = $u; Badge = '?'; Name = $(if ($r) { (ConvertTo-VeroStatusPageView -Json $r.Json -Url $r.Url -Time $r.Time -Failure ([string]$r.Error)).Name } else { $h }); Right = $right }
     }
-    ConvertTo-VeroStatusPageView -Json $r.Json -Url $r.Url -Time $r.Time -Failure ([string]$r.Error)
+    ConvertTo-VeroStatusPageView -Json $r.Json -Url $r.Url -Time $r.Time -Failure ([string]$r.Error) -LaterFailure $global:SvcFailed
 }
 
 function Get-ExitView($st) {
@@ -386,6 +406,10 @@ function Show-Status {
     $clr = New-Object System.Windows.Forms.LinkLabel; $clr.Text = 'Clear'; $clr.Location = (P 360 6); $clr.Size = (Z 48 18); $clr.TextAlign = 'TopRight'
     $clr.Font = $FontSmall; $clr.LinkColor = $global:Theme.Accent; $clr.ActiveLinkColor = $global:Theme.Accent; $clr.BackColor = 'Transparent'; $clr.LinkBehavior = 'HoverUnderline'
     $ev.Controls.Add($clr)
+    # Copy: the report (state, exit, service, the last events) to the clipboard - next to Clear, the events' own links
+    $cpy = New-Object System.Windows.Forms.LinkLabel; $cpy.Text = 'Copy'; $cpy.Location = (P 300 6); $cpy.Size = (Z 56 18); $cpy.TextAlign = 'TopRight'
+    $cpy.Font = $FontSmall; $cpy.LinkColor = $global:Theme.Accent; $cpy.ActiveLinkColor = $global:Theme.Accent; $cpy.BackColor = 'Transparent'; $cpy.LinkBehavior = 'HoverUnderline'
+    $ev.Controls.Add($cpy)
     $evText = New-Object System.Windows.Forms.TextBox; $evText.Multiline = $true; $evText.ReadOnly = $true; $evText.BorderStyle = 'None'
     $evText.Location = (P 12 30); $evText.Size = (Z 400 122); $evText.Font = $FontMono; $evText.BackColor = $global:Theme.Card; $evText.ForeColor = $global:Theme.Text; $evText.ScrollBars = 'Vertical'; $evText.WordWrap = $true; $evText.TabStop = $false; $evText.Cursor = 'Default'
     $evText.Add_HandleCreated({ [VeroNative]::DarkScroll($this.Handle, $global:Dark) })
@@ -393,10 +417,11 @@ function Show-Status {
     $bOnOff = New-Button $body 'Turn VPN off' 20 358 99
     $bRedo  = New-Button $body 'Reconnect' 127 358 99
     $bLog   = New-Button $body 'Open log' 234 358 99
-    $bCopy  = New-Button $body 'Copy report' 341 358 99 $true
+    $bStats = New-Button $body 'Statistics' 341 358 99
     $bRedo.Add_Click(({ Request-Reconnect }).GetNewClosure())
     $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }).GetNewClosure())
-    $bCopy.Add_Click(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $xv = Get-ExitView (Get-State); $txt += "`r`n" + ('{0,-11} {1}' -f 'Exit', $(if ($xv.Has) { '{0} {1} {2}' -f $xv.Code, $xv.Place, $xv.Right } else { $xv.Text })); $sv = Get-StatusPageView; if ($sv) { $txt += "`r`n" + ('{0,-11} {1}' -f 'Service', $sv.Text) }; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $bCopy.Text = 'Copied'; }).GetNewClosure())
+    $bStats.Add_Click(({ Show-Stats | Out-Null }).GetNewClosure())
+    $cpy.Add_LinkClicked(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $xv = Get-ExitView (Get-State); $txt += "`r`n" + ('{0,-11} {1}' -f 'Exit', $(if ($xv.Has) { '{0} {1} {2}' -f $xv.Code, $xv.Place, $xv.Right } else { $xv.Text })); $sv = Get-StatusPageView; if ($sv) { $txt += "`r`n" + ('{0,-11} {1}' -f 'Service', $sv.Text) }; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $cpy.Text = 'Copied'; }).GetNewClosure())
     $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Request-TurnOn } }).GetNewClosure())
     $clr.Add_LinkClicked(({ Set-TrayPref 'eventsClearedAt' (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); $evText.Text = '' }).GetNewClosure())
     $refresh = ({
@@ -1376,7 +1401,7 @@ function Invoke-UpdateCheck([switch]$Force) {
 function Refresh {
     if (Update-ConfigCache) { Update-ProfileMenu }
     $st = Get-State
-    if ($st.State -eq 'protected' -and $global:Last -ne 'protected') { $global:ProtectedSince = Get-Date; Start-ExitFetch; Start-StatusPageFetch -Now }   # each (re)connect: once (location and service status)
+    if ($st.State -eq 'protected' -and $global:Last -ne 'protected') { $global:ProtectedSince = Get-Date; Start-ExitFetch; Start-StatusPageAfterConnect }   # each (re)connect: once (location and service status)
     elseif ($st.Connected -and -not $global:LastConnected) { $global:ProtectedSince = Get-Date }    # a tunnel came up with VeroScudo off: older lookups are not this tunnel's
     $global:LastConnected = [bool]$st.Connected
     Update-ExitFetch
@@ -1469,10 +1494,10 @@ if ($Preview) {
     $okJ = '{"page":{"name":"Anthropic"},"status":{"indicator":"none","description":"All Systems Operational"}}'
     $global:PreviewFacts = @{ Configured = $true; Name = $pn; Type = $pt; Armed = $true; Up = $true; Cred = $true; AuthBlocked = $false; Otp = $null; Conflicts = @(); NativeNext = $null; Expect = $null }
     $svcs = [ordered]@{
-        'ok'          = (ConvertTo-VeroStatusPageView -Json $okJ -Url 'https://status.anthropic.com/api/v2/status.json')
-        'minor'       = (ConvertTo-VeroStatusPageView -Json ($okJ -replace '"none","description":"All Systems Operational"', '"minor","description":"Partially Degraded Service"') -Url 'https://status.anthropic.com/api/v2/status.json')
-        'unreachable' = (ConvertTo-VeroStatusPageView -Json '' -Url 'https://status.anthropic.com/api/v2/status.json' -Failure 'timeout')
-        'checking'    = [pscustomobject]@{ Text = 'checking'; Tone = 'normal'; Tip = ''; Badge = '?'; Name = 'status.anthropic.com'; Right = 'checking...' }
+        'ok'          = (ConvertTo-VeroStatusPageView -Json $okJ -Url 'https://status.claude.com/api/v2/status.json')
+        'minor'       = (ConvertTo-VeroStatusPageView -Json ($okJ -replace '"none","description":"All Systems Operational"', '"minor","description":"Partially Degraded Service"') -Url 'https://status.claude.com/api/v2/status.json')
+        'unreachable' = (ConvertTo-VeroStatusPageView -Json '' -Url 'https://status.claude.com/api/v2/status.json' -Failure 'timeout')
+        'checking'    = [pscustomobject]@{ Text = 'checking'; Tone = 'normal'; Tip = ''; Badge = '?'; Name = 'status.claude.com'; Right = 'checking...' }
     }
     foreach ($sk in $svcs.Keys) { $global:PreviewSvc = $svcs[$sk]; Invoke-Shot "status-service-$sk" { $fm = Show-Status; Save-FormShot $fm $global:ShotName; $global:StatusForm = $null } }
     $global:PreviewSvc = $null; $global:PreviewFacts = $null

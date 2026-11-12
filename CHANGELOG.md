@@ -5,6 +5,18 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed: status window - Copy next to Clear, a Statistics button (Windows, Linux, macOS)
+- The report is copied with a **Copy** link next to *Clear* in Recent events (*Copied* after a click); the button row
+  ends with **Statistics** instead of *Copy report* - it opens the Statistics window.
+
+### Fixed: service status "not reachable" right after a connect (Windows, Linux, macOS)
+- The status page is fetched right after each connect, when a fresh tunnel (Hiddify in particular) may not carry traffic
+  yet. A failed fetch after a connect is now retried after 10 s and 30 s (*checking...* meanwhile); when those fail too,
+  the last good answer stays shown with its time and the failure goes into the tooltip, like the exit location. A
+  failed *Refresh* still says *not reachable*.
+- Default address `status.claude.com` (`status.anthropic.com` redirects there: one round trip less); a saved old default
+  is read as the new one.
+
 ### Changed: slow answers make the connection unstable (Windows, Linux, macOS)
 - Connection check: an answer slower than 1000 ms per round trip (ping and TCP: 1, a TLS handshake: 2, HTTPS: 3) is
   slow. Slow answers count like partial loss: 10 % or more of the checks lost or slow make the rating and the

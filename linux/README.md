@@ -36,8 +36,8 @@ icon back.
 **Status window**: the state, where your traffic leaves the tunnel (country, city, IP - asked from ipinfo.io right after
 each connect and on *Refresh* whenever a VPN tunnel is up - never without one), the profile, firewall, last drop and
 connection rating (its tooltip: lost checks per address), the service status page when it is on (an Atlassian Statuspage,
-Anthropic's by default, fetched every 5 minutes), other VPNs next to VeroScudo, the recent events (*Clear* empties the view, not the log), Turn VPN on/off, Reconnect, Open log
-and Copy report. **Another VPN**: Turn VPN on asks first when another VPN is connected (disconnect it and turn on, turn on
+Claude's by default, fetched after each connect and on *Refresh*), other VPNs next to VeroScudo, the recent events (*Copy* puts the report on the clipboard, *Clear* empties the view, not the log), Turn VPN
+on/off, Reconnect, Open log and Statistics. **Another VPN**: Turn VPN on asks first when another VPN is connected (disconnect it and turn on, turn on
 anyway, or cancel); a VPN that connects while VeroScudo is on is announced once - its traffic is blocked.
 
 **Uninstall**: tray > About > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (`--purge`: also config, state, log).

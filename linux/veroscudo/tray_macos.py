@@ -577,6 +577,11 @@ class Tray(NSObject):
         return b
 
     @objc.python_method
+    def set_link_title(self, b, title):
+        b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+            title, {NSForegroundColorAttributeName: NSColor.linkColor(), NSFontAttributeName: _small_font()}))
+
+    @objc.python_method
     def popup(self, view, x, y, w, titles=(), action=None):
         p = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(x, y, w, 26), False)
         p.addItemsWithTitles_(list(titles))
@@ -655,6 +660,7 @@ class Tray(NSObject):
         # Clear empties this view only: the log stays (the record of what happened; root-owned, rotates by itself).
         # Open log still shows everything.
         st["clear"] = self.link(c, "Clear", "statusClear:")
+        st["copy"] = self.link(c, "Copy", "statusCopy:")       # the report (state, exit, service, last events) to the clipboard
         sv = NSScrollView.alloc().initWithFrame_(NSMakeRect(18, 0, W - 36, 170))
         sv.setHasVerticalScroller_(True)
         sv.setBorderType_(2)                                # NSBezelBorder
@@ -667,8 +673,7 @@ class Tray(NSObject):
         st["onoff"] = self.button(c, "Turn VPN on", "statusOnOff:", 0, 0, 112)
         st["redo"] = self.button(c, "Reconnect", "reconnect:", 0, 0, 100)
         st["log"] = self.button(c, "Open log", "openLog:", 0, 0, 92)
-        st["copy"] = self.button(c, "Copy report", "statusCopy:", 0, 0, 112)
-        st["copy"].setKeyEquivalent_("\r")
+        st["stats"] = self.button(c, "Statistics", "statistics:", 0, 0, 112)
         self.st_win, self.st = win, st
         self.update_status()
         win.center()
@@ -759,6 +764,7 @@ class Tray(NSObject):
             y += self.fit(st["other"], 18, y, W - 36) + 10
         st["evh"].setFrame_(NSMakeRect(18, y, 200, 20))
         st["clear"].setFrame_(NSMakeRect(W - 18 - 50, y, 50, 20))
+        st["copy"].setFrame_(NSMakeRect(W - 18 - 50 - 4 - 56, y, 56, 20))
         y += 24
         st["sv"].setFrame_(NSMakeRect(18, y, W - 36, 170))
         y += 170 + 14
@@ -769,7 +775,7 @@ class Tray(NSObject):
             st["tv"].setString_(text)
             st["tv"].scrollToEndOfDocument_(None)             # newest at the bottom
         x = W - 18
-        for k in ("copy", "log", "redo", "onoff"):
+        for k in ("stats", "log", "redo", "onoff"):
             w = float(st[k].frame().size.width)
             x -= w
             st[k].setFrame_(NSMakeRect(x, y, w, 30))
@@ -792,7 +798,7 @@ class Tray(NSObject):
     def status_(self, _):
         if self.st_win is None:
             self.build_status()
-        self.st["copy"].setTitle_("Copy report")
+        self.set_link_title(self.st["copy"], "Copy")
         self.present(self.st_win)
         self.update_status()
 
@@ -801,7 +807,7 @@ class Tray(NSObject):
 
     def statusCopy_(self, sender):
         self.copy_report()
-        sender.setTitle_("Copied")
+        self.set_link_title(sender, "Copied")
 
     def statusClear_(self, _):
         keepawake.set_pref("eventsClearedAt", traymodel.clear_stamp())

@@ -216,6 +216,12 @@ Describe 'ConvertTo-VeroStatusPageView: a service status page line' {
         $v.Badge | Should -Be '?'; $v.Name | Should -Be 'status.example.com'; $v.Right | Should -Match '^not reachable '
         (ConvertTo-VeroStatusPageView -Json '<html>' -Url 'https://status.example.com/x').Text | Should -Be 'status.example.com: not reachable'
     }
+    It 'an older good answer kept after a failed check: the failure goes into the tooltip (= statuspage.service_view failed=)' {
+        $ok = '{"page":{"name":"Example"},"status":{"indicator":"none","description":"All Systems Operational"}}'
+        $v = ConvertTo-VeroStatusPageView -Json $ok -Url 'https://status.example.com/x' -Time ([datetime]'2026-11-09 14:05') -LaterFailure 'timed out'
+        $v.Badge | Should -Be 'OK'; $v.Right | Should -Be ("All Systems Operational {0} 14:05" -f [char]0x00B7)
+        $v.Tip | Should -Match 'later check failed: timed out'
+    }
 }
 
 Describe 'Get-VeroTrayPref: every key the tray uses survives a read' {

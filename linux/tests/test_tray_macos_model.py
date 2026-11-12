@@ -110,7 +110,7 @@ def test_python_helpers_are_hidden_from_objective_c():
 def test_texts_match_the_linux_tray():
     mac, lin = (SRC / "tray_macos.py").read_text(), (SRC / "tray.py").read_text()
     for text in ("unless \"\n                   \"lanAllow lets it through", "Save connection settings", "Recent events",
-                 "VeroScudo - WireGuard profile", "it flows again once", "Statistics…", "Copy report", "Open log",
+                 "VeroScudo - WireGuard profile", "it flows again once", "Statistics…", "\"Copy\"", "\"Statistics\"", "Open log",
                  "traymodel.BEHAVIOUR_NOTE", "traymodel.EXIT_ABOUT", "traymodel.remove_question", "traymodel.foreign_prompt",
                  "traymodel.turned_on_elsewhere", "Another VPN is connected"):
         probe = text.replace('"\n                   "', "")

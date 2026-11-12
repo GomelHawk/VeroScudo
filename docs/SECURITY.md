@@ -4,7 +4,7 @@
 
 Please **do not open a public issue** for a security problem. Use GitHub's private reporting:
 *Security* tab → *Report a vulnerability* on [GomelHawk/VeroScudo](https://github.com/GomelHawk/VeroScudo/security/advisories/new).
-Include the platform, version (`veroscudo status` / tray *Copy report*) and steps to reproduce.
+Include the platform, version (`veroscudo status` / the status window's *Copy* link) and steps to reproduce.
 You will get an answer within a week; fixes for confirmed leaks are released as soon as they are
 verified with the live tests.
 

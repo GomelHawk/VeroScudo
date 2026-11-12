@@ -68,10 +68,12 @@ function ConvertTo-VeroExitView {
 function ConvertTo-VeroStatusPageView {
     <# A service status page as the status window shows it - a card like the exit location: Badge (OK / ! / !! / ?), Name
        (page.name, else the host), Right ("{description} - HH:mm"), Tone (none good, minor warn, major/critical bad, else
-       normal), Tip; Text is the Copy report line ("{name}: {description}" / "{host}: not reachable"). Pure (= statuspage.py). #>
-    [CmdletBinding()] param([string]$Json, [Parameter(Mandatory)][string]$Url, [datetime]$Time = (Get-Date), [string]$Failure = '')
+       normal), Tip; Text is the Copy report line ("{name}: {description}" / "{host}: not reachable"). -LaterFailure: a later
+       check failed while this (older, good) answer stays shown - it goes into the tooltip. Pure (= statuspage.py). #>
+    [CmdletBinding()] param([string]$Json, [Parameter(Mandatory)][string]$Url, [datetime]$Time = (Get-Date), [string]$Failure = '', [string]$LaterFailure = '')
     $hostName = try { ([Uri]$Url).Host } catch { $Url }
     $tip = 'checked {0:HH:mm} from {1}' -f $Time, $Url
+    if ($LaterFailure) { $tip += "`r`nlater check failed: $LaterFailure" }
     $j = $null
     if (-not $Failure -and $Json) { try { $j = $Json | ConvertFrom-Json } catch { $j = $null } }
     $ok = $j -and $j.PSObject.Properties['status'] -and $j.status -and $j.status.PSObject.Properties['description']
