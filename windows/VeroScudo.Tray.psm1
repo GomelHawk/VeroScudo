@@ -111,7 +111,8 @@ function ConvertTo-VeroConnectionView {
             if ($St.State -eq 'protected') { $q = [string]$Quality.State; $word = $q.Substring(0, 1).ToUpperInvariant() + $q.Substring(1) }
             $tip = '{0} checks in the last {1} min: {2} lost ({3}%){4}' -f $Quality.Checks, $Check.WindowMinutes, $Quality.Lost,
                 ([double]$Quality.LossPct).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture),
-                $(if ($null -ne $Quality.RttMs) { ", median $($Quality.RttMs) ms" } else { '' })
+                ($(if ($Quality.PSObject.Properties['Slow'] -and [int]$Quality.Slow -gt 0 -and [int]$Quality.Checks -gt 0) { ', {0} slow - over 1 s ({1}%)' -f $Quality.Slow, ([Math]::Round(100.0 * $Quality.Slow / $Quality.Checks, 1)).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture) } else { '' }) +
+                 $(if ($null -ne $Quality.RttMs) { ", median $($Quality.RttMs) ms" } else { '' }))
             if ($Quality.PSObject.Properties['Targets'] -and @($Quality.Targets).Count -gt 1) {   # which address fails
                 $tip += "`r`n" + ((@($Quality.Targets) | ForEach-Object { '{0}: {1} of {2} lost' -f $_.Label, $_.Lost, $_.Checks }) -join "`r`n")
             }

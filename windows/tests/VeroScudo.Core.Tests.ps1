@@ -2362,6 +2362,46 @@ Describe 'Statistics: VeroScudo on but no connection counts as bad' {
     }
 }
 
+Describe 'Connection check: slow answers (over 1 s per round trip)' {
+    It 'marks an answer over 1000 ms per round trip slow: ping/TCP 1, a TLS handshake 2, HTTPS 3 (= quality.judge)' {
+        Test-VeroCheckInTime 'ping' 1000 | Should -BeTrue
+        Test-VeroCheckInTime 'ping' 1001 | Should -BeFalse
+        Test-VeroCheckInTime 'tcp' 1500 | Should -BeFalse
+        Test-VeroCheckInTime 'tcp' 1500 -Tls | Should -BeTrue
+        Test-VeroCheckInTime 'ping' 2001 -Tls | Should -BeFalse
+        Test-VeroCheckInTime 'https' 2900 | Should -BeTrue
+        Test-VeroCheckInTime 'https' 3001 | Should -BeFalse
+    }
+    It 'rates slow answers like partial loss: unstable, never bad (= quality.rating)' {
+        Get-VeroQualityRating 0 0 18 | Should -Be 'good'
+        Get-VeroQualityRating 0 1 18 | Should -Be 'good'
+        Get-VeroQualityRating 0 2 18 | Should -Be 'unstable'
+        Get-VeroQualityRating 0 18 18 | Should -Be 'unstable'
+        Get-VeroQualityRating 1 1 18 | Should -Be 'unstable'
+        Get-VeroQualityRating 10 8 18 | Should -Be 'bad'
+        $samples = @(0..5 | ForEach-Object { @{ T = 100.0 + $_; Ok = $true; Rtt = 1400; Ti = 0; Slow = $true } })
+        $q = Measure-VeroQuality -Samples $samples -Now 106 -WindowSeconds 60
+        $q.State | Should -Be 'unstable'; $q.Lost | Should -Be 0; $q.Slow | Should -Be 6; $q.RttMs | Should -Be 1400
+        $d = [char]0x00B7
+        Format-VeroQuality $q | Should -Be "unstable $d 100% slow, 1400 ms"
+        Format-VeroQuality ([pscustomobject]@{ State = 'unstable'; LossPct = 11.1; RttMs = 300; Checks = 18; Lost = 2; Slow = 3 }) | Should -Be "unstable $d 11.1% lost, 16.7% slow"
+    }
+    It 'records slow answers in the statistics; a bar of slow answers is unstable, not bad (= stats.py)' {
+        Format-VeroStatsLine -Minute 5 -Id 'w' -Name 'W' -Sent 6 -Lost 0 -Slow 6 | Should -Be '{"m":5,"id":"w","p":"W","sent":6,"lost":0,"slow":6}'
+        Format-VeroStatsLine -Minute 5 -Id 'w' -Name 'W' -Sent 6 -Lost 1 | Should -Be '{"m":5,"id":"w","p":"W","sent":6,"lost":1}'
+        $r = ConvertFrom-VeroStatsText -Text ('{"m":5,"id":"w","p":"W","sent":6,"lost":2,"slow":9}' + "`n" + '{"m":5,"id":"w","p":"W","sent":6,"lost":0,"slow":1}' + "`n" + '{"m":6,"id":"w","p":"W","down":1}')
+        $r.Data['w'][5].Sent | Should -Be 12; $r.Data['w'][5].Lost | Should -Be 2; $r.Data['w'][5].Slow | Should -Be 5   # 9 capped at 6 - 2
+        $r.Data['w'][6].Down | Should -BeTrue
+        Get-VeroStatsState -UpMinutes 10 -Sent 60 -Lost 0 -Slow 60 | Should -Be 'unstable'
+        Get-VeroStatsState -UpMinutes 10 -Sent 60 -Lost 0 -Slow 5 | Should -Be 'good'
+        Get-VeroStatsState -UpMinutes 10 -Sent 60 -Lost 40 -Slow 20 | Should -Be 'bad'
+        $m = @{}; foreach ($i in 0..9) { $m[$i] = @{ Sent = 6; Lost = 0; Down = $false; Slow = 6 } }
+        $day = ConvertTo-VeroStatsDay -Minutes $m
+        $day.Bars[0].State | Should -Be 'unstable'; $day.Bars[0].Slow | Should -Be 60
+        Format-VeroStatsBar -Bar $day.Bars[0] | Should -Be ("00:00-00:10  unstable {0} 0 % lost (0 of 60 checks), 60 slow (over 1 s), connected 10 of 10 min" -f [char]0x2013)
+    }
+}
+
 Describe 'Connection check: HTTPS method and per-address results' {
     It 'accepts https with a port, writes it back, and names each address' {
         $c = ConvertFrom-VeroCheckConfig ('{"enabled":true,"targets":[{"host":"api.example.com","method":"https"},{"host":"203.0.113.5","method":"https","port":8443},{"host":"1.1.1.1","method":"ping"}]}' | ConvertFrom-Json)

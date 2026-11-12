@@ -976,7 +976,7 @@ class Tray(NSObject):
         more.append(self.label(v, "Rate the last", 16, top - 64, 110))
         ui["over"] = self.field(v, 130, top - 67, 60)
         more += [ui["over"], self.label(v, "minutes (1-10)", 198, top - 64, 200, dim=True)]
-        more.append(self.label(v, "Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.", 16, top - 92,
+        more.append(self.label(v, "Good: under 10 % lost. Unstable: 10-50 % or slow (over 1 s). Bad: over 50 %.", 16, top - 92,
                                W - 70, dim=True))
         more.append(self.label(v, "Addresses (IP, host name or URL - at least one)", 16, top - 120, W - 70))
         ui["rows"] = []

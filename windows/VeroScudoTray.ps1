@@ -951,7 +951,7 @@ function Show-Settings {
     New-Label $more 'Rate the last' 12 41 112 22 | Out-Null
     $inOver = New-Input $more 128 38 60 ([string]$chk.WindowMinutes)
     New-Label $more 'minutes (1-10)' 196 42 220 22 $FontSmall $global:Theme.Sub | Out-Null
-    New-Label $more 'Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.' 12 76 452 20 $FontSmall $global:Theme.Sub | Out-Null
+    New-Label $more 'Good: under 10 % lost. Unstable: 10-50 % or slow (over 1 s). Bad: over 50 %.' 12 76 452 20 $FontSmall $global:Theme.Sub | Out-Null
     New-Label $more 'Addresses - IP, host name or URL; at least one' 12 104 452 22 | Out-Null
     $rows = @()
     foreach ($i in 0..2) {
@@ -1133,7 +1133,7 @@ function Show-Stats {
         New-Label $f $it[1] ($lx + 18) $ly $w 20 $FontSmall $global:Theme.Sub | Out-Null
         $lx += $w + 14
     }
-    New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; without it, connected time is green.' 20 584 600 40 $FontSmall $global:Theme.Sub | Out-Null
+    New-Label $f 'Good: under 10 % of the checks lost; unstable: 10-50 %, or slow answers (over 1 s); bad: over 50 % lost. Ratings need Settings > Connection; without it, connected time is green.' 20 584 600 40 $FontSmall $global:Theme.Sub | Out-Null
     $bRef = New-Button $f 'Refresh' 400 630 100
     $bRef.Add_Click($reload)
     (New-Button $f 'Close' 510 630 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())

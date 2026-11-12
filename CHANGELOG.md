@@ -5,6 +5,12 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed: slow answers make the connection unstable (Windows, Linux, macOS)
+- Connection check: an answer slower than 1000 ms per round trip (ping and TCP: 1, a TLS handshake: 2, HTTPS: 3) is
+  slow. Slow answers count like partial loss: 10 % or more of the checks lost or slow make the rating and the
+  statistics' bar unstable instead of good - never bad, which still needs real loss. The tooltip, the statistics and
+  their files show the slow count.
+
 ### Fixed: Linux - WireGuard protected, but carried nothing (conntrack mark)
 - NetworkManager saves WireGuard's packet mark (0xcafd) in the connection-tracking mark and restores it on the server's
   replies, so they are routed outside the tunnel. VeroScudo's kill-switch overwrote that mark with its own, the replies

@@ -3,14 +3,28 @@
 # Same rules on every platform (Linux/macOS: linux/veroscudo/quality.py; docs/ARCHITECTURE.md "Connection check"):
 #  - every intervalSeconds (10-100) the watchdog checks each address once: ping, a TCP connection to a port, or HTTPS (a TLS
 #    handshake and one HEAD request without credentials - any HTTP answer counts: the real way to a web service);
+#  - an answer slower than 1000 ms per round trip is "slow" (ping and TCP: 1 round trip, a TLS handshake 2, HTTPS 3);
 #  - every check counts: loss = failed checks / all checks of the last windowMinutes (1-10), never fewer than 3 rounds;
-#  - below 10 % lost: good; 10-50 %: unstable; above 50 %: bad;
+#  - below 10 % lost: good; 10-50 %: unstable; above 50 %: bad. Slow answers count like partial loss: 10 % or more lost or
+#    slow together makes a good connection unstable - never bad (it still answers);
 #  - no rating ("checking") until one full window has passed since the rating started: it starts over on every connect,
 #    profile switch and change of the check settings (interval, window, addresses).
 # The checks run only while armed and connected, so they go through the tunnel; nothing in the kill-switch is opened.
 
 $script:CheckDefaultHost = '1.1.1.1'
 $script:CheckMinChecks = 3
+$script:CheckSlowMs = 1000                                              # per round trip: a slower answer is "slow"
+
+function Get-VeroCheckRoundTrips([string]$Method, [switch]$Tls) {
+    <# How many round trips a check takes: ping and TCP 1, a TLS handshake 2 (TCP + TLS 1.3), HTTPS 3 (+ the request).
+       Pure (= quality.round_trips on Linux/macOS). #>
+    if ($Method -eq 'https') { 3 } elseif ($Tls) { 2 } else { 1 }
+}
+
+function Test-VeroCheckInTime([string]$Method, [double]$Ms, [switch]$Tls) {
+    <# $false = slow: answered, but slower than CheckSlowMs per round trip. Pure (= quality.judge on Linux/macOS). #>
+    $Ms -le $script:CheckSlowMs * (Get-VeroCheckRoundTrips $Method -Tls:$Tls)
+}
 
 function New-VeroCheckTarget([string]$HostName, [string]$Method = 'tcp', [int]$Port = 443) {
     [pscustomobject]@{ Host = $HostName; Method = $Method; Port = $(if ($Method -in 'tcp', 'https') { $Port } else { 443 }) }
@@ -121,14 +135,22 @@ function Get-VeroCheckWindow {
     [Math]::Max($Check.WindowMinutes * 60.0, $script:CheckMinChecks * $Check.IntervalSeconds * 1.0)   # no +1: 20 s / 1 min = 60 s, not 80
 }
 
+function Get-VeroQualityRating([int]$Lost, [int]$Slow, [int]$Checks) {
+    <# good / unstable / bad from the counts (Checks > 0), see the top of this file. Pure (= quality.rating); the statistics'
+       bars use it too. #>
+    $loss = 100.0 * $Lost / $Checks
+    if ($loss -gt 50) { 'bad' } elseif ($loss -ge 10 -or 100.0 * ($Lost + $Slow) / $Checks -ge 10) { 'unstable' } else { 'good' }
+}
+
 function Measure-VeroQuality {
-    <# Samples: @{ T (seconds); Ok; Rtt (ms or $null) }, one per check -> @{ State; LossPct; RttMs; Checks; Lost }.
+    <# Samples: @{ T (seconds); Ok; Rtt (ms or $null); Slow }, one per check -> @{ State; LossPct; RttMs; Checks; Lost; Slow }.
        -Since: when the rating started - until a full window has passed the answer is 'checking'. Pure. #>
     [CmdletBinding()] param([object[]]$Samples = @(), [Parameter(Mandatory)][double]$Now, [Parameter(Mandatory)][double]$WindowSeconds, [double]$Since = -1)
     $recent = @($Samples | Where-Object { $_ -and ($Now - [double]$_.T) -le $WindowSeconds })
     $n = $recent.Count
     $lost = @($recent | Where-Object { -not $_.Ok }).Count
-    if ($n -lt $script:CheckMinChecks -or ($Since -ge 0 -and ($Now - $Since) -lt $WindowSeconds)) { return [pscustomobject]@{ State = 'checking'; LossPct = 0.0; RttMs = $null; Checks = $n; Lost = $lost } }
+    $slow = @($recent | Where-Object { $_.Ok -and $_.ContainsKey('Slow') -and $_.Slow }).Count
+    if ($n -lt $script:CheckMinChecks -or ($Since -ge 0 -and ($Now - $Since) -lt $WindowSeconds)) { return [pscustomobject]@{ State = 'checking'; LossPct = 0.0; RttMs = $null; Checks = $n; Lost = $lost; Slow = $slow } }
     $loss = 100.0 * $lost / $n
     $rtts = @($recent | Where-Object { $_.Ok -and $null -ne $_.Rtt } | ForEach-Object { [double]$_.Rtt } | Sort-Object)
     $rtt = $null
@@ -137,17 +159,24 @@ function Measure-VeroQuality {
         $med = if ($rtts.Count % 2) { $rtts[$mid] } else { ($rtts[$mid - 1] + $rtts[$mid]) / 2 }
         $rtt = [int][Math]::Round($med)
     }
-    $state = if ($loss -lt 10) { 'good' } elseif ($loss -gt 50) { 'bad' } else { 'unstable' }
-    [pscustomobject]@{ State = $state; LossPct = [Math]::Round($loss, 1); RttMs = $rtt; Checks = $n; Lost = $lost }
+    [pscustomobject]@{ State = (Get-VeroQualityRating $lost $slow $n); LossPct = [Math]::Round($loss, 1); RttMs = $rtt; Checks = $n; Lost = $lost; Slow = $slow }
 }
 
 function Format-VeroQuality {
-    <# 'good · 45 ms', 'unstable · 22.5% lost', 'checking…' - the short text of the tray. Pure. #>
+    <# 'good · 45 ms', 'unstable · 22.5% lost', 'unstable · 40% slow, 1450 ms', 'unstable · 11.1% lost, 16.7% slow',
+       'checking…' - the short text of the tray. Pure (= quality.describe). #>
     [CmdletBinding()] param($Quality)
     $dot = [string][char]0x00B7
+    $inv = [Globalization.CultureInfo]::InvariantCulture
     if (-not $Quality -or $Quality.State -eq 'checking') { return 'checking' + [char]0x2026 }
     if ($Quality.State -eq 'good') { if ($null -ne $Quality.RttMs) { return "good $dot $($Quality.RttMs) ms" } else { return 'good' } }
-    '{0} {1} {2}% lost' -f $Quality.State, $dot, ([double]$Quality.LossPct).ToString('0.#', [Globalization.CultureInfo]::InvariantCulture)
+    $slow = if ($Quality.PSObject.Properties['Slow']) { [int]$Quality.Slow } else { 0 }
+    $slowPct = if ($slow -gt 0 -and [int]$Quality.Checks -gt 0) { ([Math]::Round(100.0 * $slow / [int]$Quality.Checks, 1)).ToString('0.#', $inv) } else { '0' }
+    $lost = if ($Quality.PSObject.Properties['Lost']) { [int]$Quality.Lost } else { 1 }
+    if ($slow -gt 0 -and $lost -eq 0) {
+        return ('{0} {1} {2}% slow' -f $Quality.State, $dot, $slowPct) + $(if ($null -ne $Quality.RttMs) { ", $($Quality.RttMs) ms" } else { '' })
+    }
+    ('{0} {1} {2}% lost' -f $Quality.State, $dot, ([double]$Quality.LossPct).ToString('0.#', $inv)) + $(if ($slow -gt 0) { ", $slowPct% slow" } else { '' })
 }
 
 function Invoke-VeroProbeRound {
@@ -211,9 +240,10 @@ function Invoke-VeroProbeRound {
     }
     foreach ($j in $jobs) {
         $ok = [bool]($j.Ok -and $null -ne $j.Ms)
+        $slow = $ok -and -not (Test-VeroCheckInTime ([string]$j.Target.Method) $j.Ms -Tls:$Tls)
         try { if ($j.Ssl) { $j.Ssl.Dispose() } } catch { Write-Verbose 'probe cleanup' }
         try { if ($j.Client -is [System.Net.Sockets.TcpClient]) { $j.Client.Close() } elseif ($j.Client) { $j.Client.Dispose() } } catch { Write-Verbose 'probe cleanup' }
-        [pscustomobject]@{ Ok = $ok; RttMs = $(if ($ok) { [int]$j.Ms } else { $null }) }
+        [pscustomobject]@{ Ok = $ok; RttMs = $(if ($ok) { [int]$j.Ms } else { $null }); Slow = [bool]$slow }
     }
 }
 
@@ -229,6 +259,11 @@ function Reset-VeroQuality {
     $script:QualitySamples.Clear(); $script:QualityLast = ''; $script:QualityKey = ''
     $p = (Get-VeroPath).Quality
     if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+}
+
+function Test-VeroSlowResult($Result) {
+    <# A probe result answered, but slow (a result without Slow - an older caller - is not slow). #>
+    [bool]($Result.Ok -and $Result.PSObject.Properties['Slow'] -and $Result.Slow)
 }
 
 function Get-VeroEpoch { ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) / 1000.0 }
@@ -253,20 +288,20 @@ function Update-VeroQuality {
     }
     $hid = [string]$cfg.Type -eq 'hiddify'                                  # Hiddify answers ping/TCP itself: TLS handshakes instead
     $round = @(Invoke-VeroProbeRound -Targets $chk.Targets -Tls:$hid -TimeoutMs $(if ($hid) { 5000 } else { 3000 }))
-    for ($ti = 0; $ti -lt $round.Count; $ti++) { $r = $round[$ti]; $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs; Ti = $ti }) }
-    try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+    for ($ti = 0; $ti -lt $round.Count; $ti++) { $r = $round[$ti]; $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs; Ti = $ti; Slow = (Test-VeroSlowResult $r) }) }
+    try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Slow @($round | Where-Object { Test-VeroSlowResult $_ }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
     $win = Get-VeroCheckWindow $chk
     $keep = @($script:QualitySamples.ToArray() | Where-Object { ($now - [double]$_.T) -le ($win + 1) })   # .ToArray(): @(<List>) throws on PowerShell 5.1
     $script:QualitySamples.Clear(); foreach ($s in $keep) { $script:QualitySamples.Add($s) }
     $q = Measure-VeroQuality -Samples $script:QualitySamples.ToArray() -Now $now -WindowSeconds $win -Since $script:QualityStarted
     $p = (Get-VeroPath).Quality
     $per = @(Get-VeroQualityPerTarget -Samples $script:QualitySamples.ToArray() -Targets @($chk.Targets) -Now $now -WindowSeconds $win)
-    $json = [ordered]@{ profile = $cfg.Profile; state = $q.State; lossPct = $q.LossPct; rttMs = $q.RttMs; checks = $q.Checks; lost = $q.Lost
+    $json = [ordered]@{ profile = $cfg.Profile; state = $q.State; lossPct = $q.LossPct; rttMs = $q.RttMs; checks = $q.Checks; lost = $q.Lost; slow = $q.Slow
                         intervalSeconds = $chk.IntervalSeconds; windowMinutes = $chk.WindowMinutes; updated = $now; targets = $per } | ConvertTo-Json -Compress -Depth 4
     [IO.File]::WriteAllText("$p.new", $json)
     Move-Item -LiteralPath "$p.new" -Destination $p -Force
     if ($q.State -ne 'checking' -and $q.State -ne $script:QualityLast) {
-        Write-VeroLog ("connection quality: {0} ({1} of {2} checks lost, {3})" -f $q.State, $q.Lost, $q.Checks, $(if ($null -ne $q.RttMs) { "$($q.RttMs) ms" } else { 'no answer' })) $Action
+        Write-VeroLog ("connection quality: {0} ({1} of {2} checks lost, {3} slow, {4})" -f $q.State, $q.Lost, $q.Checks, $q.Slow, $(if ($null -ne $q.RttMs) { "$($q.RttMs) ms" } else { 'no answer' })) $Action
         $script:QualityLast = $q.State
     }
     [int]$chk.IntervalSeconds
@@ -292,6 +327,6 @@ function Read-VeroQuality {
         $age = $Now - [double]$j.updated
         if ($age -gt [Math]::Max(3 * [int]$j.intervalSeconds, 30) -or $age -lt -60) { return $null }
         $per = @(if ($j.PSObject.Properties['targets']) { $j.targets | ForEach-Object { $_ } | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Label = [string]$_.label; Checks = [int]$_.checks; Lost = [int]$_.lost } } })
-        [pscustomobject]@{ State = [string]$j.state; LossPct = [double]$j.lossPct; RttMs = $(if ($null -ne $j.rttMs) { [int]$j.rttMs } else { $null }); Checks = [int]$j.checks; Lost = [int]$j.lost; Targets = $per }
+        [pscustomobject]@{ State = [string]$j.state; LossPct = [double]$j.lossPct; RttMs = $(if ($null -ne $j.rttMs) { [int]$j.rttMs } else { $null }); Checks = [int]$j.checks; Lost = [int]$j.lost; Targets = $per; Slow = $(if ($j.PSObject.Properties['slow']) { [int]$j.slow } else { 0 }) }
     } catch { $null }
 }

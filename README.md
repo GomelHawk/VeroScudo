@@ -194,7 +194,7 @@ and **Connection**.
 
 **Connection check** (optional, off by default; Settings > *Connection*): while protected, VeroScudo checks up to three
 addresses through the tunnel every 10-100 s - ping, or a TCP connection to a port (default: 1.1.1.1, TCP 443) - and rates
-the last 1-10 minutes: under 10 % lost **good**, 10-50 % **unstable**, over 50 % **bad**. The first rating comes one full
+the last 1-10 minutes: under 10 % lost **good**, 10-50 % **unstable**, over 50 % **bad**; answers slower than 1 s count like partial loss (**unstable**, never bad). The first rating comes one full
 period after each connect or settings change (*checking…* until then). The rating shows in the tooltip
 (*VeroScudo - Protected, connection good*), the menu header and the status window's **CONNECTION** card, which shows the
 redial instead while the VPN is not connected. It only reports - it never reconnects or switches profiles by itself.

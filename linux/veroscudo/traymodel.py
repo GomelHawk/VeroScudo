@@ -167,6 +167,7 @@ def connection_view(f: Facts, v: View, chk: CheckConfig | None = None) -> ConnVi
         tone = {"good": "good", "unstable": "warn"}.get(q.state, "bad")
         window = chk.window_minutes if chk else "?"
         tip = (f"{q.checks} checks in the last {window} min: {q.lost} lost ({q.loss_pct:g}%)"
+               + (f", {q.slow} slow - over 1 s ({q.slow_pct():g}%)" if q.slow else "")
                + (f", median {q.rtt_ms} ms" if q.rtt_ms is not None else ""))
     if q is not None and q.checks > 0 and q.targets:                  # which address loses the checks
         tip = "\n".join(x for x in (tip, *(f"{label}: {lost} of {checks} lost" for label, checks, lost in q.targets)) if x)
@@ -593,7 +594,7 @@ STATS_HEADING = "Last 7 days"
 STATS_NOTE = "One bar = 10 minutes. Hover a bar for its time and numbers."
 STATS_LEGEND = (("good", "Good (or connected, not rated)"), ("unstable", "Unstable"), ("bad", "Bad or could not connect"),
                 ("off", "Not connected"))
-STATS_FOOT = ("Good: under 10 % of the checks lost; unstable: 10-50 %; bad: over 50 %. Ratings need Settings > Connection; "
+STATS_FOOT = ("Good: under 10 % of the checks lost; unstable: 10-50 %, or slow answers (over 1 s); bad: over 50 % lost. Ratings need Settings > Connection; "
               "without it, connected time is green.")
 # the chart's geometry in points, top-down, the Windows card's: 144 bars x 4 (3 + 1 gap) = 576 wide, one row per day
 STATS_GEOMETRY = {"x": 12, "top": 30, "row_h": 57, "bar_w": 4, "strip_h": 24, "label_h": 20, "width": 600, "height": 438}

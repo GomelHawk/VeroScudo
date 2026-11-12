@@ -404,7 +404,7 @@ class Windows:
             grid.attach(self._label(a, wrap=False), 0, r, 1, 1)
             grid.attach(spin, 1, r, 1, 1)
             grid.attach(self._label(b, dim=True, wrap=False), 2, r, 1, 1)
-        more.pack_start(self._label("Good: under 10 % of the checks lost. Unstable: 10-50 %. Bad: over 50 %.", dim=True),
+        more.pack_start(self._label("Good: under 10 % lost. Unstable: 10-50 % or slow (over 1 s). Bad: over 50 %.", dim=True),
                         False, False, 0)
         more.pack_start(self._label("<b>Addresses</b>  <span alpha='60%'>IP, host name or URL - at least one</span>",
                                     markup=True), False, False, 0)

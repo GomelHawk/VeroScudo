@@ -1,7 +1,8 @@
 ﻿# ---------------------------------------------------------------- statistics: 7 days of VPN time and connection quality
 # The watchdog notes, minute by minute, which VeroScudo profile was up and - when the connection check is on - how many of
-# its checks were sent and lost in that minute. One file per local day, state\stats\yyyy-MM-dd.jsonl, one line per minute
-# and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1;
+# its checks were sent, lost and slow (answered, but over 1 s per round trip) in that minute. One file per local day,
+# state\stats\yyyy-MM-dd.jsonl, one line per minute and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"}
+# (up, check off) or the same with "sent":3,"lost":1 (+ ,"slow":2 when any);
 # a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing).
 # Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
 # profile's lasting id (Get-VeroProfileId), so a renamed profile keeps its history; "p" is its name at that minute, so a
@@ -34,10 +35,11 @@ function ConvertTo-VeroJsonString([string]$Text) {
 
 function Format-VeroStatsLine {
     <# One minute of one profile -> its line. Pure. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0, [switch]$Down)
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0, [switch]$Down, [int]$Slow = 0)
     $head = '{{"m":{0},"id":{1},"p":{2}' -f $Minute, (ConvertTo-VeroJsonString $Id), (ConvertTo-VeroJsonString $Name)
     if ($Down) { return $head + ',"down":1}' }
-    if ($Sent -gt 0) { '{0},"sent":{1},"lost":{2}}}' -f $head, $Sent, $Lost } else { $head + '}' }
+    if ($Sent -le 0) { return $head + '}' }
+    ('{0},"sent":{1},"lost":{2}' -f $head, $Sent, $Lost) + $(if ($Slow -gt 0) { ',"slow":' + $Slow } else { '' }) + '}'
 }
 
 function Save-VeroStatsMinute {
@@ -46,7 +48,7 @@ function Save-VeroStatsMinute {
     if (-not $s) { return }
     $lines = @(foreach ($id in $s.P.Keys) {
         $v = $s.P[$id]
-        if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost }
+        if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost -Slow $v.Slow }
         elseif ($v.Down) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Down }      # on, but no tunnel all minute
     })
     if ($lines.Count -eq 0) { return }
@@ -68,7 +70,7 @@ function Select-VeroStatsMinute([datetime]$Now) {
 }
 
 function Get-VeroStatsSlot($Minute, [string]$Id, [string]$Name) {
-    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Down = $false; Sent = 0; Lost = 0; Name = $Name } }
+    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Down = $false; Sent = 0; Lost = 0; Slow = 0; Name = $Name } }
     $Minute.P[$Id].Name = $Name
     $Minute.P[$Id]
 }
@@ -84,9 +86,9 @@ function Update-VeroStats {
 
 function Add-VeroStatsChecks {
     <# One round of the connection check: its checks count in this minute for this profile (and it was up - the checks need the tunnel). #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Sent, [Parameter(Mandatory)][int]$Lost, [Parameter(Mandatory)][string]$Id, [string]$Name = '', [datetime]$Now = (Get-Date))
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Sent, [Parameter(Mandatory)][int]$Lost, [Parameter(Mandatory)][string]$Id, [string]$Name = '', [datetime]$Now = (Get-Date), [int]$Slow = 0)
     $v = Get-VeroStatsSlot (Select-VeroStatsMinute $Now) $Id $Name
-    $v.Up = $true; $v.Sent += $Sent; $v.Lost += $Lost
+    $v.Up = $true; $v.Sent += $Sent; $v.Lost += $Lost; $v.Slow += $Slow
 }
 
 function Remove-VeroOldStats {
@@ -103,9 +105,9 @@ function Remove-VeroOldStats {
     }
 }
 
-$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+))?(,"down":1)?\}\s*$'
+$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+)(?:,"slow":(\d+))?)?(,"down":1)?\}\s*$'
 function ConvertFrom-VeroStatsText {
-    <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost } } }; Names = @{ <id> = its last name } }. Several
+    <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost; Down; Slow } } }; Names = @{ <id> = its last name } }. Several
        lines for one minute (the watchdog restarted) are added up; a broken line or one without an id is skipped. Pure. #>
     [CmdletBinding()] param([string]$Text)
     $data = @{}; $names = @{}; $decoded = @{}
@@ -118,13 +120,14 @@ function ConvertFrom-VeroStatsText {
         if (-not $decoded.ContainsKey($raw)) { $decoded[$raw] = try { [string](('"' + $raw + '"') | ConvertFrom-Json) } catch { $raw } }
         $sent = if ($mt.Groups[4].Success) { [int]$mt.Groups[4].Value } else { 0 }
         $lost = if ($mt.Groups[5].Success) { [Math]::Min([int]$mt.Groups[5].Value, $sent) } else { 0 }
+        $slow = if ($mt.Groups[6].Success) { [Math]::Min([int]$mt.Groups[6].Value, $sent - $lost) } else { 0 }
         if (-not $data.ContainsKey($id)) { $data[$id] = @{} }
         $day = $data[$id]
-        $down = $mt.Groups[6].Success                                    # on, not connected - an up line for the minute wins
+        $down = $mt.Groups[7].Success                                    # on, not connected - an up line for the minute wins
         if ($day.ContainsKey($m)) {
-            $day[$m].Sent += $sent; $day[$m].Lost += $lost
+            $day[$m].Sent += $sent; $day[$m].Lost += $lost; $day[$m].Slow += $slow
             if (-not $down) { $day[$m].Down = $false }
-        } else { $day[$m] = @{ Sent = $sent; Lost = $lost; Down = $down } }
+        } else { $day[$m] = @{ Sent = $sent; Lost = $lost; Down = $down; Slow = $slow } }
         $names[$id] = $decoded[$raw]
     }
     @{ Data = $data; Names = $names }
@@ -161,12 +164,11 @@ function Get-VeroStatsChoices {
 
 function Get-VeroStatsState {
     <# One bar's colour: off (this profile not connected), up (connected, not rated - the check was off), good / unstable / bad (the connection
-       check's thresholds: under 10 % lost, 10-50 %, over 50 %). Pure. #>
-    [CmdletBinding()] param([int]$UpMinutes, [int]$Sent, [int]$Lost)
+       check's rating, Get-VeroQualityRating: slow answers make a bar unstable, never bad). Pure. #>
+    [CmdletBinding()] param([int]$UpMinutes, [int]$Sent, [int]$Lost, [int]$Slow = 0)
     if ($UpMinutes -le 0) { return 'off' }
     if ($Sent -le 0) { return 'up' }
-    $loss = 100.0 * $Lost / $Sent
-    if ($loss -lt 10) { 'good' } elseif ($loss -gt 50) { 'bad' } else { 'unstable' }
+    Get-VeroQualityRating $Lost $Slow $Sent
 }
 
 function ConvertTo-VeroStatsDay {
@@ -179,18 +181,18 @@ function ConvertTo-VeroStatsDay {
     $bars = New-Object System.Collections.Generic.List[object]
     $vpn = 0; $good = 0; $downAll = 0
     for ($start = 0; $start -lt 1440; $start += $BucketMinutes) {
-        $up = 0; $down = 0; $sent = 0; $lost = 0
+        $up = 0; $down = 0; $sent = 0; $lost = 0; $slow = 0
         for ($m = $start; $m -lt [Math]::Min($start + $BucketMinutes, 1440); $m++) {
             if (-not $Minutes.ContainsKey($m)) { continue }
             $x = $Minutes[$m]
-            if ($x.ContainsKey('Down') -and $x.Down) { $down++ } else { $up++; $sent += $x.Sent; $lost += $x.Lost }
+            if ($x.ContainsKey('Down') -and $x.Down) { $down++ } else { $up++; $sent += $x.Sent; $lost += $x.Lost; if ($x.ContainsKey('Slow')) { $slow += $x.Slow } }
         }
         $state = if ($start -ge $UntilMinute -and $up -eq 0 -and $down -eq 0) { 'future' }
                  elseif ($down -ge 2) { 'bad' }
-                 else { Get-VeroStatsState -UpMinutes $up -Sent $sent -Lost $lost }
+                 else { Get-VeroStatsState -UpMinutes $up -Sent $sent -Lost $lost -Slow $slow }
         $vpn += $up; $downAll += $down
         if ($state -eq 'good' -or $state -eq 'up') { $good += $up }
-        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; DownMinutes = $down; Sent = $sent; Lost = $lost })
+        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; DownMinutes = $down; Sent = $sent; Lost = $lost; Slow = $slow })
     }
     $all = $vpn + $downAll
     [pscustomobject]@{
@@ -219,7 +221,8 @@ function Format-VeroStatsBar {
         'up'     { return "$span  connected $($Bar.UpMinutes) of $BucketMinutes min $dash not rated (connection check off)" }
         default {
             $pct = ([Math]::Round(100.0 * $Bar.Lost / $Bar.Sent, 0)).ToString([Globalization.CultureInfo]::InvariantCulture)
-            "$span  $($Bar.State) $dash $pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), connected $($Bar.UpMinutes) of $BucketMinutes min"
+            $sl = if ($Bar.PSObject.Properties['Slow'] -and [int]$Bar.Slow -gt 0) { "$($Bar.Slow) slow (over 1 s), " } else { '' }
+            "$span  $($Bar.State) $dash $pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), ${sl}connected $($Bar.UpMinutes) of $BucketMinutes min"
         }
     }
 }

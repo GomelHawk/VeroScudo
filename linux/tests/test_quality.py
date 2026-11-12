@@ -197,7 +197,7 @@ def test_tcp_check_against_a_local_listener():
     srv.listen(1)
     port = srv.getsockname()[1]
     try:
-        ok, rtt = quality.check(Target("127.0.0.1", "tcp", port))
+        ok, rtt, _ = quality.check(Target("127.0.0.1", "tcp", port))
         assert ok and rtt is not None
     finally:
         srv.close()
@@ -440,3 +440,47 @@ def test_the_guard_writes_down_minutes_while_on_and_not_connected(guard, monkeyp
     g.stats.flush()
     lines = [ln for f in (g.store.state / "stats").glob("*.jsonl") for ln in f.read_text().splitlines()]
     assert any(ln.endswith('"p":"Work","down":1}') for ln in lines)
+
+
+def test_a_slow_answer_is_marked_slow():
+    """Over 1000 ms per round trip = slow (ping/TCP 1 round trip, a TLS handshake 2, HTTPS 3) - the same rule as
+    Windows' Test-VeroCheckInTime."""
+    ping, tcp, https = Target("1.1.1.1", "ping"), Target("1.1.1.1", "tcp", 443), Target("api.example.com", "https", 443)
+    assert quality.judge(ping, (True, 1000)) == (True, 1000, False)
+    assert quality.judge(ping, (True, 1001)) == (True, 1001, True)
+    assert quality.judge(tcp, (True, 1500))[2] is True
+    assert quality.judge(tcp, (True, 1500), tls=True)[2] is False         # Hiddify: a TLS handshake, 2 round trips
+    assert quality.judge(ping, (True, 2001), tls=True)[2] is True
+    assert quality.judge(https, (True, 2900))[2] is False
+    assert quality.judge(https, (True, 3001))[2] is True
+    assert quality.judge(tcp, (False, None)) == (False, None, False)
+
+
+def test_check_marks_slow(monkeypatch):
+    monkeypatch.setattr(quality, "_check", lambda t, tls=False: (True, 1200))
+    assert quality.check(Target("1.1.1.1", "ping")) == (True, 1200, True)
+    assert quality.check(Target("api.example.com", "https", 443)) == (True, 1200, False)
+
+
+def test_slow_answers_make_the_rating_unstable_never_bad():
+    """Slow answers count like partial loss: 10 % or more lost or slow together -> unstable; bad only from real loss."""
+    assert quality.rating(0, 0, 18) == "good"
+    assert quality.rating(0, 1, 18) == "good"                 # 5.6 %
+    assert quality.rating(0, 2, 18) == "unstable"             # 11 %
+    assert quality.rating(0, 18, 18) == "unstable"            # all slow: still answers - not bad
+    assert quality.rating(1, 1, 18) == "unstable"
+    assert quality.rating(10, 8, 18) == "bad"
+    samples = [(100.0 + i, True, 1400, 0, True) for i in range(6)]
+    q = quality.rate(samples, 106.0, 60.0)
+    assert (q.state, q.lost, q.slow, q.rtt_ms) == ("unstable", 0, 6, 1400)
+    assert quality.describe(q) == "unstable · 100% slow, 1400 ms"
+    assert quality.describe(Quality("unstable", 11.1, 300, 18, 2, slow=3)) == "unstable · 11.1% lost, 16.7% slow"
+
+
+def test_monitor_keeps_slow_and_quality_json_carries_it(tmp_path):
+    m = quality.Monitor(tmp_path / "quality.json")
+    c = CheckConfig(True, 10, 1, (Target("1.1.1.1", "ping"),))
+    for i in range(7):
+        q = m.add_round(c, "Work", [(True, 1500, True)], now=1000.0 + 10 * i)
+    assert (q.state, q.slow) == ("unstable", 7)
+    assert quality.read(tmp_path / "quality.json", "Work", now=1060.0).slow == 7

@@ -351,6 +351,11 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
   kill-switch is opened for them. While blocked, off or redialing there is no rating - the samples are dropped, and a
   new connection (or another profile) starts a new rating. An address in the local network is blocked like the rest of
   the LAN unless `lanAllow` covers it.
+- **Slow answers:** an answer slower than 1000 ms per round trip is *slow* (ping and TCP: 1 round trip; a TLS
+  handshake: 2; HTTPS: 3). Slow answers count like partial loss: 10 % or more of the checks lost or slow together make
+  the rating - and the statistics' bar - **unstable**; they never make it bad (the connection still answers). Bad comes
+  only from real loss. The tooltip and the statistics list them ("12 slow (over 1 s)"); `quality.json` and the day
+  files carry a `slow` count.
 - **The rating:** every check counts. Loss = failed checks / all checks of the last `windowMinutes` (never fewer than 3
   rounds). Under 10 % lost: **good**; 10-50 %: **unstable**; over 50 %: **bad**. The delay shown is the median of the
   answered checks.

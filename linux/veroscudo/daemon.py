@@ -465,12 +465,13 @@ class Guard:
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
         results = quality.run_round(chk.targets, tls=cfg.current.vpn_type == hiddify.KIND)   # Hiddify answers ping/TCP itself
         try:
-            self.stats.checks(len(results), sum(1 for ok, _ in results if not ok), cfg.current.id, cfg.profile)
+            self.stats.checks(len(results), sum(1 for r in results if not r[0]), cfg.current.id, cfg.profile,
+                              slow=sum(1 for r in results if r[0] and len(r) > 2 and r[2]))
         except OSError:
             log.exception("statistics")
         q = self.quality.add_round(chk, cfg.profile, results, down_at=self.store.last_down())
         if q.state != "checking" and q.state != self.quality.last_state:
-            log.info("connection quality: %s (%s of %s checks lost, %s)", q.state, q.lost, q.checks,
+            log.info("connection quality: %s (%s of %s checks lost, %s slow, %s)", q.state, q.lost, q.checks, q.slow,
                      f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")
             self.quality.last_state = q.state
         return float(chk.interval_seconds)

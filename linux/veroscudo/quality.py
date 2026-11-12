@@ -3,8 +3,10 @@
 Same rules on every platform (Windows: Core/66-Quality.ps1, docs/ARCHITECTURE.md "Connection check"):
 - every `intervalSeconds` (10-100) the guard checks each address once: ping, a TCP connection to a port, or HTTPS (a TLS
   handshake and a HEAD request - any HTTP answer counts; no account or key is ever sent);
+- an answer slower than 1000 ms per round trip is "slow" (ping and TCP: 1 round trip, a TLS handshake 2, HTTPS 3);
 - every check counts: loss = failed checks / all checks in the last `windowMinutes` (1-10), never fewer than 3 rounds;
-- below 10 % lost: good; 10-50 %: unstable; above 50 %: bad;
+- below 10 % lost: good; 10-50 %: unstable; above 50 %: bad. Slow answers count like partial loss: 10 % or more lost or
+  slow together makes a good connection unstable - never bad (it still answers);
 - no rating ("checking") until one full window has passed since the rating started: it starts over on every connect,
   profile switch and change of the check settings (interval, window, addresses) - an early rating of a connection that
   has just come up is not one to trust.
@@ -36,6 +38,7 @@ PORT_METHODS = ("tcp", "https")       # the methods with a port
 TIMEOUT = 3.0                         # one check; a round runs its checks in parallel
 TLS_TIMEOUT = 5.0                     # a TLS check through a proxy (Hiddify) needs a few round trips more
 GOOD_BELOW, BAD_ABOVE = 10.0, 50.0    # loss %, see the module doc
+SLOW_MS = 1000                        # per round trip: a slower answer is "slow" (see the module doc)
 DEFAULT_HOST = "1.1.1.1"
 
 
@@ -173,6 +176,10 @@ class Quality:
     checks: int = 0
     lost: int = 0
     targets: tuple[tuple[str, int, int], ...] = ()     # per address in the window: (label, checks, lost)
+    slow: int = 0                     # answered, but slower than SLOW_MS per round trip
+
+    def slow_pct(self) -> float:
+        return round(100.0 * self.slow / self.checks, 1) if self.checks else 0.0
 
 
 def window_seconds(cfg: CheckConfig) -> float:
@@ -181,19 +188,27 @@ def window_seconds(cfg: CheckConfig) -> float:
     return max(cfg.window_minutes * 60.0, MIN_CHECKS * cfg.interval_seconds * 1.0)
 
 
+def rating(lost: int, slow: int, checks: int) -> str:
+    """good / unstable / bad from the counts (checks > 0): see the module doc. Pure; the statistics' bars use it too."""
+    loss = 100.0 * lost / checks
+    if loss > BAD_ABOVE:
+        return "bad"
+    return "unstable" if loss >= GOOD_BELOW or 100.0 * (lost + slow) / checks >= GOOD_BELOW else "good"
+
+
 def rate(samples, now: float, window_s: float, since: float | None = None) -> Quality:
-    """samples: (time, ok, rtt_ms or None[, target index]), one per check. since: when the rating started - until a full window has passed
+    """samples: (time, ok, rtt_ms or None[, target index[, slow]]), one per check. since: when the rating started - until a full window has passed
     the answer is "checking". Pure."""
     recent = [s for s in samples if now - s[0] <= window_s]
     n = len(recent)
     if n < MIN_CHECKS or (since is not None and now - since < window_s):
         return Quality("checking", checks=n, lost=sum(1 for s in recent if not s[1]))
     lost = sum(1 for s in recent if not s[1])
+    slow = sum(1 for s in recent if s[1] and len(s) > 4 and s[4])
     loss = 100.0 * lost / n
     rtts = [s[2] for s in recent if s[1] and s[2] is not None]
     rtt = round(statistics.median(rtts)) if rtts else None
-    state = "good" if loss < GOOD_BELOW else ("bad" if loss > BAD_ABOVE else "unstable")
-    return Quality(state, round(loss, 1), rtt, n, lost)
+    return Quality(rating(lost, slow, n), round(loss, 1), rtt, n, lost, slow=slow)
 
 
 def per_target(samples, targets, now: float, window_s: float) -> tuple[tuple[str, int, int], ...]:
@@ -208,12 +223,15 @@ def per_target(samples, targets, now: float, window_s: float) -> tuple[tuple[str
 
 
 def describe(q: Quality) -> str:
-    """'good · 45 ms', 'unstable · 23% lost', 'checking…' - the short text of the tray. Pure."""
+    """'good · 45 ms', 'unstable · 23% lost', 'unstable · 40% slow, 1450 ms', 'unstable · 12% lost, 30% slow',
+    'checking…' - the short text of the tray. Pure."""
     if q.state == "checking":
         return "checking…"
     if q.state == "good":
         return f"good · {q.rtt_ms} ms" if q.rtt_ms is not None else "good"
-    return f"{q.state} · {q.loss_pct:g}% lost"
+    if q.slow and not q.lost:
+        return f"{q.state} · {q.slow_pct():g}% slow" + (f", {q.rtt_ms} ms" if q.rtt_ms is not None else "")
+    return f"{q.state} · {q.loss_pct:g}% lost" + (f", {q.slow_pct():g}% slow" if q.slow else "")
 
 
 # ---------------------------------------------------------------- the checks (impure)
@@ -260,7 +278,25 @@ def _https(t: Target, start: float) -> bool:
         return False
 
 
-def check(t: Target, tls: bool = False) -> tuple[bool, int | None]:
+def round_trips(t: Target, tls: bool = False) -> int:
+    """How many round trips a check takes: ping and TCP 1, a TLS handshake 2 (TCP + TLS 1.3), HTTPS 3 (+ the request). Pure."""
+    if t.method == "https":
+        return 3
+    return 2 if tls else 1
+
+
+def judge(t: Target, result: tuple[bool, int | None], tls: bool = False) -> tuple[bool, int | None, bool]:
+    """(answered, ms) -> (answered, ms, slow): slow = answered, but slower than SLOW_MS per round trip. Pure."""
+    ok, ms = result
+    return ok, ms, bool(ok and ms is not None and ms > SLOW_MS * round_trips(t, tls))
+
+
+def check(t: Target, tls: bool = False) -> tuple[bool, int | None, bool]:
+    """One check, judged: (answered, its time in ms, slow) - see _check and judge."""
+    return judge(t, _check(t, tls), tls)
+
+
+def _check(t: Target, tls: bool = False) -> tuple[bool, int | None]:
     """One check: (answered, round trip in ms). https: see _https. tls (Hiddify profiles): a TLS handshake on the target's
     TCP port (443 for a ping target) instead of ping/TCP - Hiddify's TUN answers pings and completes TCP handshakes itself,
     locally, also when none of its servers works (<1 ms to a fake-DNS address); only a real server
@@ -299,9 +335,9 @@ def check(t: Target, tls: bool = False) -> tuple[bool, int | None]:
         return False, None
 
 
-def run_round(targets, tls: bool = False) -> list[tuple[bool, int | None]]:
+def run_round(targets, tls: bool = False) -> list[tuple[bool, int | None, bool]]:
     """Every address once, in parallel (a round takes at most TIMEOUT, not TIMEOUT per address). tls: see check()."""
-    out: list = [(False, None)] * len(targets)
+    out: list = [(False, None, False)] * len(targets)
     slow = tls or any(t.method == "https" for t in targets)    # a TLS handshake needs a few round trips more
 
     def one(i: int, t: Target) -> None:
@@ -340,8 +376,8 @@ class Monitor:
         if key != self.key or down_at > self.started:        # new connection, other profile or other rules: start over
             self.samples.clear()
             self.key, self.started, self.last_state = key, now, ""
-        for i, (ok, rtt) in enumerate(results):
-            self.samples.append((now, ok, rtt, i))                # i: the address (per-address counts in quality.json)
+        for i, (ok, rtt, *rest) in enumerate(results):         # (ok, rtt[, slow])
+            self.samples.append((now, ok, rtt, i, bool(rest and rest[0])))   # i: the address (per-address counts in quality.json)
         q = replace(rate(self.samples, now, window_seconds(cfg), since=self.started),
                     targets=per_target(self.samples, cfg.targets, now, window_seconds(cfg)))
         write(self.path, q, cfg, profile, now)
@@ -350,7 +386,7 @@ class Monitor:
 
 def write(path: Path, q: Quality, cfg: CheckConfig, profile: str, now: float) -> None:
     data = {"profile": profile, "state": q.state, "lossPct": q.loss_pct, "rttMs": q.rtt_ms, "checks": q.checks, "lost": q.lost,
-            "intervalSeconds": cfg.interval_seconds, "windowMinutes": cfg.window_minutes, "updated": now,
+            "slow": q.slow, "intervalSeconds": cfg.interval_seconds, "windowMinutes": cfg.window_minutes, "updated": now,
             "targets": [{"label": label, "checks": n, "lost": k} for label, n, k in q.targets]}
     tmp = path.with_suffix(".json.new")
     try:
@@ -380,6 +416,6 @@ def read(path: Path, profile: str, now: float | None = None) -> Quality | None:
         targets = tuple((str(t.get("label", "")), int(t.get("checks", 0)), int(t.get("lost", 0)))
                         for t in (raw if isinstance(raw, list) else []) if isinstance(t, dict))
         return Quality(str(j.get("state", "checking")), float(j.get("lossPct", 0)), int(rtt) if rtt is not None else None,
-                       int(j.get("checks", 0)), int(j.get("lost", 0)), targets)
+                       int(j.get("checks", 0)), int(j.get("lost", 0)), targets, int(j.get("slow", 0)))
     except (TypeError, ValueError):
         return None
