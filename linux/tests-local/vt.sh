@@ -75,8 +75,9 @@ print("tun from config:", hiddify.tun_settings(c), "| servers:", len(eps), [str(
 print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel(p))' "$cfgp"
     echo "shared for the tray: $(cat /run/veroscudo/hiddify-tun.json 2>&1)"
     veroscudo status | grep -E "^(armed|connected|state|tunnel) "
-    echo "guard log (Hiddify):"; grep -i -E "hiddify" /var/log/veroscudo.log | tail -6 | cut -c12-150
+    echo "guard log:"; tail -n 10 /var/log/veroscudo.log | cut -c12-150
     echo "kill-switch permits:"; nft list table inet veroscudo 2>/dev/null | grep -E "daddr|ifname" | grep -v -E "dport 53 |/(8|10|12|16|24) " | head -8 | cut -c1-110
+    echo "Hiddify's own connections (peer):"; ss -tunpH 2>/dev/null | grep -i hiddify | awk '{print $1, $6}' | sort | uniq -c | head -8
     echo "exit address now: $(curl -s --max-time 6 https://ifconfig.me || echo none)" ;;
   hfix)
     owner_name="$OWNER"; [ "$owner_name" = root ] && { echo "run it as your user: vt hfix"; exit 1; }
