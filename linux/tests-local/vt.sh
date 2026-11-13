@@ -71,7 +71,7 @@ try:
 except Exception as e:
     print("VeroScudo cannot read it:", type(e).__name__, str(e)[:80]); raise SystemExit
 eps, dropped = hiddify.endpoints(c)
-print("tun from config:", hiddify.tun_settings(c), "| servers:", len(eps), [f"{h}:{pt}/{'+'.join(pr)}" for h, pt, pr in eps][:4], "| dropped:", len(dropped))
+print("tun from config:", hiddify.tun_settings(c), "| servers:", len(eps), [str(h) + ":" + str(pt) + "/" + "+".join(pr) for h, pt, pr in eps][:4], "| dropped:", len(dropped))
 print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel(p))' "$cfgp"
     echo "shared for the tray: $(cat /run/veroscudo/hiddify-tun.json 2>&1)"
     veroscudo status | grep -E "^(armed|connected|state|tunnel) "
