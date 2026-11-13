@@ -253,8 +253,9 @@ sleep 10
 # ---- 4b The VPN server goes away while the network stays up: VeroScudo must stay blocked the whole time, nothing gets out
 if [ "$TYPE" != hiddify ]; then
   phase 4b-unreachable
-  srv=$(nft list table inet veroscudo 2>/dev/null | grep -E 'daddr \{.*\} (udp|tcp) dport' | grep -v 'dport 53 ' \
-        | grep -oE '\{[^}]*\}' | tr -d '{},' | xargs)
+  # the server rules: "ip daddr { a, b } tcp dport 443 ..." - nft prints a one-address set without braces ("ip daddr a ...")
+  srv=$(nft list table inet veroscudo 2>/dev/null | grep -E 'daddr .* ((udp|tcp) dport|meta l4proto)' | grep -v -E 'dport 53 ' \
+        | sed -E 's/.*daddr (\{[^}]*\}|[^ ]+) .*/\1/' | tr -d '{},' | tr ' ' '\n' | grep -v '^$' | sort -u | xargs)
   if [ -z "$srv" ]; then
     fail "no VPN server address found in the kill-switch"
   else
