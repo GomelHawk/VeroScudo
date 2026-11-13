@@ -30,9 +30,9 @@ _BASE = [
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
                    dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False,
-                   endpoints: tuple = ()) -> str:
+                   endpoints: tuple = (), cgroup: tuple[str, int] | None = None) -> str:
     """`endpoints` (a Hiddify profile): (address, port, protocols) Hiddify itself must reach outside the tunnel, in every
-    state - firewall.render_ruleset says the same. `bridges` (scutil.vm_bridges: the host side of NAT/host-only VMs, e.g. bridge100) are passed in every state, both
+    state - firewall.render_ruleset says the same. `cgroup` is Linux only (pf has no cgroups): ignored here. `bridges` (scutil.vm_bridges: the host side of NAT/host-only VMs, e.g. bridge100) are passed in every state, both
     ways: VM <-> host (DHCP and DNS from the vmnet service) stays on this machine. With the VM setting on, a VM's way out is
     then judged like the host's own traffic on the interface it leaves by - the tunnel while it is up, nothing else while it
     is down (the forwarded packet meets the rules below on en0/utun). `vms_free` (Settings: VMs not protected): packets that

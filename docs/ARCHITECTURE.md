@@ -87,7 +87,11 @@ this" itself. A new type is a new entry in that table plus its own functions.
 
 **Hiddify (VPN mode).** Import: Settings > *Import from Windows...* offers Hiddify when it is installed (refused with a note
 in proxy mode - `flutter.service-mode` in its settings). Linux/macOS (`linux/veroscudo/hiddify.py`): nftables and pf cannot
-allow by program, so the permit is the servers of Hiddify's **live** sing-box config (`configPath` -> `current-config.json`):
+allow by program. Linux with Hiddify 5, whose core runs in its root service `HiddifyAdminBG.service`: that service is let
+out to any address by its cgroup (`socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service"`, the cgroup id in the rule's
+comment so a restarted service reloads the rules) - the Windows program permit's equivalent; a kernel without `nft_socket`
+refuses the rule, and the guard falls back to the server list alone (logged once). Besides that, and on macOS only, the
+permit is the servers of Hiddify's **live** sing-box config (`configPath` -> `current-config.json`):
 every proxy outbound's `server:server_port` for TCP and UDP plus its direct DNS servers, host names resolved; read every pass
 with limits (64 endpoints, 2 MB, a regular file owned by root or that user, no private/loopback/link-local/multicast
 addresses; a broken file keeps the last good set). The guard (root) reads a user-owned file here: that user can already turn

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -41,6 +42,7 @@ class Guard:
         self._hiddify_good: dict = {}            # profile id -> the last good permit set (a broken file keeps it)
         self._hiddify_said: dict = {}            # what was logged last per topic - each problem is logged once
         self._lookup_next = False                # look the server name up after the next block (a redial failed)
+        self._cgroup_ok = True                   # False once nftables refused the cgroup rule (kernel without nft_socket)
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -168,7 +170,15 @@ class Guard:
         vm = self.vm_wanted()
         bridges = tuple(nm.vm_bridges())                       # re-read on every pass: a bridge created later is picked up within 15 s
         return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and vm, dns=dns, bridges=bridges,
-                                       vms_free=not vm, endpoints=self.hiddify_endpoints(cfg)), tun
+                                       vms_free=not vm, endpoints=self.hiddify_endpoints(cfg),
+                                       cgroup=self.hiddify_cgroup(cfg)), tun
+
+    def hiddify_cgroup(self, cfg: Config) -> tuple[str, int] | None:
+        """A Hiddify profile: Hiddify's root service, let out by its cgroup like the Windows guard lets its programs out -
+        unless nftables refused that rule once (then the server list alone, as before)."""
+        if cfg.current.vpn_type != hiddify.KIND or not self._cgroup_ok:
+            return None
+        return hiddify.service_cgroup()
 
     def enable_killswitch(self, tunnel_up: bool, force: bool = False) -> None:
         """Applies the ruleset when it differs from what is in force or when it is no longer in force (a `nft flush ruleset`
@@ -196,7 +206,19 @@ class Guard:
         rs, tun = self.desired_ruleset(tunnel_up)
         if not force and rs == self._applied and firewall.is_active():
             return tun
-        firewall.apply(rs)
+        try:
+            firewall.apply(rs)
+        except subprocess.CalledProcessError:
+            if "socket cgroupv2" not in rs:
+                raise
+            # this kernel cannot match a cgroup (no nft_socket): Hiddify's servers by address only, as before
+            self._cgroup_ok = False
+            log.warning("kill-switch: nftables refused the rule for Hiddify's service (cgroup) - Hiddify is let out by "
+                        "its server addresses only")
+            rs, tun = self.desired_ruleset(tunnel_up)
+            if not force and rs == self._applied and firewall.is_active():
+                return tun
+            firewall.apply(rs)
         why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
         self._applied = rs
         self.store.set_applied(self.cfg.profile, tun)

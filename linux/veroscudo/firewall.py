@@ -5,11 +5,14 @@ a drop here is final whatever other tables (ufw, docker, firewalld) accept."""
 from __future__ import annotations
 
 import ipaddress
+import re
 import subprocess
 from dataclasses import dataclass, field
 
 from .config import Config, server_rules
 from .netutil import IFNAME  # also re-exported for the pf backend
+
+_CGROUP = re.compile(r"^[A-Za-z0-9_.@-]+(/[A-Za-z0-9_.@-]+){0,7}$")   # a cgroup path: nothing that could end a rule
 
 TABLE = "inet veroscudo"
 
@@ -51,7 +54,7 @@ def group_endpoints(endpoints) -> list[tuple[int, int, tuple[str, ...], list[str
 
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
                    dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False,
-                   endpoints: tuple = ()) -> str:
+                   endpoints: tuple = (), cgroup: tuple[str, int] | None = None) -> str:
     """Default-drop output, input and forward (containers/VMs) with the documented allow-list. DNS is allowed only while
     the tunnel is down: while it is up, name resolution goes through the tunnel like everything else (no DNS leak).
 
@@ -121,6 +124,11 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {'accept' if wg else keep}")
             else:
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} {keep}")
+    if cgroup:                                                          # Hiddify's root service, to any address (hiddify.py)
+        path, cid = cgroup
+        if not _CGROUP.match(path) or {".", ".."} & set(path.split("/")) or not isinstance(cid, int):
+            raise ValueError(f"unsafe cgroup path {path!r}")
+        lines.append(f'    socket cgroupv2 level {path.count("/") + 1} "{path}" {keep} comment "Hiddify core, cgroup {cid}"')
     for ver, port, protos, addrs in group_endpoints(endpoints):        # Hiddify: its servers and direct DNS servers
         fam = "ip" if ver == 4 else "ip6"
         l4 = f"{protos[0]} dport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th dport {port}"

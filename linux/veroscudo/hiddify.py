@@ -546,6 +546,25 @@ def find(home: Path, platform: str | None = None) -> Path | None:
     return best
 
 
+# Hiddify 5's root service on Linux runs the core - the process that talks to Hiddify's servers and its own DNS. Like the
+# Windows guard's program permit (Hiddify.exe / HiddifyCli.exe to any address), the kill-switch lets this service out by
+# its cgroup: its servers change with each subscription update and sit behind CDNs that answer Hiddify's own DNS with
+# other addresses than the system's, so an address list alone cannot keep up.
+SERVICE_CGROUP = "system.slice/HiddifyAdminBG.service"
+
+
+def service_cgroup(root: Path = Path("/sys/fs/cgroup"), platform: str | None = None) -> tuple[str, int] | None:
+    """Hiddify's root service as nftables matches it: its cgroup path and the cgroup's id (its inode - a restarted service
+    gets a new cgroup, and the rule must be loaded again). None when the service is not running, or not on Linux."""
+    if (platform or sys.platform) == "darwin":
+        return None
+    try:
+        st = os.stat(root / SERVICE_CGROUP)
+    except OSError:
+        return None
+    return (SERVICE_CGROUP, st.st_ino) if stat.S_ISDIR(st.st_mode) else None
+
+
 def mode_of(folder: Path, home: Path, platform: str | None = None) -> str | None:
     """Hiddify's service mode from shared_preferences.json: in the config's own data folder, else (the root service's
     folder has none) in the user's data folders. None when not found."""

@@ -88,7 +88,13 @@ carries() {      # the tunnel carries traffic: an exit address not seen without 
 kill_vpn() {     # the VPN dies: its process killed (WireGuard: its interface removed); TUN = the tunnel, "" when skipped
   TUN=$(field tunnel)
   case "$TYPE:$TUN" in
-    hiddify:*) pkill -KILL -i hiddify; say "killed Hiddify (tunnel $TUN)" ;;
+    hiddify:*)   # Hiddify 5: the core runs in its root service - kill that only (killing the app too makes it reinstall the
+                 # service when it starts again); older Hiddify: the app itself
+      if systemctl is-active --quiet HiddifyAdminBG 2>/dev/null; then
+        systemctl kill -s KILL HiddifyAdminBG; say "killed Hiddify's core service (tunnel $TUN)"
+      else
+        pkill -KILL -i hiddify; say "killed Hiddify (tunnel $TUN)"
+      fi ;;
     wireguard:*) ip link delete dev "$TUN"; say "removed the WireGuard interface $TUN" ;;
     openvpn:?*) pkill -KILL -x openvpn; say "killed openvpn (tunnel $TUN)" ;;
     *:ppp*) pkill -KILL -x pppd; say "killed pppd (tunnel $TUN)" ;;
@@ -216,7 +222,7 @@ kill_vpn
 if [ -n "$TUN" ]; then
   if t=$(wait_state blocked 10); then say "blocked $t s after the VPN died"; probe_now; else fail "not blocked within 10 s after the VPN died (state '$(state)')"; fi
   if [ "$TYPE" = hiddify ]; then
-    todo "start Hiddify again and connect (VPN mode)"
+    todo "connect Hiddify again (VPN mode; start it first if it closed)"
     if t=$(wait_state protected 240); then say "protected $t s after the request"; else fail "not protected within 240 s"; fi
   else
     if t=$(wait_state protected 120); then say "protected again after $t s"; else fail "not protected again within 120 s"; fi

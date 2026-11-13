@@ -12,6 +12,11 @@ All notable changes to VeroScudo are recorded here. The format follows
   tray, which cannot read that file. The tray's *Import…* list (built as the user, before the password prompt) shows
   Hiddify too.
 - README: the fix for Hiddify 5.5's own "exit status 127" in VPN mode.
+- Linux: while armed, Hiddify 5's own service (`HiddifyAdminBG`, the core) may reach any address, as the Windows version
+  lets the Hiddify programs out. Before, only the servers in its config were allowed, resolved by the system's DNS - but
+  Hiddify's core resolves them with its own DNS (other addresses behind a CDN) and talks to that DNS too, so with
+  VeroScudo on nothing went through. A kernel that cannot match a service (no `nft_socket`) falls back to the server
+  list, logged once.
 
 ### Changed: status window - Copy next to Clear, a Statistics button (Windows, Linux, macOS)
 - The report is copied with a **Copy** link next to *Clear* in Recent events (*Copied* after a click); the button row

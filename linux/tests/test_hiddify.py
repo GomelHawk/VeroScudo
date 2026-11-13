@@ -353,6 +353,27 @@ def test_pf_permits_each_endpoint_for_its_protocols():
     assert "pass quick on utun5 all" in rs
 
 
+def test_nft_lets_hiddifys_service_out_by_its_cgroup_and_pf_ignores_it():
+    cg = (hiddify.SERVICE_CGROUP, 4242)
+    for tun in ("tun0", None):                                          # in every state, like its servers
+        rs = firewall.render_ruleset(hcfg(), [], tun, vm_allowed=False, endpoints=EPS, cgroup=cg)
+        assert ('socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" ct mark set 0x5653 accept '
+                'comment "Hiddify core, cgroup 4242"') in rs
+    assert "cgroup" not in firewall.render_ruleset(hcfg(), [], "tun0", vm_allowed=False, endpoints=EPS)
+    assert "cgroup" not in pf.render_ruleset(hcfg(), [], "utun5", vm_allowed=False, endpoints=EPS, cgroup=cg)
+    for bad in ('x" accept; #', "a b", "../etc", ""):
+        with pytest.raises(ValueError):
+            firewall.render_ruleset(hcfg(), [], None, vm_allowed=False, cgroup=(bad, 1))
+
+
+def test_service_cgroup_is_the_running_services_folder(tmp_path):
+    assert hiddify.service_cgroup(tmp_path, "linux") is None                           # not running
+    d = tmp_path / hiddify.SERVICE_CGROUP
+    d.mkdir(parents=True)
+    assert hiddify.service_cgroup(tmp_path, "linux") == (hiddify.SERVICE_CGROUP, d.stat().st_ino)
+    assert hiddify.service_cgroup(tmp_path, "darwin") is None
+
+
 @pytest.mark.parametrize("bad", [("vpn.example.com", 443, ("tcp",)), ("203.0.113.7", 0, ("tcp",)),
                                  ("203.0.113.7", 443, ("icmp",)), ("203.0.113.7", 443, ())])
 def test_renderers_refuse_bad_endpoints(bad):
@@ -397,6 +418,7 @@ def hid(request, tmp_path, monkeypatch):
     monkeypatch.setattr(hiddify, "_is_tun", lambda i: i.startswith("tun"))
     monkeypatch.setattr(hiddify, "allowed_owners", lambda p: {0, os.getuid()})
     monkeypatch.setattr(hiddify.sys, "platform", "linux")
+    monkeypatch.setattr(hiddify, "service_cgroup", lambda *a, **k: state.get("cgroup"))
     hiddify._tun_cache.clear()
     path = write_conf(tmp_path / "hiddify")
     cfg = Config.from_text(json.dumps({"profiles": [{"profile": "Work", "server": "vpn.example.com"},
@@ -532,3 +554,30 @@ def test_tls_check_fails_when_the_connection_is_accepted_and_dropped():
         assert quality.check(t, tls=True)[0] is False
     finally:
         srv.close()
+
+
+def test_the_guard_lets_hiddifys_service_out_and_falls_back_when_nft_refuses_it(hid, monkeypatch):
+    g, calls, state, _vpn, _ = hid
+    if daemon.firewall is pf:
+        state["cgroup"] = (hiddify.SERVICE_CGROUP, 7)
+        g.enable_killswitch(True)
+        assert "cgroup" not in calls["apply"][-1]                                       # macOS: no cgroups
+        return
+    state["cgroup"] = (hiddify.SERVICE_CGROUP, 7)
+    g.enable_killswitch(True)
+    assert '"system.slice/HiddifyAdminBG.service"' in calls["apply"][-1] and "cgroup 7" in calls["apply"][-1]
+    state["cgroup"] = (hiddify.SERVICE_CGROUP, 8)                                      # the service restarted
+    g.enable_killswitch(True)
+    assert "cgroup 8" in calls["apply"][-1]
+
+    def refuse(rs):                                                                    # a kernel without nft_socket
+        if "socket cgroupv2" in rs:
+            raise daemon.subprocess.CalledProcessError(1, ["nft"])
+        calls["apply"].append(rs)
+    monkeypatch.setattr(firewall, "apply", refuse)
+    state["cgroup"] = (hiddify.SERVICE_CGROUP, 9)
+    g.enable_killswitch(True)
+    assert "cgroup" not in calls["apply"][-1] and "172.19.0.1" not in calls["apply"][-1] and "tun0" in calls["apply"][-1]
+    assert not g._cgroup_ok
+    other = Config.from_text(json.dumps({"profiles": [{"profile": "Work", "server": "vpn.example.com"}]}))
+    assert g.hiddify_cgroup(other) is None

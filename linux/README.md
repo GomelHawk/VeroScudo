@@ -89,7 +89,9 @@ HiddifyAdminBG`. The entry is `{"profile": "Hiddify", "vpnType": "hiddify", "con
 server or port. Only VPN (TUN) mode is supported; in proxy mode the import says so. VeroScudo never starts or stops
 Hiddify: connect and reconnect it in Hiddify (Reconnect in the tray is disabled for it). Protected = a Hiddify process runs
 and its tun device holds the address from the config; any drop keeps traffic blocked until Hiddify's tunnel is back or
-you turn VeroScudo off. While armed the kill-switch also lets Hiddify reach, outside the tunnel, every proxy server in its
+you turn VeroScudo off. While armed the kill-switch lets Hiddify 5's own service (`HiddifyAdminBG`, the core) out to any
+address - like the Windows version lets the Hiddify programs out: its servers change and are found by Hiddify's own DNS -
+and also lets Hiddify reach, outside the tunnel, every proxy server in its
 live config (server and port, TCP and UDP) and the DNS servers it asks directly - re-read every 15 s, at most 64 entries,
 public addresses only. The guard (root) reads that file in your home folder: it only decides which servers may be
 reached, and you can already turn the kill-switch off without a password (`sudo veroscudo off`).
