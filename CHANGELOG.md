@@ -5,6 +5,13 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed: Linux - Hiddify 5 not found by the import
+- Hiddify 5 runs VPN mode through its own root service, which keeps the live config in
+  `/var/lib/hiddify-admin-bgservice/core/work/data/current-config.json` (root only). The import now finds it (the
+  newest of all known locations wins), and the guard shares only the tunnel's address and name with the status and the
+  tray, which cannot read that file.
+- README: the fix for Hiddify 5.5's own "exit status 127" in VPN mode.
+
 ### Changed: status window - Copy next to Clear, a Statistics button (Windows, Linux, macOS)
 - The report is copied with a **Copy** link next to *Clear* in Recent events (*Copied* after a click); the button row
   ends with **Statistics** instead of *Copy report* - it opens the Statistics window.

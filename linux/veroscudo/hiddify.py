@@ -6,7 +6,8 @@ VeroScudo never starts or stops Hiddify: it watches whether Hiddify's tunnel is 
 Hiddify reach its own servers (and its direct DNS servers) outside the tunnel - parsed from the live config on every pass.
 Proxy and system-proxy modes are not supported: they have no tunnel interface to hold the traffic to.
 
-The config file belongs to the signed-in user, and the guard (root) reads it. That is acceptable: the file only decides
+The config file belongs to the signed-in user (or to root, when Hiddify's own root service runs the core), and the guard
+(root) reads it. That is acceptable: the file only decides
 which server addresses and ports are allowed out (at most MAX_ENDPOINTS, public unicast only - never loopback, private,
 link-local or multicast), and the same user can already turn the kill-switch off without a password
 (`sudo veroscudo off`, the sudoers rule install.sh writes). The file must be a regular file (no symlink), owned by root or
@@ -40,11 +41,17 @@ PROXY_MODE_NOTE = "Hiddify is in proxy mode - switch it to VPN mode (only VPN mo
 NOT_CONNECTED = "Hiddify is not connected - connect it in Hiddify (VPN mode); traffic stays blocked meanwhile"
 RECONNECT_HINT = "Connect and reconnect in Hiddify"
 
-# Hiddify's data folder, relative to the user's home. UNVERIFIED on Linux and macOS: only the Windows layout
-# (%APPDATA%\Hiddify\hiddify\data\current-config.json) is confirmed. Each entry is also tried with a nested "hiddify/".
+# Hiddify's data folder, relative to the user's home; each entry is also tried with a nested "hiddify/". Windows:
+# %APPDATA%\Hiddify\hiddify\data\current-config.json. The macOS entries are unverified.
 DATA_DIRS = {
-    "linux": (".local/share/app.hiddify.com", ".local/share/hiddify", ".local/share/Hiddify"),
+    "linux": (".local/share/hiddify", ".local/share/app.hiddify.com", ".local/share/Hiddify"),
     "darwin": ("Library/Application Support/app.hiddify.com", "Library/Application Support/Hiddify"),
+}
+# Hiddify's own root service (VPN mode in Hiddify 5 on Linux: HiddifyAdminBG.service runs the core as root and keeps the
+# live config here, owned by root). The user's data folder above then still holds the app's settings.
+SYSTEM_DIRS = {
+    "linux": ("/var/lib/hiddify-admin-bgservice/core/work",),
+    "darwin": (),
 }
 
 _HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
@@ -346,11 +353,62 @@ def read_config(path: str) -> dict:
 _tun_cache: dict[str, tuple[tuple, tuple[list[str], str | None]]] = {}
 
 
+SHARED_NAME = "hiddify-tun.json"
+
+
+def shared_file() -> Path:
+    """Where the guard shares the tun settings of a root-only config: its run folder ($VEROSCUDO_HOME in tests)."""
+    return Path(os.environ.get("VEROSCUDO_HOME") or ("/var/run/veroscudo" if sys.platform == "darwin" else "/run/veroscudo")
+                ) / SHARED_NAME
+
+
+def share_tun(path: str, conf: dict, file: Path | None = None) -> None:
+    """The guard (root), after reading Hiddify's config: its tun address and interface name, readable by the user's status
+    and tray - Hiddify's root service keeps its config where only root can read it. Nothing else of the file (no server,
+    no secret). Written only when it changed."""
+    file = file or shared_file()
+    v4, name = tun_settings(conf)
+    data = json.dumps({"path": path, "v4": v4, "name": name}, sort_keys=True)
+    try:
+        if file.read_text(encoding="utf-8") == data:
+            return
+    except OSError:
+        pass
+    try:
+        tmp = file.with_suffix(".new")
+        tmp.write_text(data, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, file)
+    except OSError:
+        pass
+
+
+def shared_tun(path: str, file: Path | None = None, owner: int = 0) -> tuple[list[str], str | None]:
+    """The tun settings the guard shared for this config file - only from a regular file owned by root, only well-formed
+    IPv4 addresses and an interface name. ([], None) when there is none."""
+    file = file or shared_file()
+    try:
+        st = os.lstat(file)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner or st.st_size > 4096:
+            return [], None
+        j = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], None
+    if not isinstance(j, dict) or j.get("path") != path:
+        return [], None
+    v4 = [a for a in j.get("v4") or [] if isinstance(a, str) and _is_ip(a) and ":" not in a][:8]
+    name = j.get("name")
+    return v4, (name if isinstance(name, str) and IFNAME.match(name) else None)
+
+
 def tun_of(path: str) -> tuple[list[str], str | None]:
-    """tun_settings of the file, re-read only when it changed (the tray asks every 3 s). ([], None) when unreadable."""
+    """tun_settings of the file, re-read only when it changed (the tray asks every 3 s). A file the user may not read
+    (Hiddify's root service): what the guard shared. ([], None) when neither is there."""
     try:
         st = os.stat(path)
         key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    except PermissionError:
+        return shared_tun(path)
     except OSError:
         return [], None
     hit = _tun_cache.get(path)
@@ -358,6 +416,8 @@ def tun_of(path: str) -> tuple[list[str], str | None]:
         return hit[1]
     try:
         val = tun_settings(read_config(path))
+    except PermissionError:
+        return shared_tun(path)
     except (OSError, ValueError):
         val = ([], None)
     _tun_cache[path] = (key, val)
@@ -455,36 +515,53 @@ def user_home(env=None, platform: str | None = None) -> Path:
 
 
 def candidates(home: Path, platform: str | None = None) -> list[Path]:
-    """Hiddify data folders to look in, in order (DATA_DIRS, each also with a nested hiddify/). Pure."""
+    """Hiddify data folders to look in: Hiddify's root service (SYSTEM_DIRS), then the user's (DATA_DIRS, each also with a
+    nested hiddify/). Pure."""
     platform = platform or sys.platform        # at call time, not import time (tests switch it)
-    out = []
-    for rel in DATA_DIRS.get("darwin" if platform == "darwin" else "linux", ()):
+    key = "darwin" if platform == "darwin" else "linux"
+    out = [Path(d) for d in SYSTEM_DIRS.get(key, ())]
+    for rel in DATA_DIRS.get(key, ()):
         out += [home / rel, home / rel / "hiddify"]
     return out
 
 
 def find(home: Path, platform: str | None = None) -> Path | None:
-    """The data folder whose data/current-config.json exists."""
+    """The data folder whose data/current-config.json exists - the most recently written one when there are several (a
+    folder an older Hiddify left behind keeps a stale file)."""
     platform = platform or sys.platform        # at call time, not import time (tests switch it)
+    best, best_t = None, -1.0
     for d in candidates(home, platform):
-        if (d / "data" / CONFIG_NAME).is_file():
-            return d
+        try:
+            t = (d / "data" / CONFIG_NAME).stat().st_mtime
+        except OSError:
+            continue
+        if (d / "data" / CONFIG_NAME).is_file() and t > best_t:
+            best, best_t = d, t
+    return best
+
+
+def mode_of(folder: Path, home: Path, platform: str | None = None) -> str | None:
+    """Hiddify's service mode from shared_preferences.json: in the config's own data folder, else (the root service's
+    folder has none) in the user's data folders. None when not found."""
+    for d in [folder] + [c for c in candidates(home, platform) if c != folder]:
+        try:
+            return service_mode((d / "shared_preferences.json").read_text(encoding="utf-8"))
+        except OSError:
+            continue
     return None
 
 
 def discover(home: Path | None = None, platform: str | None = None) -> list[dict]:
     """Hiddify for `veroscudo import` (the import entry of the trays): one entry when its live config exists."""
     platform = platform or sys.platform        # at call time, not import time (tests switch it)
-    d = find(home or user_home(), platform)
+    home = home or user_home()
+    d = find(home, platform)
     if d is None:
         return []
     path = str(d / "data" / CONFIG_NAME)
     out = {"name": NAME, "vpn_type": KIND, "server": "", "port": 0, "protocol": "tcp", "username": "", "note": "",
            "config_path": path}
-    try:
-        mode = service_mode((d / "shared_preferences.json").read_text(encoding="utf-8"))
-    except OSError:
-        mode = None
+    mode = mode_of(d, home, platform)
     if mode not in (None, "vpn"):
         out.update(unsupported=True, note=PROXY_MODE_NOTE)
     elif not valid_config_path(path):
@@ -524,10 +601,7 @@ def check_profile(name: str, path: str) -> list[str]:
     if dropped:
         out.append(f"{name}: {len(dropped)} server entr{'y' if len(dropped) == 1 else 'ies'} not allowed (private, local or "
                    "invalid address, or over the limit of 64)")
-    try:
-        mode = service_mode((Path(path).parent.parent / "shared_preferences.json").read_text(encoding="utf-8"))
-    except OSError:
-        mode = None
+    mode = mode_of(Path(path).parent.parent, user_home())
     if mode not in (None, "vpn"):
         out.append(f"{name}: {PROXY_MODE_NOTE}")
     return out

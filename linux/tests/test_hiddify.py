@@ -245,6 +245,44 @@ def test_discover_vpn_mode_proxy_mode_and_nothing(tmp_path):
     assert m.get("unsupported") and m["note"] == hiddify.PROXY_MODE_NOTE and not importer.importable(m)
 
 
+def test_the_guard_shares_only_the_tun_settings_of_a_root_only_config(tmp_path, monkeypatch):
+    shared = tmp_path / hiddify.SHARED_NAME
+    path = "/var/lib/hiddify-admin-bgservice/core/work/data/current-config.json"
+    hiddify.share_tun(path, SAMPLE, shared)
+    text = shared.read_text()
+    assert json.loads(text)["path"] == path and "203.0.113" not in text and "secret" not in text   # no server, no secret
+    assert oct(shared.stat().st_mode & 0o777) == "0o644"
+    v4, name = hiddify.tun_settings(SAMPLE)
+    assert hiddify.shared_tun(path, shared, owner=os.getuid()) == (v4, name) and v4
+    assert hiddify.shared_tun("/other/data/current-config.json", shared, owner=os.getuid()) == ([], None)
+    if os.getuid() != 0:
+        assert hiddify.shared_tun(path, shared) == ([], None)                       # not root's: ignored
+    shared.write_text(json.dumps({"path": path, "v4": ["10.0.0.1", "x", "2001:db8::1"], "name": "tun0; drop"}))
+    assert hiddify.shared_tun(path, shared, owner=os.getuid()) == (["10.0.0.1"], None)
+    # the user's status and tray: the config is root-only -> what the guard shared
+    monkeypatch.setattr(hiddify, "shared_tun", lambda p: (["172.19.0.1"], None))
+    monkeypatch.setattr(hiddify.os, "stat", lambda p: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    assert hiddify.tun_of(path) == (["172.19.0.1"], None)
+
+
+def test_discover_finds_the_live_config_of_hiddifys_root_service(tmp_path, monkeypatch):
+    service = tmp_path / "var/lib/hiddify-admin-bgservice/core/work"
+    monkeypatch.setitem(hiddify.SYSTEM_DIRS, "linux", (str(service),))
+    home = tmp_path / "home"
+    stale = write_conf(home / ".local/share/hiddify", mode="vpn")        # the app's own folder: settings + an old config
+    os.utime(stale, (1_000_000, 1_000_000))
+    write_conf(service, mode=None)                                      # the root service: the live config, no settings
+    [d] = hiddify.discover(home, "linux")
+    assert d["config_path"] == str(service / "data/current-config.json") and not d.get("unsupported")
+    (home / ".local/share/hiddify/shared_preferences.json").write_text(json.dumps({"flutter.service-mode": "proxy"}))
+    [p] = hiddify.discover(home, "linux")                               # the mode comes from the user's folder
+    assert p.get("unsupported") and p["note"] == hiddify.PROXY_MODE_NOTE
+    os.utime(stale, None)                                               # the user's folder written last: it wins
+    os.utime(service / "data/current-config.json", (1_000_000, 1_000_000))
+    assert hiddify.find(home, "linux") == home / ".local/share/hiddify"
+    assert hiddify.candidates(home, "darwin")[0] == home / "Library/Application Support/app.hiddify.com"
+
+
 # ---------------------------------------------------------------- config.json and import
 HPATH = "/home/u/.local/share/app.hiddify.com/data/current-config.json"
 

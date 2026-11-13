@@ -78,9 +78,14 @@ all other inbound traffic. Off (`"vm": false`): VeroScudo leaves containers and 
 filtered at all (to cut a VM off, turn its network off inside the VM).
 
 **Hiddify (VPN mode)** can be a profile too: `veroscudo import` (and tray > Settings > *Import…*) lists *Hiddify* when your
-Hiddify has its live config (`<data folder>/data/current-config.json`; looked for in `~/.local/share/app.hiddify.com`,
-`~/.local/share/hiddify` or `~/.local/share/Hiddify`, each also with a nested `hiddify/` - these Linux paths are not yet
-confirmed on a real install). The entry is `{"profile": "Hiddify", "vpnType": "hiddify", "configPath": "<that file>"}` - no
+Hiddify has its live config (`<data folder>/data/current-config.json`). Hiddify 5 runs VPN mode through its own root service
+(`HiddifyAdminBG`), whose live config is `/var/lib/hiddify-admin-bgservice/core/work/data/current-config.json` - readable
+by root only, so the guard shares just the tunnel's address and name with your status and tray (`/run/veroscudo`). Also
+looked for: `~/.local/share/hiddify`, `~/.local/share/app.hiddify.com`, `~/.local/share/Hiddify` (each also with a nested
+`hiddify/`); the newest file wins. If Hiddify's VPN mode fails with "exit status 127" (Hiddify 5.5's `.deb`: its service
+looks for `./lib/hiddify-core.so` in the wrong folder): `cd /opt/hiddify && sudo ./HiddifyCli admin_bgservice install
+$USER`, then `sudo ln -s /opt/hiddify/lib /var/lib/hiddify-admin-bgservice/lib` and `sudo systemctl restart
+HiddifyAdminBG`. The entry is `{"profile": "Hiddify", "vpnType": "hiddify", "configPath": "<that file>"}` - no
 server or port. Only VPN (TUN) mode is supported; in proxy mode the import says so. VeroScudo never starts or stops
 Hiddify: connect and reconnect it in Hiddify (Reconnect in the tray is disabled for it). Protected = a Hiddify process runs
 and its tun device holds the address from the config; any drop keeps traffic blocked until Hiddify's tunnel is back or

@@ -129,12 +129,14 @@ class Guard:
             return ()
         cache = self.store.server_cache(cfg.profile)
         try:
-            eps, dropped = hiddify.endpoints(hiddify.read_config(p.config_path))
+            conf = hiddify.read_config(p.config_path)
+            eps, dropped = hiddify.endpoints(conf)
         except (OSError, ValueError) as e:                     # never the file's content in the log (it holds a secret)
             self._say_once("read", f"Hiddify's config {p.config_path} cannot be used ({type(e).__name__}: "
                                    f"{str(e)[:80] if isinstance(e, OSError) else 'invalid'}) - keeping the last good servers")
             return tuple(self._hiddify_good.get(p.id) or self.cached_hiddify_endpoints(cfg))
         self._say_once("read", None)
+        hiddify.share_tun(p.config_path, conf, self.store.home / hiddify.SHARED_NAME)   # for the user's status and tray
         self._say_once("dropped", f"Hiddify: {len(dropped)} server entr{'y' if len(dropped) == 1 else 'ies'} not allowed "
                                   f"(private, local or invalid address, or over {hiddify.MAX_ENDPOINTS}): "
                                   f"{', '.join(dropped[:5])}{' ...' if len(dropped) > 5 else ''}" if dropped else None)
