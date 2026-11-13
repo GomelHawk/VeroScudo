@@ -7,6 +7,9 @@
 #   vt fail            the network state saved at each failure of the last live test
 #   vt log [N]         VeroScudo's last N log lines (40)
 #   vt status          VeroScudo's status
+#   vt profiles        the profiles (* = active);   vt use <profile>   switch to it
+#   vt boot            after a reboot while on: did the kill-switch come up before the network? protected now?
+#   vt gone            after an uninstall: is anything of VeroScudo left?
 set -u
 SELF="$(readlink -f "$0")"
 REPO="$(cd "$(dirname "$SELF")/../.." && pwd)"
@@ -47,6 +50,38 @@ case "${1:-}" in
     tail -n "${2:-40}" /var/log/veroscudo.log ;;
   status)
     veroscudo status ;;
+  profiles)
+    veroscudo profiles ;;
+  use)
+    shift; [ $# -gt 0 ] || { echo "vt use <profile>   (vt profiles lists them)"; exit 1; }
+    veroscudo use "$*" && veroscudo status | head -3 ;;
+  boot)
+    # monotonic microseconds since boot: the kill-switch unit has to finish before NetworkManager starts
+    show() { systemctl show -p "$2" --value "$1" 2>/dev/null; }
+    ks_end="$(show veroscudo-boot.service ExecMainExitTimestampMonotonic)"; ks_rc="$(show veroscudo-boot.service ExecMainStatus)"
+    nm_start="$(show NetworkManager.service ExecMainStartTimestampMonotonic)"
+    echo "kill-switch at boot: exit code ${ks_rc:-?}, done at ${ks_end:-?} us; NetworkManager started at ${nm_start:-?} us"
+    if [ "${ks_rc:-1}" = 0 ] && [ "${ks_end:-0}" -gt 0 ] && [ "${nm_start:-0}" -gt "$ks_end" ]; then
+      echo "OK - the kill-switch was in place before the network started"
+    else
+      echo "PROBLEM - not before the network (or it failed):"; journalctl -b -u veroscudo-boot --no-pager | tail -5
+    fi
+    nft list table inet veroscudo >/dev/null 2>&1 && echo "kill-switch table: present" || echo "kill-switch table: MISSING"
+    veroscudo status | head -4
+    echo "exit address now: $(curl -s --max-time 5 https://ifconfig.me || echo none)" ;;
+  gone)
+    left=()
+    for f in /opt/veroscudo /usr/share/veroscudo /usr/local/bin/veroscudo /etc/systemd/system/veroscudo.service \
+             /etc/systemd/system/veroscudo-boot.service /etc/sudoers.d/veroscudo /etc/xdg/autostart/veroscudo-tray.desktop \
+             /usr/share/applications/veroscudo.desktop /run/veroscudo /var/lib/veroscudo/armed.flag; do
+      [ -e "$f" ] && left+=("$f")
+    done
+    nft list table inet veroscudo >/dev/null 2>&1 && left+=("nftables table inet veroscudo")
+    procs="$(pgrep -af 'bin/veroscudo|-m veroscudo' | cut -c1-70 | paste -sd';')"
+    [ -n "$procs" ] && left+=("processes: $procs")
+    if [ "${#left[@]}" -eq 0 ]; then echo "OK - nothing of VeroScudo left"; else echo "LEFT:"; printf '  %s\n' "${left[@]}"; fi
+    for f in /etc/veroscudo/config.json /var/log/veroscudo.log; do [ -e "$f" ] && echo "kept (removed only by --purge): $f"; done
+    echo "network: $(curl -s --max-time 5 https://ifconfig.me || echo NONE)" ;;
   *)
-    sed -n '2,9p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+    sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//' ;;
 esac
