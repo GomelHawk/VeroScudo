@@ -11,6 +11,7 @@
 #   vt boot            after a reboot while on: did the kill-switch come up before the network? protected now?
 #   vt gone            after an uninstall: is anything of VeroScudo left?
 #   vt hdiag           Hiddify: its service, tunnel, config as VeroScudo reads it, the kill-switch's permits, the exit
+#   vt cgtest          can nftables match Hiddify's service by its cgroup? (counts only, blocks nothing, 5 s)
 #   vt hfix            Hiddify 5.5 "exit status 127": (re)install its service from the right folder, link its lib, restart
 set -u
 SELF="$(readlink -f "$0")"
@@ -79,6 +80,17 @@ print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel
     echo "kill-switch permits:"; nft list table inet veroscudo 2>/dev/null | grep -E "daddr|ifname" | grep -v -E "dport 53 |/(8|10|12|16|24) " | head -8 | cut -c1-110
     echo "Hiddify's own connections (peer):"; ss -tunpH 2>/dev/null | grep -i hiddify | awk '{print $1, $6}' | sort | uniq -c | head -8
     echo "exit address now: $(curl -s --max-time 6 https://ifconfig.me || echo none)" ;;
+  cgtest)
+    cg="system.slice/HiddifyAdminBG.service"
+    [ -d "/sys/fs/cgroup/$cg" ] || { echo "no cgroup /sys/fs/cgroup/$cg - is Hiddify's service running?"; exit 1; }
+    nft delete table inet vscgtest 2>/dev/null
+    if ! printf 'table inet vscgtest {\n chain o {\n  type filter hook output priority 10; policy accept;\n  socket cgroupv2 level 2 "%s" counter\n }\n}\n' "$cg" | nft -f -; then
+      echo "RESULT: nftables cannot match a cgroup here (kernel: $(uname -r))"; exit 1
+    fi
+    sleep 5
+    n="$(nft list table inet vscgtest | grep -oE 'packets [0-9]+' | grep -oE '[0-9]+')"
+    nft delete table inet vscgtest
+    echo "RESULT: the rule works; Hiddify's service sent ${n:-0} packets in 5 s (more than 0 = it matches its traffic)" ;;
   hfix)
     owner_name="$OWNER"; [ "$owner_name" = root ] && { echo "run it as your user: vt hfix"; exit 1; }
     (cd /opt/hiddify && ./HiddifyCli admin_bgservice install "$owner_name")
@@ -113,5 +125,5 @@ print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel
     for f in /etc/veroscudo/config.json /var/log/veroscudo.log; do [ -e "$f" ] && echo "kept (removed only by --purge): $f"; done
     echo "network: $(curl -s --max-time 5 https://ifconfig.me || echo NONE)" ;;
   *)
-    sed -n '2,14p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+    sed -n '2,15p' "$SELF" | sed 's/^# \{0,1\}//' ;;
 esac
