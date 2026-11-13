@@ -283,6 +283,25 @@ def test_discover_finds_the_live_config_of_hiddifys_root_service(tmp_path, monke
     assert hiddify.candidates(home, "darwin")[0] == home / "Library/Application Support/app.hiddify.com"
 
 
+def test_the_trays_list_shows_hiddify_when_only_root_may_look_into_its_service_folder(tmp_path, monkeypatch):
+    service = tmp_path / "var/lib/hiddify-admin-bgservice/core/work"
+    monkeypatch.setitem(hiddify.SYSTEM_DIRS, "linux", (str(service),))
+    home = tmp_path / "home"
+    (home / ".local/share/hiddify").mkdir(parents=True)                  # the app's settings, no config of its own
+    (home / ".local/share/hiddify/shared_preferences.json").write_text(json.dumps({"flutter.service-mode": "vpn"}))
+    real_stat = os.stat
+
+    def stat_as_user(p, *a, **k):
+        if str(p).startswith(str(service)):
+            raise PermissionError(13, "Permission denied", str(p))
+        return real_stat(p, *a, **k)
+    monkeypatch.setattr(hiddify.os, "stat", stat_as_user)
+    [d] = hiddify.discover(home, "linux")
+    assert d["config_path"] == str(service / "data/current-config.json") and importer.importable(d)
+    monkeypatch.setattr(hiddify.os, "stat", real_stat)
+    assert hiddify.discover(home, "linux") == []                         # no service folder at all: nothing
+
+
 # ---------------------------------------------------------------- config.json and import
 HPATH = "/home/u/.local/share/app.hiddify.com/data/current-config.json"
 

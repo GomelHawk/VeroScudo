@@ -531,11 +531,17 @@ def find(home: Path, platform: str | None = None) -> Path | None:
     platform = platform or sys.platform        # at call time, not import time (tests switch it)
     best, best_t = None, -1.0
     for d in candidates(home, platform):
+        f = d / "data" / CONFIG_NAME
         try:
-            t = (d / "data" / CONFIG_NAME).stat().st_mtime
+            st = os.stat(f)
+            t = st.st_mtime if stat.S_ISREG(st.st_mode) else None
+        except PermissionError:
+            # Hiddify's root service folder, looked at as the user (the trays list importable VPNs before the password
+            # prompt): it is there, only not readable. The import itself runs as root and finds the real file.
+            t = 0.0
         except OSError:
-            continue
-        if (d / "data" / CONFIG_NAME).is_file() and t > best_t:
+            t = None
+        if t is not None and t > best_t:
             best, best_t = d, t
     return best
 
