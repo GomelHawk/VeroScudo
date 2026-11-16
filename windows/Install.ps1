@@ -188,6 +188,7 @@ foreach ($pr in $config.Profiles) {
                 Write-Warning "WireGuard profile '$($pr.Profile)': no such tunnel in the WireGuard app - import it there under exactly this name."
             }
         }
+        'hiddify' { }                                                          # nothing of its own in Windows: the tunnel is the Hiddify app's
         default {
             if (-not (Get-VeroWindowsVpn -Name $pr.Profile)) {
                 Write-Warning "No Windows VPN profile named '$($pr.Profile)' exists for this user. Create it in Settings > VPN first."

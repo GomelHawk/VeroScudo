@@ -121,6 +121,7 @@ All notable changes to VeroScudo are recorded here. The format follows
   timeout, the one-time-code wait and the WireGuard health rule are now run by tests; a list of the tray's sentences
   is checked to be word for word the same in the Windows and the Linux/macOS sources.
 - Releases: a tag is published only after the full CI passes on it and when it equals the version in the code.
+- **Windows:** `Install.ps1` warned that no Windows VPN profile exists for a Hiddify profile - it needs none.
 
 ### Changed: structure of the guard (Windows, Linux, macOS)
 - Windows: the redial loop got a task of its own, `Redial`. The watchdog, the `Terminated` task and a profile switch
