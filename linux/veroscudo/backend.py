@@ -1,5 +1,5 @@
 """Platform backends. The guard (daemon.py), the CLI and the tray are shared; the firewall and the VPN control differ:
-Linux = nftables + NetworkManager (beta), macOS = pf + scutil (alpha).
+Linux = nftables + NetworkManager, macOS = pf + scutil (alpha).
 
 The contract both backends implement is spelled out below and checked when this module loads: a function missing on
 one platform fails at startup, not in the middle of a redial. tests/test_backend.py checks that the shared code calls

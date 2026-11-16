@@ -5,6 +5,10 @@
 # ALLOW-list of client options. VeroScudo runs openvpn.exe as administrator, so an imported config may only use options
 # known not to run programs, load modules (plugin, pkcs11-providers, providers, engine), write files or redirect control
 # (management, config, log, proxies). Anything else - also an option spelled with quotes or escapes - is refused.
+# 'setenv' is allowed only for the client-compatibility names below: OpenVPN reads 'setenv opt <option>' as that option
+# (after removing quotes and escapes from "opt"), which would carry any option past this list.
+$script:OvpnSetenv = '^(FORWARD_COMPATIBLE|CLIENT_CERT|GENERIC_CONFIG|PUSH_PEER_INFO|UV_[A-Z0-9_]{1,60})$'
+$script:OvpnLineMax = 255                                                   # OpenVPN's own line buffer (OPTION_LINE_SIZE 256)
 $script:OvpnAllowed = @('client', 'tls-client', 'pull', 'dev', 'dev-type', 'proto', 'remote', 'remote-random', 'remote-random-hostname',
     'resolv-retry', 'nobind', 'persist-key', 'persist-tun', 'persist-remote-ip', 'port', 'rport', 'lport', 'float',
     'ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2', 'key-direction', 'extra-certs', 'crl-verify', 'secret', 'dh', 'pkcs12',
@@ -37,9 +41,15 @@ function Test-VeroOpenVpnConf {
     $auth = $false; $sc = $false; $redirect = $false; $dns = $false; $pull = $false
     $inBlock = $null
     $toPort = { param($v) if ($v -match '^\d{1,5}$' -and [int]$v -ge 1 -and [int]$v -le 65535) { [int]$v } else { -1 } }
+    if ($Text.IndexOf([char]0) -ge 0) { $errors.Add('the file contains NUL characters - not a text config') }
     foreach ($raw in ($Text -split "`r?`n")) {
         $line = $raw.Trim()
+        # a longer line is cut by an OpenVPN that reads into its fixed buffer: the rest would be read as a line of its own,
+        # one this check never saw (the end of a block, an option hidden behind a comment). Base64 of one piece (an inlined
+        # pkcs12) cannot hold a tag or an option and stays allowed inside a block.
+        $tooLong = [Text.Encoding]::UTF8.GetByteCount($raw) -gt $script:OvpnLineMax
         if ($inBlock) {                                                     # inline <ca>...</ca> etc: copied as is
+            if ($tooLong -and $line -cnotmatch '^[A-Za-z0-9+/=]+$') { $errors.Add("a line of more than $($script:OvpnLineMax) characters inside <$inBlock>") }
             if ($line.StartsWith("</$inBlock>")) {
                 if ($line -ne "</$inBlock>") { $errors.Add("text after </$inBlock> on the same line") }
                 $inBlock = $null
@@ -54,6 +64,7 @@ function Test-VeroOpenVpnConf {
             $inBlock = $Matches[1]; [void]$out.AppendLine($raw); continue
         }
         if ($line.StartsWith('<')) { $errors.Add("unexpected tag line '$line'"); continue }
+        if ($tooLong) { $errors.Add("a line of more than $($script:OvpnLineMax) characters ('$($line.Substring(0, [Math]::Min(30, $line.Length)))...') - OpenVPN would cut it"); continue }
         if (-not $line -or $line -match '^[#;]') { [void]$out.AppendLine($raw); continue }
         $tok = @($line -split '\s+' | Where-Object { $_ })
         $first = $tok[0]
@@ -63,7 +74,9 @@ function Test-VeroOpenVpnConf {
         $arg = @($tok | Select-Object -Skip 1)
         if ($script:OvpnAllowed -notcontains $d) { $errors.Add("'$d' is not allowed: VeroScudo runs OpenVPN as administrator and accepts only known client options (remove the line)"); continue }
         if ($d -eq 'script-security' -and -not ($arg.Count -gt 0 -and $arg[0] -in '0', '1')) { $errors.Add("'script-security $($arg -join ' ')' would let the config run programs as administrator (remove the line)"); continue }
-        if ($d -eq 'setenv' -and $arg.Count -gt 0 -and $arg[0] -eq 'opt') { $errors.Add("'setenv opt' would hide unknown options (remove the line)"); continue }
+        if ($d -eq 'setenv' -and -not ($arg.Count -ge 1 -and $arg.Count -le 2 -and $arg[0] -cmatch $script:OvpnSetenv -and ($arg.Count -lt 2 -or $arg[1] -cmatch '^[A-Za-z0-9_.:-]{1,64}$'))) {
+            $errors.Add("'setenv $($arg -join ' ')' is not allowed: only FORWARD_COMPATIBLE, CLIENT_CERT, GENERIC_CONFIG, PUSH_PEER_INFO and UV_* with a plain value ('setenv opt' would hide any option - remove the line)"); continue
+        }
         $skip = $false                                                      # NB: 'continue' inside a switch would not skip this line
         switch ($d) {
             'proto' { if ($arg.Count) { $v = if ($arg[0] -like 'tcp*') { 'tcp' } else { 'udp' }; if ($c) { $c.Proto = $v } else { $g.Proto = $v } } }
@@ -423,6 +436,15 @@ function Update-VeroMgmtQueue {
     $Queue.InFlight
 }
 
+function Test-VeroPortOwner {
+    <# True when the process listens on that loopback TCP port. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][int]$ProcessId)
+    try {
+        $own = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | ForEach-Object { [int]$_.OwningProcess })
+    } catch { return $false }
+    ($own.Count -gt 0) -and (@($own | Where-Object { $_ -ne $ProcessId }).Count -eq 0)
+}
+
 function Connect-VeroMgmt([int]$Port, [string]$Password, $Process) {
     <# Connects to the management port (OpenVPN opens it a moment after start) and logs in with the one-time password. #>
     $t = Get-Date
@@ -434,7 +456,16 @@ function Connect-VeroMgmt([int]$Port, [string]$Password, $Process) {
             $t2 = Get-Date
             while (((Get-Date) - $t2).TotalSeconds -lt 5) {
                 $null = Read-VeroMgmt $m 500
-                if ($m.Pending.ToString() -match 'ENTER PASSWORD:') { $m.Pending.Length = 0; Send-VeroMgmt $m $Password; return $m }
+                if ($m.Pending.ToString() -match 'ENTER PASSWORD:') {
+                    # only to the OpenVPN this runner started: the port was free a moment ago, and whoever listens on it
+                    # is sent the management password and then the VPN password
+                    if (-not (Test-VeroPortOwner -Port $Port -ProcessId $Process.Id)) {
+                        $c.Close()
+                        Write-VeroLog "ERROR: port $Port is not held by the OpenVPN that was just started - nothing sent, starting over" 'openvpn'
+                        return $null
+                    }
+                    $m.Pending.Length = 0; Send-VeroMgmt $m $Password; return $m
+                }
             }
             $c.Close()
         } catch { Start-Sleep -Milliseconds 300 }
@@ -459,6 +490,14 @@ function Invoke-VeroOpenVpnSession {
     $p = Get-VeroPath -VpnProfile $name
     $exe = Get-VeroOpenVpnExe
     if (-not $exe -or -not (Test-Path $p.OvpnConfig)) { Write-VeroLog "ERROR: OpenVPN not installed or '$name' not imported" $Action; return 'setup' }
+    # the stored config is checked again on every start: only what passes today's rules is run as administrator, whoever
+    # put the file there and whenever
+    $chk = Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($p.OvpnConfig)) -ReadFile { param($x) throw "unexpected file reference $x" }
+    if ($chk.Errors.Count -gt 0) {
+        Set-VeroOpenVpnStatus $name @{ State = 'SETUP'; Reason = 'the stored OpenVPN config is not accepted - import it again' }
+        Write-VeroLog "ERROR: the stored OpenVPN config of '$name' is not accepted ($(@($chk.Errors)[0])) - not started. Import the .ovpn again (tray Settings)." $Action
+        return 'setup'
+    }
     $cred = if ($Config.Auth) { Get-VeroCredential -Config $Config } else { $null }
     if ($Config.Auth -and -not $cred) { Set-VeroOpenVpnStatus $name @{ State = 'NO_PASSWORD'; Reason = 'no stored password' }; Write-VeroLog "ERROR: no stored password for '$name' (tray Settings)" $Action; return 'no-password' }
     $port = Get-VeroFreePort; $secret = New-VeroSecret

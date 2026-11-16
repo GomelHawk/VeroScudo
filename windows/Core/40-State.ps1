@@ -8,8 +8,18 @@ function Write-VeroLog {
     if (-not (Test-Path $p.State)) { New-Item -ItemType Directory -Path $p.State -Force | Out-Null }
     if ((Test-Path $p.Log) -and (Get-Item $p.Log).Length -gt 2MB) { Move-Item $p.Log "$($p.Log).1" -Force }
     $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $Action, $Message
-    Add-Content -Path $p.Log -Value $line -Encoding UTF8
+    # several processes write this file (watchdog, event tasks, On/Off, the OpenVPN runner): a line that cannot be written
+    # because another one is writing is tried once more and then dropped - a log line must never stop an arm or a sync halfway
+    try { Add-Content -Path $p.Log -Value $line -Encoding UTF8 -ErrorAction Stop }
+    catch {
+        Start-Sleep -Milliseconds 50
+        try { Add-Content -Path $p.Log -Value $line -Encoding UTF8 -ErrorAction Stop } catch { Write-Verbose "log line not written: $($_.Exception.Message)" }
+    }
     Write-Host $line
+}
+function Write-VeroHeartbeat {
+    <# The watchdog is alive and working (the tray's "Guard not running" reads this file's content). #>
+    try { [IO.File]::WriteAllText((Get-VeroPath).Heartbeat, [string][int64](Get-VeroEpoch)) } catch { Write-Verbose 'heartbeat not written' }
 }
 function Test-VeroArmed { Test-Path (Get-VeroPath).ArmedFlag }
 function Set-VeroArmed {

@@ -11,6 +11,7 @@ tray's left click)."""
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -414,7 +415,10 @@ class Tray(NSObject):
 
     # ---- timers
     def tick_(self, _timer):
-        self.refresh()
+        try:                                # one failed pass is logged; the icon keeps following the guard
+            self.refresh()
+        except Exception:
+            logging.getLogger("veroscudo.tray").exception("refresh")
 
     def drain_(self, _timer):
         for tag, argv, rc, _out, err in self.runner.results():

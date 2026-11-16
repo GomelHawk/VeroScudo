@@ -15,17 +15,21 @@ function Test-VeroTunnelAdapter($Nic) {
 }
 
 function Write-VeroSecretFile {
-    <# A file only Administrators and SYSTEM can read (the state folder lets users read). Created empty, locked down, then filled. #>
+    <# A file only Administrators and SYSTEM can read (the state folder lets users read). It is created with that
+       protection - never, not for a moment, with the folder's "Users: read": a handle opened in such a moment would still
+       read what is written afterwards. A file left from an earlier run is removed first (it keeps its old rules otherwise). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text)
-    Set-Content -Path $Path -Value '' -Encoding ASCII
     $acl = New-Object System.Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
         $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'Allow')))
     }
-    Set-Acl -Path $Path -AclObject $acl
-    [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Text)
+    $fs = New-Object System.IO.FileStream($Path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]::FullControl,
+                                          [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $acl)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
 }
 
 function Protect-VeroOpenVpnDir {

@@ -81,9 +81,10 @@ PY
 mv "$PREFIX/lib/veroscudo.new" "$PREFIX/lib/veroscudo"
 [ -d "$PREFIX/lib/veroscudo.old" ] && rm -rf -- "$PREFIX/lib/veroscudo.old"
 # -I: no PYTHONPATH, no user site-packages, not the current folder - only the system's packages and this copy
-for pair in "veroscudo:veroscudo.cli" "veroscudo-tray:veroscudo.tray"; do
-  name="${pair%%:*}"; mod="${pair#*:}"
-  printf '#!%s -I\nimport sys\nsys.path.insert(0, "%s/lib")\nfrom %s import main\nsys.exit(main())\n' "$PY3" "$PREFIX" "$mod" > "$PREFIX/bin/$name"
+# veroscudo.cli:run - main() behind the step that takes nothing from the caller's environment when root (PATH, VEROSCUDO_*)
+for pair in "veroscudo:veroscudo.cli:run" "veroscudo-tray:veroscudo.tray:main"; do
+  name="${pair%%:*}"; rest="${pair#*:}"; mod="${rest%%:*}"; fn="${rest#*:}"
+  printf '#!%s -I\nimport sys\nsys.path.insert(0, "%s/lib")\nfrom %s import %s\nsys.exit(%s())\n' "$PY3" "$PREFIX" "$mod" "$fn" "$fn" > "$PREFIX/bin/$name"
 done
 install -m 755 "$HERE/uninstall.sh" "$PREFIX/uninstall.sh"
 chown -R root:root "$PREFIX"
@@ -150,9 +151,20 @@ RULE=""
 for b in "${RULE_PATHS[@]}"; do
   for a in on off reconnect "use *"; do RULE="$RULE${RULE:+, }$b $a"; done
 done
-echo "$USER_NAME ALL=(root) NOPASSWD: $RULE" > /etc/sudoers.d/veroscudo.tmp
+# the rule's commands get a fixed PATH and a reset environment whatever the system's sudoers says (macOS sets no
+# secure_path): any program of this user can run them as root without a password
+{
+  for b in "${RULE_PATHS[@]}"; do echo "Defaults!$b env_reset, secure_path=\"/usr/sbin:/usr/bin:/sbin:/bin\""; done
+  echo "$USER_NAME ALL=(root) NOPASSWD: $RULE"
+} > /etc/sudoers.d/veroscudo.tmp
 chmod 440 /etc/sudoers.d/veroscudo.tmp
-visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null && mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
+if visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null; then
+  mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
+else
+  rm -f /etc/sudoers.d/veroscudo.tmp
+  echo "WARNING: the sudo rule for '$USER_NAME' was refused by visudo - the tray's On/Off will ask for a password or fail."
+  echo "         Run 'sudo veroscudo on|off' yourself, or fix the user name and run the installer again."
+fi
 systemctl daemon-reload
 systemctl enable --quiet veroscudo.service veroscudo-boot.service
 systemctl restart veroscudo.service     # an upgrade must run the new code; the armed flag survives (StateDirectory)

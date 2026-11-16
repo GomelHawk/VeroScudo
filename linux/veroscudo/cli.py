@@ -47,8 +47,32 @@ class SharedLog(logging.handlers.RotatingFileHandler):
         return stream
 
 
+SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def root_environment(env=None) -> None:
+    """As root nothing is taken from the caller's environment: the helpers (nft, nmcli, ip, wg, pfctl, scutil, ifconfig,
+    pgrep) are looked up in the system folders only, and no VEROSCUDO_* variable moves the config, the state or the log.
+    The passwordless sudo rule runs this as root for any program of the user, and sudo keeps the caller's PATH unless
+    its own secure_path is set (macOS does not set it)."""
+    env = os.environ if env is None else env
+    env["PATH"] = SYSTEM_PATH
+    for k in [k for k in env if k.startswith("VEROSCUDO_")]:
+        del env[k]
+
+
+def run() -> int:
+    """What the installed `veroscudo` command starts (main() is the same without the environment step, for the tests)."""
+    if os.geteuid() == 0:
+        root_environment()
+    return main()
+
+
 def _setup_logging() -> None:
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    handlers: list[logging.Handler] = []
+    # launchd writes the daemon's stdout to a world-readable file; the log itself (below) is for administrators only
+    if sys.platform != "darwin" or sys.stdout.isatty():
+        handlers.append(logging.StreamHandler(sys.stdout))
     try:
         path = os.environ.get("VEROSCUDO_LOG", LOG)
         if not os.path.exists(path):                     # never world-readable: profile names, servers, decisions
@@ -275,7 +299,17 @@ def main(argv: list[str] | None = None) -> int:
     store = StateStore()
     try:
         cfg = Config.load(active=store.active)
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except Exception as e:  # noqa: BLE001 - whatever is wrong with the file (a list, a number too large ...)
+        # Off is the one way out and must not need a config that loads: the flag and the rules go; the VPN connection
+        # itself is left as it is (its name is in the file that cannot be read)
+        if a.action in ("off", "disarm") and os.geteuid() == 0:
+            with store.firewall_lock():
+                store.set_armed(False)
+                firewall.clear()
+                store.set_applied(None, None)
+            logging.getLogger("veroscudo").warning("config.json unusable (%s) - turned off: kill-switch removed; the VPN "
+                                                   "connection itself was not touched", e)
+            return 0
         # fail closed: an armed machine must not boot open because config.json is missing or broken. The daemon exits too
         # (launchd/systemd restart it), so the lockdown stays until the file is fixed and `veroscudo on` is run again.
         if a.action in ("boot", "daemon") and store.armed:
@@ -323,4 +357,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

@@ -189,7 +189,9 @@ $global:SvcRetry = @(); $global:SvcRetryAt = $null; $global:SvcGood = $null; $gl
 $global:SvcDefaultUrl = 'https://status.claude.com/api/v2/status.json'
 $global:SvcOldDefaultUrl = 'https://status.anthropic.com/api/v2/status.json'     # redirects to the new one (an extra round trip): read as it
 function Test-StatusPageEnabled { [bool](Get-TrayPref).statusPage }
-function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u -and $u -ne $global:SvcOldDefaultUrl) { $u } else { $global:SvcDefaultUrl } }
+function Test-StatusPageUrl([string]$Url) { $Url -match '^https://[^\s]+$' -and $Url.Length -le 300 }
+# the stored address is checked on every read too: tray.json is a file any program of the user can write
+function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u -and $u -ne $global:SvcOldDefaultUrl -and (Test-StatusPageUrl $u)) { $u } else { $global:SvcDefaultUrl } }
 function Start-StatusPageAfterConnect {
     <# VeroScudo reached Protected: look again through the new tunnel - retried on failure. #>
     $global:SvcRetry = @(10, 30); $global:SvcRetryAt = $null
@@ -837,13 +839,17 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     $payload = @{ Config = $json; Imports = @($imports | ForEach-Object { @{ Profile = [string]$_.Profile; Text = [string]$_.Text } }) } | ConvertTo-Json -Depth 4 -Compress
     New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null
     $file = Join-Path $global:Paths.UserDir ('save-' + [guid]::NewGuid().ToString('N') + '.json')
-    [IO.File]::WriteAllText($file, $payload, (New-Object Text.UTF8Encoding($false)))
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($payload)
+    [IO.File]::WriteAllBytes($file, $bytes)
+    # its SHA-256 goes into the command the administrator approves: a file swapped after the prompt is refused
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
     try {
         $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
         $arg = $file -replace "'", "''"
         # the elevated child pins its module path first (a planted module in the user's Documents would otherwise run as admin)
         $sysMods = "`$env:PSModulePath = `"`$PSHOME\Modules;`" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'); "
-        $script = $sysMods + "try { Import-Module '$mod' -Force; Import-VeroSavePayload -Path '$arg'; exit 0 } catch { exit 1 }"
+        $script = $sysMods + "try { Import-Module '$mod' -Force; Import-VeroSavePayload -Path '$arg' -Sha256 '$hash'; exit 0 } catch { exit 1 }"
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
         # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
         $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
@@ -1001,7 +1007,7 @@ function Show-Settings {
     New-Label $card3 'Atlassian Statuspage format (.../api/v2/status.json) - Anthropic''s by default.' 38 454 426 20 $FontSmall $global:Theme.Sub | Out-Null
     $saveSp = ({
         $u = $inSp.Text.Trim(); if (-not $u) { $u = $global:SvcDefaultUrl; $inSp.Text = $u }
-        if ($u -notmatch '^https://[^\s]+$' -or $u.Length -gt 300) { [VeroMsg]::Show('The status page must be an https:// address', 'VeroScudo') | Out-Null; $inSp.Text = (Get-StatusPageUrl); return }
+        if (-not (Test-StatusPageUrl $u)) { [VeroMsg]::Show('The status page must be an https:// address', 'VeroScudo') | Out-Null; $inSp.Text = (Get-StatusPageUrl); return }
         if ($u -ne (Get-StatusPageUrl)) { Set-TrayPref 'statusPageUrl' $u; $global:SvcResult = $null; Start-StatusPageFetch -Now }
     }).GetNewClosure()
     $inSp.Add_Leave($saveSp)
@@ -1559,7 +1565,7 @@ if ($Preview) {
     $notify.Visible = $false; $notify.Dispose()
     [Environment]::Exit(0)
 }
-$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = $PollSeconds * 1000; $timer.Add_Tick({ Refresh }); $timer.Start()
+$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = $PollSeconds * 1000; $timer.Add_Tick({ try { Refresh } catch { Write-Verbose "refresh: $($_.Exception.Message)" } }); $timer.Start()   # one failed pass must not stop the icon following the guard
 $firstCheck = New-Object System.Windows.Forms.Timer; $firstCheck.Interval = 120 * 1000; $firstCheck.Add_Tick({ $firstCheck.Stop(); try { Invoke-UpdateCheck } catch { Write-Verbose "update check: $($_.Exception.Message)" } }); $firstCheck.Start()
 Refresh
 [System.Windows.Forms.Application]::Run()

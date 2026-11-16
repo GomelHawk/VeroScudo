@@ -163,7 +163,7 @@ function Invoke-VeroActionWatchdog {
                         $upNow = [bool]$sc -and $armedNow -and (Test-VeroVpnConnected $sc.Profile -Type $sc.Type)
                         Update-VeroStats -Up $upNow -Down ([bool]$sc -and $armedNow -and -not $upNow) -Id $(if ($sc) { $sc.ProfileId } else { '' }) -Name $(if ($sc) { $sc.Profile } else { '' })
                     } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
-                    try { [IO.File]::WriteAllText((Get-VeroPath).Heartbeat, [string][int64](Get-VeroEpoch)) } catch { Write-Verbose 'heartbeat not written' }
+                    Write-VeroHeartbeat
                 } catch {
                     if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
                     Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
@@ -217,9 +217,21 @@ function Invoke-VeroAction {
         $Config,
         [string]$VpnProfile
     )
-    if (-not $Config) { $Config = Get-VeroConfig }
     $p = Get-VeroPath
     if (-not (Test-Path $p.State)) { New-Item -ItemType Directory -Path $p.State -Force | Out-Null }
+    if (-not $Config) {
+        try { $Config = Get-VeroConfig }
+        catch {
+            # Off is the one way out and must not need a config that loads: the flag and the filters go; the VPN connection
+            # itself is left as it is (its name is in the file that cannot be read)
+            if ($Action -notin 'off', 'disarm') { throw }
+            Write-VeroLog "config.json unusable ($($_.Exception.Message)) - turning off: kill-switch removed; the VPN connection itself is not touched" $Action
+            if ($Action -eq 'off') { Set-Content -Path $p.OffAt -Value (Get-Date).ToString('o') }
+            Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action
+            if (Test-Path $p.Renew) { Remove-Item $p.Renew -Force -ErrorAction SilentlyContinue }
+            return
+        }
+    }
     switch ($Action) {
         'arm'       { Invoke-VeroActionArm -Config $Config -Action $Action }
         'disarm'    { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }

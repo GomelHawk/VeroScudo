@@ -8,13 +8,26 @@ permissions:
   contents: read
 
 jobs:
+  ci:
+    # a tag is released only when every check passes on the tagged commit
+    uses: ./.github/workflows/ci.yml
+
   windows:
     name: Windows archive (signed when a certificate is configured)
+    needs: ci
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: The tag is the version in the code (Windows and Linux/macOS)
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          win="$(sed -n "s/^\$script:Version *= *'\([0-9.]*\)'.*/\1/p" windows/Core/10-Settings.ps1)"
+          py="$(sed -n 's/^__version__ = "\([0-9.]*\)".*/\1/p' linux/veroscudo/__init__.py)"
+          echo "tag $v, Windows $win, Linux/macOS $py"
+          if [ -z "$win" ] || [ "$v" != "$win" ] || [ "$v" != "$py" ]; then echo "the tag and the version constants differ" >&2; exit 1; fi
       - name: Sign PowerShell scripts (Authenticode)
         # optional: add the repository secrets SIGNING_PFX_BASE64 and SIGNING_PFX_PASSWORD to sign every script;
         # users can then check them with Get-AuthenticodeSignature before running Install.ps1

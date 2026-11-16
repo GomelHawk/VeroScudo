@@ -7,7 +7,9 @@ function Set-VeroHome {
        elevated, and a value a non-admin process can plant (HKCU\Environment) must never redirect it. #>
     [CmdletBinding()] param([string]$Path, [string]$UserDir)
     $script:HomeOverride = $Path
-    $script:UserOverride = $UserDir
+    # a redirected home always redirects the per-user folder with it (<home>\user unless -UserDir names another): a test
+    # that moved only the home would otherwise write credentials and requests into the real %LOCALAPPDATA%\VeroScudo
+    $script:UserOverride = if ($UserDir) { $UserDir } elseif ($Path) { Join-Path $Path 'user' } else { $null }
 }
 
 function Get-VeroSafeName([string]$Name) {
@@ -144,7 +146,7 @@ function Get-VeroConfig {
         if ($name.Length -gt 256 -or $name -match '[\x00-\x1f"*?\[\]<>|&]') { throw "config.json: invalid VPN profile name '$name'" }
         $type = ([string](Get-Prop $p 'type')).ToLowerInvariant()
         if (-not $type) { $type = 'ras' }
-        if ($script:Types -notcontains $type) { throw "config.json: type must be 'ras', 'openvpn' or 'wireguard' (profile '$name')" }
+        if ($script:Types -notcontains $type) { throw "config.json: type must be one of $(($script:Types | ForEach-Object { "'$_'" }) -join ', ') (profile '$name')" }
         $th = Get-VeroTypeHandler $type                                     # the type's rules: name shape, server, username, defaults
         if ($th.NamePattern -and $name -notmatch $th.NamePattern) { throw "config.json: $($th.NameHint) (profile '$name')" }
         $server = [string](Get-Prop $p 'server')
@@ -158,7 +160,8 @@ function Get-VeroConfig {
         $port = if ($null -ne (Get-Prop $p 'port')) { [int]$p.port } else { $defPort }
         if ($port -lt 1 -or $port -gt 65535) { throw "config.json: port must be 1-65535 (profile '$name')" }
         $pinned = @(Get-Prop $p 'serverIps' | Where-Object { $_ })
-        foreach ($ip in $pinned) { $a = $null; if (-not [System.Net.IPAddress]::TryParse([string]$ip, [ref]$a)) { throw "config.json: invalid serverIps entry '$ip' (profile '$name')" } }
+        # a plain address only: IPAddress.TryParse alone also takes "1", "0x1" and an IPv6 zone (Test-VeroCidr refuses those)
+        foreach ($ip in $pinned) { if ([string]$ip -match '/' -or -not (Test-VeroCidr ([string]$ip))) { throw "config.json: invalid serverIps entry '$ip' (profile '$name')" } }
         $dco = [bool](Get-Prop $p 'dco')                                    # OpenVPN: keep the kernel data channel (no program-scoped permit)
         $auth = if ($null -ne (Get-Prop $p 'auth')) { [bool]$p.auth } else { $th.PasswordCapable }   # OpenVPN: the .ovpn asks for a password
         [pscustomobject]@{ Profile = $name; Type = $type; Server = $server; Port = $port; Username = $user; ServerIps = @($pinned | ForEach-Object { [string]$_ })
@@ -275,11 +278,18 @@ function Import-VeroSavePayload {
     <# The elevated half of the tray's Save: one JSON file { Config = <config.json text>; Imports = [ { Profile; Text } ] }.
        Every import is checked and stored (Import-VeroOpenVpnText), then the config is validated and written. The file holds
        what the tray produced as the user; nothing in it is trusted - it is checked here as if typed by hand. A reparse point
-       at the path is refused (the elevated side opens exactly the file, never a link to somewhere else). #>
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+       at the path is refused (the elevated side opens exactly the file, never a link to somewhere else), and so is a file
+       whose SHA-256 is not the one in the approved command. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Sha256)
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing a link at $Path" }
-    $payload = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    # the administrator approved a command that names this file and its SHA-256: the file lies in the user's own folder,
+    # where any program of that user can replace it between the approval and this read. Read once, compared, then parsed.
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}$' -or $hash -ne $Sha256.ToLowerInvariant()) { throw 'the save payload is not the one that was approved - nothing was changed' }
+    $payload = (New-Object Text.UTF8Encoding($false)).GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     if (-not $payload -or -not $payload.PSObject.Properties['Config']) { throw 'save payload without a config' }
     $imports = @(if ($payload.PSObject.Properties['Imports']) { $payload.Imports } else { @() }) | Where-Object { $_ }
     foreach ($i in $imports) { $null = Import-VeroOpenVpnText -ProfileName ([string]$i.Profile) -Text ([string]$i.Text) }

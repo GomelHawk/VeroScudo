@@ -7,7 +7,8 @@ function Get-VeroCredential {
     $p = Get-VeroPath -VpnProfile $Config.Profile
     foreach ($f in $p.Cred, $p.LegacyCred) {
         if (-not (Test-Path $f)) { continue }
-        try { $c = Import-Clixml $f } catch { continue }
+        try { $c = Import-Clixml -LiteralPath $f } catch { continue }
+        if ($c -isnot [pscredential]) { continue }                                # the file is the user's own: only a credential is taken from it
         if ($f -eq $p.Cred -or $c.UserName -eq $Config.Username) { return $c }    # the 1.0 single credential, if it is for this user
     }
     $null
@@ -16,7 +17,7 @@ function Get-VeroKeyPassphrase {
     <# OpenVPN: the private-key passphrase, stored like the password (DPAPI, this Windows account only). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     $f = (Get-VeroPath -VpnProfile $ProfileName).KeyPass
-    if (Test-Path $f) { try { return (Import-Clixml $f) } catch { Write-Verbose 'key passphrase unreadable' } }
+    if (Test-Path $f) { try { $k = Import-Clixml -LiteralPath $f; if ($k -is [pscredential]) { return $k } } catch { Write-Verbose 'key passphrase unreadable' } }
     $null
 }
 
@@ -36,7 +37,11 @@ function Open-VeroCrlWindow {
 function Test-VeroCrlWindow {
     $f = (Get-VeroPath).CrlWindow
     if (-not (Test-Path $f)) { return $false }
-    try { return ((Get-Date) -lt [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)) } catch { return $false }
+    try {
+        $until = [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        # never longer than the 2 minutes Open-VeroCrlWindow writes: a later time in the file is not ours
+        return ((Get-Date) -lt $until -and $until -le (Get-Date).AddMinutes(2).AddSeconds(5))
+    } catch { return $false }
 }
 function Invoke-VeroDial {
     <# One connection attempt for the active profile's type.
@@ -114,13 +119,17 @@ function Set-VeroRenewMarker {
     $m = @{ Profile = $ProfileName; Start = (Get-Date).ToString('o'); HungUp = '' }
     if ($HungUp -and (Test-Path $p.Renew)) { try { $old = Get-Content $p.Renew -Raw | ConvertFrom-Json; $m.Start = [string]$old.Start } catch { Write-Verbose 'renew marker unreadable' } }
     if ($HungUp) { $m.HungUp = (Get-Date).ToString('o') }
-    $m | ConvertTo-Json | Set-Content $p.Renew
+    $tmp = "$($p.Renew).new"                                                 # whole or not at all: it is read by another process
+    $m | ConvertTo-Json | Set-Content $tmp
+    Move-Item -LiteralPath $tmp -Destination $p.Renew -Force
 }
 function Test-VeroRenewHangUp {
     <# Pure rule: is a termination record at $EventTime our own hang-up for Reconnect? Only for that profile, only between the
        marker's start and 30 s after the hang-up finished, and never for a marker older than 5 minutes. #>
     [CmdletBinding()] param($Marker, [string]$ProfileName, [datetime]$EventTime, [datetime]$Now = (Get-Date))
-    if (-not $Marker -or [string]$Marker.Profile -ne $ProfileName) { return $false }
+    if (-not $Marker) { return $false }
+    $any = $Marker.PSObject.Properties['AnyProfile'] -and $Marker.AnyProfile       # a marker that could not be read (Get-VeroRenewMarker)
+    if (-not $any -and [string]$Marker.Profile -ne $ProfileName) { return $false }
     $start = [datetime]::Parse([string]$Marker.Start, $null, [Globalization.DateTimeStyles]::RoundtripKind)
     if (($Now - $start).TotalMinutes -gt 5) { return $false }
     $end = if ([string]$Marker.HungUp) { [datetime]::Parse([string]$Marker.HungUp, $null, [Globalization.DateTimeStyles]::RoundtripKind).AddSeconds(30) } else { $Now }
@@ -128,7 +137,12 @@ function Test-VeroRenewHangUp {
 }
 function Get-VeroRenewMarker {
     $p = Get-VeroPath
-    if (Test-Path $p.Renew) { try { return (Get-Content $p.Renew -Raw | ConvertFrom-Json) } catch { Write-Verbose 'renew marker unreadable' } }
+    if (Test-Path $p.Renew) {
+        try { $m = Get-Content $p.Renew -Raw | ConvertFrom-Json; if ($m -and $m.PSObject.Properties['Profile']) { return $m } } catch { Write-Verbose 'renew marker unreadable' }
+        # there, but empty or half-written (read while it was being written): still VeroScudo's own Reconnect - its hang-up
+        # must not be read as your Off. The file's own time says when.
+        try { return [pscustomobject]@{ Profile = ''; AnyProfile = $true; Start = (Get-Item $p.Renew).LastWriteTime.ToString('o'); HungUp = '' } } catch { Write-Verbose 'renew marker gone' }
+    }
     $null
 }
 function Resolve-VeroTerminationCode {
@@ -214,6 +228,13 @@ function Invoke-VeroReconnect {
                 }
             }
             $attempt++
+            if ($Action -eq 'watchdog') {
+                # the watchdog itself is redialing (a Hiddify or WireGuard drop has no event task): it is alive and working -
+                # without this the tray reports "Guard not running" after 3 minutes, and the minutes without a connection
+                # would be missing from the statistics
+                Write-VeroHeartbeat
+                try { Update-VeroStats -Up $false -Down $true -Id ([string]$Config.ProfileId) -Name $Config.Profile } catch { Write-Verbose "statistics: $($_.Exception.Message)" }
+            }
             Sync-VeroKillSwitch -Config $Config -Action $Action
             if (Test-VeroAuthBlocked $Config.Profile) {
                 if (-not $pausedLogged) { Write-VeroLog "redial paused: the password for '$($Config.Profile)' was rejected - store the right one (tray Settings); still blocked" $Action; $pausedLogged = $true }

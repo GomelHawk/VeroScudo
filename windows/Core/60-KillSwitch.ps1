@@ -68,7 +68,7 @@ function Get-VeroFilterSpec {
             $s = New-Spec "VPN server proto $($pt.P)" $layer $true $permit
             $null = $s.Protocol([byte]$pt.P)
             foreach ($port in $pt.Ports) { $null = $s.RemotePort([uint16]$port) }
-            foreach ($ip in $ips) { $null = $s.Remote($ip) }
+            foreach ($ip in @($ips | Sort-Object)) { $null = $s.Remote($ip) }      # sorted: a name whose answers rotate gives the same set
             if ($pt.App) { $null = $s.App($Svchost) }
         }
     }

@@ -9,6 +9,34 @@ from pathlib import Path
 
 IFNAME = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")         # a Linux/BSD interface name, and nothing that could end a rule line
 
+_ADDR = re.compile(r"^[0-9A-Fa-f:.]{2,45}(/\d{1,3})?$")     # all an address or network in a rule may consist of
+
+
+def plain_ip(value: object) -> str:
+    """The address in its canonical form. ValueError for anything else - also for an IPv6 zone ("fe80::1%eth0"): the
+    text after the % is free-form, and these strings end up in firewall rules. Pure."""
+    s = str(value).strip()
+    if "%" in s:
+        raise ValueError(f"an address with a zone is not accepted: {s[:60]!r}")
+    return str(ipaddress.ip_address(s))
+
+
+def plain_net(value: object) -> str:
+    """An address or network in its canonical form (192.168.1.5/24 -> 192.168.1.0/24, a netmask -> a prefix length).
+    ValueError for anything else, also for a zone. Pure."""
+    s = str(value).strip()
+    if "%" in s:
+        raise ValueError(f"a network with a zone is not accepted: {s[:60]!r}")
+    return str(ipaddress.ip_network(s, strict=False))
+
+
+def rule_token(value: str) -> str:
+    """Last check before an address or network is written into a ruleset: digits, hex, dots, colons and one /prefix -
+    nothing that could end a rule or start another one. Returns it unchanged; ValueError otherwise. Pure."""
+    if not isinstance(value, str) or not _ADDR.match(value):
+        raise ValueError(f"refusing {str(value)[:60]!r} in a firewall rule")
+    return value
+
 
 # fake-DNS ranges of sing-box / Hiddify (an answer from such a proxy, never a real server)
 FAKE_IP_NETS = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("fc00::/18"))
@@ -18,7 +46,7 @@ def usable_server_ip(addr: str) -> bool:
     """An address a VPN server can really have: not link-local, loopback, unspecified, multicast, or a fake-DNS answer.
     Private ranges stay allowed - a company VPN server can sit in the local network. Pure."""
     try:
-        ip = ipaddress.ip_address(addr.split("%")[0])
+        ip = ipaddress.ip_address(plain_ip(addr))
     except ValueError:
         return False
     if ip.is_link_local or ip.is_loopback or ip.is_unspecified or ip.is_multicast:

@@ -33,8 +33,10 @@ function Get-VeroHiddifyApps {
     $dir = Get-VeroHiddifyDir
     if (-not $dir) { return @() }
     if (Test-VeroAdminOnlyPath -Path (Join-Path $dir 'Hiddify.exe')) { return @() }
-    if (-not (Test-VeroAdminOnlyRules @((Get-Acl -LiteralPath $dir).Access | ForEach-Object { $_ }))) { return @() }
-    @(foreach ($n in $script:HiddifyExes) { $p = Join-Path $dir $n; if (Test-Path -LiteralPath $p) { $p } })
+    if (-not (Test-VeroAdminOnlyRules -Contents @((Get-Acl -LiteralPath $dir).Access | ForEach-Object { $_ }))) { return @() }
+    $apps = @(foreach ($n in $script:HiddifyExes) { $p = Join-Path $dir $n; if (Test-Path -LiteralPath $p) { $p } })
+    foreach ($a in $apps) { if (-not (Test-VeroAdminOnlyRules -Contents @((Get-Acl -LiteralPath $a).Access | ForEach-Object { $_ }))) { return @() } }   # each program itself
+    $apps
 }
 
 function Get-VeroHiddifyNic {

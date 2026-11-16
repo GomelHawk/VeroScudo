@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import pwd
 import re
 import subprocess
@@ -15,28 +16,54 @@ from .netutil import ipv4_by_iface, nameservers, resolve  # noqa: F401  (nameser
 SYS_NET = Path("/sys/class/net")
 
 
+NMCLI_SECONDS = 20          # a question to NetworkManager; one that hangs must not hang the guard or the tray with it
+
+
 def _nmcli(*args: str) -> str:
-    return subprocess.run(["nmcli", "-t", *args], check=False, capture_output=True, text=True).stdout.strip()
+    try:
+        return subprocess.run(["nmcli", "-t", *args], check=False, capture_output=True, text=True,
+                              timeout=NMCLI_SECONDS).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""               # no answer = not connected / not known: the guard stays blocked
 
 
+
+
+def _stays_local(name: str) -> bool:
+    """The interface is not a physical card and does not sit on one: no backing device in sysfs (eth0, wlp2s0 have one)
+    and no lower interface. A bond, a team, a VLAN or a macvlan has no device either, but hangs on real cards (its
+    lower_* links) - traffic into it leaves the machine."""
+    d = SYS_NET / name
+    if (d / "device").exists():
+        return False
+    try:
+        return not any(e.name.startswith("lower_") for e in d.iterdir())
+    except FileNotFoundError:
+        return True             # no such interface (any more): a rule that names it matches nothing
+    except OSError:
+        return False            # cannot be read: not trusted
 
 
 def is_virtual(name: str) -> bool:
-    """A tunnel interface has no backing device in sysfs; a physical NIC (eth0, wlp2s0) does."""
-    return _IFNAME.match(name) is not None and not (SYS_NET / name / "device").exists()
+    """A tunnel interface (tun0, wg0, ppp0): no backing device and nothing below it; never a bridge or a bond."""
+    if _IFNAME.match(name) is None or not _stays_local(name):
+        return False
+    d = SYS_NET / name
+    return not (d / "bridge").is_dir() and not (d / "bonding").is_dir()
 
 
 def vm_bridges() -> list[str]:
-    """Bridges that only connect containers/VMs to this host: every port is virtual (veth, tap, vnet - no backing device).
-    docker0, br-<id>, virbr0, lxdbr0, podman0 qualify; a bridge with a physical NIC enslaved (br0 + eth0) never does -
-    allowing it would open the kill-switch to the LAN. A bridge without ports qualifies (nothing is attached yet)."""
+    """Bridges that only connect containers/VMs to this host: every port is virtual (veth, tap, vnet - no backing device
+    and nothing below it). docker0, br-<id>, virbr0, lxdbr0, podman0 qualify; a bridge with a physical NIC enslaved
+    (br0 + eth0), or with a bond, team or VLAN of physical NICs (br0 + bond0, br0 + eth0.100), never does - allowing it
+    would open the kill-switch to the LAN. A bridge without ports qualifies (nothing is attached yet)."""
     out = []
     try:
         for d in sorted(SYS_NET.iterdir()):
             if not (d / "bridge").is_dir() or not _IFNAME.match(d.name):
                 continue
             ports = (d / "brif").iterdir() if (d / "brif").is_dir() else ()
-            if all(not (SYS_NET / port.name / "device").exists() for port in ports):
+            if all(_stays_local(port.name) for port in ports):
                 out.append(d.name)
     except OSError:
         return []
@@ -373,6 +400,12 @@ def watch(profiles, on_up, on_down, on_auth=None) -> None:
         tracked[ac.get_path()] = True
 
         def changed(active, state, reason):
+            try:
+                _changed(state, reason)
+            except Exception:           # an error here must not be lost in the GLib loop
+                logging.getLogger("veroscudo").exception("VPN event: '%s'", name)
+
+        def _changed(state, reason):
             st = NM.ActiveConnectionState(state)
             if st == NM.ActiveConnectionState.ACTIVATED:
                 on_up(name)
@@ -399,12 +432,15 @@ def _watch_polling(profiles, on_up, on_down, interval: float = 2.0) -> None:
     while True:
         time.sleep(interval)
         for p in profiles():
-            now = is_connected(p)
-            if now and not last.get(p, False):
-                on_up(p)
-            elif last.get(p, False) and not now:
-                on_down(p, False)      # no reason available: treat as failure; `veroscudo off` sets its own marker first
-            last[p] = now
+            try:                       # one failed pass must not end the watch: nothing would arm or redial after it
+                now = is_connected(p)
+                if now and not last.get(p, False):
+                    on_up(p)
+                elif last.get(p, False) and not now:
+                    on_down(p, False)  # no reason available: treat as failure; `veroscudo off` sets its own marker first
+                last[p] = now
+            except Exception:
+                logging.getLogger("veroscudo").exception("VPN watch: '%s'", p)
 
 
 # ---- import from NetworkManager (veroscudo import)

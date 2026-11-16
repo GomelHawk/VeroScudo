@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:        # the release workflow runs all of this first
 
 # read-only token: CI never needs to write anything
 permissions:

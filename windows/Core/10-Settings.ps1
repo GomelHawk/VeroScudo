@@ -29,17 +29,20 @@ function Test-VeroAdminOnlyRules {
        TakeOwnership, GENERIC_ALL. Create-only rights are harmless here (Authenticated Users may create folders in C:\ and
        still cannot touch C:\Program Files). Inherit-only rules do not apply to the folder itself. Trusted: SYSTEM,
        Administrators, TrustedInstaller, CREATOR OWNER. #>
-    [CmdletBinding()] param($Rules)
+    [CmdletBinding()] param($Rules, [switch]$Contents)
     # by SID (account names are localized on non-English Windows); a name that cannot be looked up (test doubles) is compared as text
     $trustedSid = '^(S-1-5-18|S-1-5-32-544|S-1-3-0|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)$'
     $trustedName = '^(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller|CREATOR OWNER)$'
     [uint32]$danger = 0x10000 -bor 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000     # Delete, DeleteChild, WriteDAC, WriteOwner, GENERIC_ALL
+    # -Contents: the folder (or file) holds programs that are trusted by path - creating a file in it, writing or appending
+    # to one (0x2, 0x4, GENERIC_WRITE) and rules that only its files inherit count as well
+    if ($Contents) { $danger = $danger -bor 0x2 -bor 0x4 -bor 0x40000000 }
     foreach ($r in @($Rules | ForEach-Object { $_ } | Where-Object { $_ })) {           # an AuthorizationRuleCollection is enumerated, never taken as one item
         if ([string]$r.AccessControlType -ne 'Allow') { continue }
         $who = [string]$r.IdentityReference
         $sid = try { ([Security.Principal.NTAccount]$who).Translate([Security.Principal.SecurityIdentifier]).Value } catch { $who }
         if ($sid -match $trustedSid -or $who -match $trustedName) { continue }
-        if (([int]$r.PropagationFlags -band [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+        if (-not $Contents -and ([int]$r.PropagationFlags -band [int][Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
         $bits = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$r.FileSystemRights), 0)
         if (($bits -band $danger) -ne 0) { return $false }
     }

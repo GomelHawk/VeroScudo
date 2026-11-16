@@ -5,6 +5,7 @@ the macOS keychain. macOS reports no "user hung up" reason, so every drop is tre
 blocked and redials until `sudo veroscudo off` - strict, never open."""
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import time
@@ -15,7 +16,11 @@ from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's
 
 
 def _status(profile: str) -> str:
-    return subprocess.run(["scutil", "--nc", "status", profile], check=False, capture_output=True, text=True).stdout
+    try:
+        return subprocess.run(["scutil", "--nc", "status", profile], check=False, capture_output=True, text=True,
+                              timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""               # no answer = not connected: the guard stays blocked
 
 
 def is_connected(profile: str) -> bool:
@@ -78,12 +83,15 @@ def watch(profiles, on_up, on_down, interval: float = 2.0, on_auth=None) -> None
     while True:
         time.sleep(interval)
         for p in profiles():
-            now = is_connected(p)
-            if now and not last.get(p, False):
-                on_up(p)
-            elif last.get(p, False) and not now:
-                on_down(p, False)
-            last[p] = now
+            try:                              # one failed pass must not end the watch: nothing would arm or redial after it
+                now = is_connected(p)
+                if now and not last.get(p, False):
+                    on_up(p)
+                elif last.get(p, False) and not now:
+                    on_down(p, False)
+                last[p] = now
+            except Exception:
+                logging.getLogger("veroscudo").exception("VPN watch: '%s'", p)
 
 
 def kind(profile: str) -> str | None:
@@ -135,14 +143,14 @@ def down_argv(name: str) -> list[str]:
 
 
 _VMIF = re.compile(r"^(bridge\d+|vmnet\d+|vnic\d+)$")
-_PHYS = re.compile(r"^en\d+$")
+_PHYS = re.compile(r"^(en|vlan|bond|fw)\d+$")       # a card, or a VLAN / bond / FireWire link on one
 
 
 def parse_bridges(text: str) -> list[str]:
     """`ifconfig` -> the host-side interfaces of VMs on NAT or host-only networks. Pure.
 
     bridgeN: the vmnet framework (Parallels, VMware Fusion, UTM, Lima, Docker Desktop's VM) - qualifies only while none of
-    its members is a physical port (enN): a bridged-mode VM (bridge + en0) or the Thunderbolt Bridge (bridge0 + en1, en2)
+    its members is a physical port (enN, or a vlanN / bondN on one): a bridged-mode VM (bridge + en0) or the Thunderbolt Bridge (bridge0 + en1, en2)
     puts frames straight onto the wire, past pf - allowing it would open the kill-switch to the LAN, the same rule as
     nm.vm_bridges on Linux. vmnetN (older VMware Fusion) and vnicN (older Parallels) are host-side interfaces, always NAT
     or host-only."""

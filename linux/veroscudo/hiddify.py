@@ -95,8 +95,10 @@ def is_profile(name: str) -> bool:
 # ---------------------------------------------------------------- pure parsers
 def forbidden(addr: str) -> bool:
     """An address Hiddify's servers can never have: loopback, private, link-local, multicast, unspecified, reserved. Pure."""
+    if "%" in addr:
+        return True                                     # a zone: only link-local addresses have one, and its text is free-form
     try:
-        a = ipaddress.ip_address(addr.split("%")[0])
+        a = ipaddress.ip_address(addr)
     except ValueError:
         return True
     if getattr(a, "ipv4_mapped", None):
@@ -114,12 +116,18 @@ def _is_ip(value: str) -> bool:
         return False
 
 
+def _shown(host: object, port: object) -> str:
+    """A refused entry for the log: short, and without line breaks or other control characters (the file is not ours)."""
+    text = f"{str(host)[:60]}:{str(port)[:8]}"
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
 def _port(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     try:
         p = int(value)                                  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return p if 1 <= p <= 65535 else None
 
@@ -177,16 +185,16 @@ def endpoints(conf: dict) -> tuple[list[Endpoint], list[str]]:
     def add(host: object, port: object, protos) -> None:
         p = _port(port)
         if not isinstance(host, str) or not host or p is None:
-            dropped.append(f"{host}:{port}")
+            dropped.append(_shown(host, port))
             return
         h = host.strip().strip("[]").lower()
         if _is_ip(h):
             if forbidden(h):
-                dropped.append(f"{h}:{p}")
+                dropped.append(_shown(h, p))
                 return
             h = str(ipaddress.ip_address(h))
         elif not _HOST.match(h):
-            dropped.append(f"{h[:60]}:{p}")
+            dropped.append(_shown(h, p))
             return
         found.setdefault((h, p), set()).update(protos)
 

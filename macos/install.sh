@@ -54,7 +54,7 @@ mv "$PREFIX/lib/veroscudo.new" "$PREFIX/lib/veroscudo"
 rm -f "$BIN" "$TRAY"
 [ -d "$PREFIX/venv" ] && rm -rf -- "$PREFIX/venv"
 # -I: no PYTHONPATH, no user site-packages, not the current folder - only Apple's Python and this copy
-printf '#!%s -I\nimport sys\nsys.path.insert(0, "%s/lib")\nfrom veroscudo.cli import main\nsys.exit(main())\n' "$PYTHON" "$PREFIX" > "$BIN"
+printf '#!%s -I\nimport sys\nsys.path.insert(0, "%s/lib")\nfrom veroscudo.cli import run\nsys.exit(run())\n' "$PYTHON" "$PREFIX" > "$BIN"
 printf '#!%s -I\nimport sys\nsys.path[:0] = ["%s/lib", "%s/tray-lib"]\nfrom veroscudo.tray_macos import main\nsys.exit(main())\n' \
   "$PYTHON" "$PREFIX" "$PREFIX" > "$TRAY"
 install -m 755 "$HERE/uninstall.sh" "$PREFIX/uninstall.sh"
@@ -80,7 +80,7 @@ chmod 755 "$BIN" "$TRAY"
 echo "$PREFIX/bin" > /etc/paths.d/veroscudo
 chmod 644 /etc/paths.d/veroscudo
 RULE_PATHS=("$BIN")
-if [ -d /usr/local/bin ] && [ "$(stat -f %u /usr/local/bin)" = "0" ]; then
+if [ -d /usr/local/bin ] && [ "$(stat -f %u /usr/local/bin)" = "0" ] && [ -z "$(find /usr/local/bin -maxdepth 0 -perm +022)" ]; then
   ln -sfh "$BIN" /usr/local/bin/veroscudo
   RULE_PATHS+=(/usr/local/bin/veroscudo)
 elif [ -L /usr/local/bin/veroscudo ]; then
@@ -101,9 +101,20 @@ RULE=""
 for b in "${RULE_PATHS[@]}"; do
   for a in on off reconnect "use *"; do RULE="$RULE${RULE:+, }$b $a"; done
 done
-echo "$USER_NAME ALL=(root) NOPASSWD: $RULE" > /etc/sudoers.d/veroscudo.tmp
+# the rule's commands get a fixed PATH and a reset environment whatever the system's sudoers says (macOS sets no
+# secure_path): any program of this user can run them as root without a password
+{
+  for b in "${RULE_PATHS[@]}"; do echo "Defaults!$b env_reset, secure_path=\"/usr/sbin:/usr/bin:/sbin:/bin\""; done
+  echo "$USER_NAME ALL=(root) NOPASSWD: $RULE"
+} > /etc/sudoers.d/veroscudo.tmp
 chmod 440 /etc/sudoers.d/veroscudo.tmp
-visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null && mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
+if visudo -cf /etc/sudoers.d/veroscudo.tmp >/dev/null; then
+  mv /etc/sudoers.d/veroscudo.tmp /etc/sudoers.d/veroscudo
+else
+  rm -f /etc/sudoers.d/veroscudo.tmp
+  echo "WARNING: the sudo rule for '$USER_NAME' was refused by visudo - the tray's On/Off will ask for a password or fail."
+  echo "         Run 'sudo veroscudo on|off' yourself, or fix the user name and run the installer again."
+fi
 
 echo "== 4/5 icons and the app"
 ICONS=""

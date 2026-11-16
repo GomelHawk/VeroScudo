@@ -104,6 +104,9 @@ def enabled() -> bool:
 
 
 def _enable() -> None:
+    if TOKEN.exists():                                  # pf was turned off under us: give the old reference back first
+        _run(["-X", TOKEN.read_text().strip()])
+        TOKEN.unlink(missing_ok=True)
     r = _run(["-E"])
     m = re.search(r"Token\s*:\s*(\d+)", r.stdout + r.stderr)
     if m:
@@ -117,6 +120,8 @@ def apply(ruleset: str) -> None:
     r = _run(["-a", ANCHOR, "-f", "-"], input=ruleset)
     if r.returncode != 0:
         raise subprocess.CalledProcessError(r.returncode, "pfctl", r.stdout, r.stderr)
+    if not enabled():                                   # rules in a pf that is off protect nothing
+        raise subprocess.CalledProcessError(1, "pfctl -E", "", "pf could not be enabled")
 
 
 def clear() -> None:

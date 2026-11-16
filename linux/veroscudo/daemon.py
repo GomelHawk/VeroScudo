@@ -21,6 +21,9 @@ WATCHDOG_SECONDS = 15
 # its records differently - see docs/ARCHITECTURE.md, "Timing windows". Both markers are consumed on first use.
 OFF_MARKER_SECONDS = 60.0
 RENEW_MARKER_SECONDS = 120.0
+# After your Off, a dial VeroScudo itself had started may still succeed: for this long it is taken down again instead of
+# turning the VPN back on (Windows: Test-VeroRecentOff, the same 30 s).
+OFF_RECENT_SECONDS = 30.0
 
 
 class Guard:
@@ -29,6 +32,7 @@ class Guard:
         self.store = store or StateStore()
         self.off_marker = self.store.home / "off.marker"     # set by `veroscudo off` so a polling backend knows it was deliberate
         self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
+        self.off_stamp = self.store.home / "off.at"          # when `veroscudo off` last ran (a redial in flight must not undo it)
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
         # how many dials a redial loop makes before it hands over: None = until connected (the daemon). The CLI (and so the
@@ -61,7 +65,7 @@ class Guard:
         self._cfg_stamp = stamp
         try:
             new = Config.load()
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except Exception as e:  # noqa: BLE001 - whatever is wrong with the file: the running one stays
             log.error("config.json changed but cannot be used (%s) - keeping the previous configuration", e)
             return False
         self.base = new
@@ -133,12 +137,15 @@ class Guard:
         try:
             conf = hiddify.read_config(p.config_path)
             eps, dropped = hiddify.endpoints(conf)
-        except (OSError, ValueError) as e:                     # never the file's content in the log (it holds a secret)
+        except Exception as e:  # noqa: BLE001 - never the file's content in the log (it holds a secret)
             self._say_once("read", f"Hiddify's config {p.config_path} cannot be used ({type(e).__name__}: "
                                    f"{str(e)[:80] if isinstance(e, OSError) else 'invalid'}) - keeping the last good servers")
             return tuple(self._hiddify_good.get(p.id) or self.cached_hiddify_endpoints(cfg))
         self._say_once("read", None)
-        hiddify.share_tun(p.config_path, conf, self.store.home / hiddify.SHARED_NAME)   # for the user's status and tray
+        try:
+            hiddify.share_tun(p.config_path, conf, self.store.home / hiddify.SHARED_NAME)   # for the user's status and tray
+        except Exception as e:  # noqa: BLE001 - the permits never depend on this copy
+            self._say_once("share", f"Hiddify: its tunnel settings could not be shared with the tray ({type(e).__name__})")
         self._say_once("dropped", f"Hiddify: {len(dropped)} server entr{'y' if len(dropped) == 1 else 'ies'} not allowed "
                                   f"(private, local or invalid address, or over {hiddify.MAX_ENDPOINTS}): "
                                   f"{', '.join(dropped[:5])}{' ...' if len(dropped) > 5 else ''}" if dropped else None)
@@ -202,7 +209,36 @@ class Guard:
         return bool(cfg.server) and not cfg.server_ips and cfg.current.vpn_type != hiddify.KIND
 
     def _apply(self, tunnel_up: bool, force: bool) -> str | None:
-        """Under the firewall lock: the ruleset for this state, applied if needed. Returns the tunnel it allows."""
+        """Under the firewall lock: the ruleset for this state, applied if needed. Returns the tunnel it allows.
+        Fail closed: when the rules cannot be built or loaded, an armed machine is never left without a table."""
+        try:
+            tun = self._apply_rules(tunnel_up, force)
+        except Exception:
+            self._fail_closed()
+            raise
+        self._say_once("emergency", None)
+        return tun
+
+    def _fail_closed(self) -> None:
+        """The rules for this state could not be applied. Rules already in force stay (the transaction changed nothing);
+        with none in force, everything but loopback and DHCP is blocked until a later pass succeeds (Windows:
+        Enable-VeroEmergencyBlock)."""
+        if not self.store.armed:
+            return
+        try:
+            if firewall.is_active():
+                self._say_once("emergency", "kill-switch: the new rules could not be applied - the rules in force stay",
+                               logging.ERROR)
+                return
+            firewall.apply(firewall.render_lockdown())
+            self._applied = None
+            self.store.set_applied(None, None)
+            self._say_once("emergency", "EMERGENCY: the kill-switch rules could not be applied - everything but DHCP is "
+                                        "blocked until they can (see the error that follows)", logging.CRITICAL)
+        except Exception:
+            log.exception("EMERGENCY: the kill-switch rules AND the lockdown could not be applied - NOT PROTECTED")
+
+    def _apply_rules(self, tunnel_up: bool, force: bool) -> str | None:
         rs, tun = self.desired_ruleset(tunnel_up)
         if not force and rs == self._applied and firewall.is_active():
             return tun
@@ -249,7 +285,13 @@ class Guard:
         ips = [] if hid else list(cfg.server_ips) or self.cached_server_ips(cfg)
         eps = tuple(self.cached_hiddify_endpoints(cfg)) if hid else ()
         with self.store.firewall_lock():
-            firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy(), endpoints=eps))
+            try:
+                firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy(), endpoints=eps))
+            except Exception:                                  # never boot open: the lockdown instead, the daemon retries
+                log.exception("boot: armed, but the kill-switch rules could not be applied - everything but DHCP is blocked")
+                firewall.apply(firewall.render_lockdown())
+                self.store.set_applied(None, None)
+                return
             self.store.set_applied(cfg.profile, None)
         shown = ips or [f"{a}:{p}" for a, p, _ in eps]
         log.info("boot: armed - kill-switch ON before the network starts (server %s)", ", ".join(shown[:8]) or "not cached")
@@ -257,6 +299,7 @@ class Guard:
     # ---- actions -------------------------------------------------------------
     def arm(self) -> None:
         self.off_marker.unlink(missing_ok=True)            # a stale Off must never turn a later real drop into a disarm
+        self.off_stamp.unlink(missing_ok=True)
         if not self.store.armed and self._looks_up(self.cfg):
             # nothing is blocked yet: look the name up now, so the address the VPN client dials (a name can answer with
             # changing addresses) is allowed from the first rule on
@@ -304,9 +347,14 @@ class Guard:
     def _take_marker(marker: Path, max_age: float) -> bool:
         """True (once) when the marker was written within the last `max_age` seconds; the marker is consumed either way."""
         try:
-            started = float(marker.read_text().strip() or 0)
-        except (OSError, ValueError):
+            written = marker.stat().st_mtime
+            text = marker.read_text().strip()
+        except OSError:
             return False
+        try:
+            started = float(text)
+        except ValueError:
+            started = written                              # empty or half-written: the file's own time says when
         marker.unlink(missing_ok=True)
         return time.time() - started <= max_age
 
@@ -318,8 +366,18 @@ class Guard:
         """Our own Reconnect took the connection down just now - not the user's Off."""
         return self._take_marker(self.renew_marker, RENEW_MARKER_SECONDS)
 
+    def _off_recent(self) -> bool:
+        try:
+            return 0 <= time.time() - self.off_stamp.stat().st_mtime <= OFF_RECENT_SECONDS
+        except OSError:
+            return False
+
     def off(self) -> None:
         self.renew_marker.unlink(missing_ok=True)
+        try:
+            self.off_stamp.write_text(str(time.time()))
+        except OSError:
+            pass
         connected = nm.is_connected(self.cfg.profile) and self.cfg.current.vpn_type != hiddify.KIND   # Hiddify stays up
         if connected:                                      # only when a down-event will follow and consume it
             self.off_marker.write_text(str(time.time()))
@@ -370,6 +428,12 @@ class Guard:
         if profile not in self.base.names:
             return
         self.store.clear_auth_failed()                         # connected: whatever was wrong with the password is fixed
+        if not self.store.armed and self._off_recent() and self.store.lock_alive():
+            # a dial VeroScudo had started before your Off has just succeeded: Off stands - take it down, do not arm
+            log.info("'%s' connected by a redial that was running when you turned the VPN off - disconnecting it", profile)
+            self.off_marker.write_text(str(time.time()))       # the down-event that follows is deliberate
+            nm.down(profile)
+            return
         if profile != self.cfg.profile:
             self.store.set_active(profile)
             log.info("'%s' connected - now the active profile", profile)
@@ -452,6 +516,10 @@ class Guard:
                 log.info("disarmed during reconnect - stopping")
         finally:
             self.store.release_lock()
+        if not self.store.armed and attempt and self._off_recent() and nm.is_connected(self.cfg.profile):
+            log.info("'%s' connected after you turned the VPN off - disconnecting it", self.cfg.profile)
+            nm.down(self.cfg.profile)                          # Hiddify: nothing is taken down (nm.down leaves it alone)
+            return
         if self.store.armed and nm.is_connected(self.cfg.profile):
             self._say_once("wait", None)                       # the next drop is told again
             self.enable_killswitch(tunnel_up=True)

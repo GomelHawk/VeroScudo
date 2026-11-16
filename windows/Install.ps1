@@ -41,6 +41,14 @@ $weak = Test-VeroAdminOnlyPath $InstallDir
 if ($weak) { throw "refusing -InstallDir '$InstallDir': '$weak' lets non-administrators rename or replace folders in it, and the elevated tasks run VeroScudo from there. Use a folder under $(Get-VeroSystemDir ProgramFiles)." }
 
 $p = Get-VeroPath
+# %ProgramData% lets every user create folders. One made before the first install - by another account, or by a program
+# without administrator rights - could hold a config, an OpenVPN file or state the guard would then trust: refused.
+if (Test-Path -LiteralPath $p.Home) {
+    $owner = (Get-Acl -LiteralPath $p.Home).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notmatch '^(S-1-5-18|S-1-5-32-544|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)$') {
+        throw "refusing to use '$($p.Home)': it exists already and does not belong to Administrators or SYSTEM (owner: $owner), so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
+    }
+}
 New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-Null
 
 # --- program folder: administrators and SYSTEM write, everyone else reads. Program Files gives that by default; a custom

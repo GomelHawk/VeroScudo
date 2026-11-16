@@ -5,6 +5,56 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security: review of every platform
+- **Windows, OpenVPN:** `setenv "opt" <option>` (quoted or escaped) passed the config check and OpenVPN read it as that
+  option - any option, `plugin` included, in a process run as administrator. `setenv` is now accepted only for
+  `FORWARD_COMPATIBLE`, `CLIENT_CERT`, `GENERIC_CONFIG`, `PUSH_PEER_INFO` and `UV_*`. Lines longer than 255 characters
+  (OpenVPN cuts them and reads the rest as a new line) and NUL characters are refused. The stored config is checked
+  again at every start. A config that used another `setenv` name must be imported again without that line.
+- **Windows, tray Save:** the payload file could be replaced between the administrator's approval and the elevated read.
+  The approved command now carries the file's SHA-256 and a different file is refused.
+- **Windows, installer:** a `%ProgramData%\VeroScudo` folder that exists before the first install and does not belong to
+  Administrators or SYSTEM is refused (any user can create one, with a config and an OpenVPN file in it).
+- **Windows:** the OpenVPN management password file is created administrators-only (it was readable for a moment);
+  nothing is sent to the management port unless the OpenVPN just started holds it; only a credential object is taken
+  from the user's credential files; the Hiddify program permit also requires that users cannot create or write files
+  in its folder; a `crl-window.json` that claims more than 2 minutes is ignored; `serverIps` takes plain addresses only.
+- **Linux/macOS, sudo rule:** `veroscudo` ran its helpers (`nft`, `nmcli`, `pfctl`, `scutil`, `ip`, `wg`...) by name with
+  the caller's `PATH` - where sudo has no `secure_path` (macOS) the passwordless rule gave root. As root the command now
+  uses a fixed `PATH` and ignores `VEROSCUDO_*` variables; the sudo rule sets `secure_path` itself. The installers say so
+  when the rule could not be written.
+- **Linux:** a bridge whose port is a bond, a team or a VLAN of physical cards was taken for a VM bridge and allowed in
+  every state - on such a machine the kill-switch let everything through that bridge. A port now counts as virtual only
+  with no card of its own and none below it; a bridge or bond is never taken for the tunnel. macOS: `vlanN` / `bondN`
+  members disqualify a bridge like `enN`.
+- **Linux/macOS:** an address with an IPv6 zone (`...%text`) passed every check and its text was written into the
+  ruleset - from Hiddify's config (a file the user owns), `serverIps` or `lanAllow`. Zones are refused everywhere,
+  addresses are written in canonical form (`lanAllow` `10.0.0.0/255.0.0.0` becomes `10.0.0.0/8`) and checked again where
+  the ruleset is built. Refused Hiddify entries are logged short and on one line.
+- **Linux/macOS, fail closed:** turning on with rules that could not be applied left the machine armed without any rule
+  while status and tray said *blocked*. Now the lockdown ruleset is applied and `EMERGENCY` logged (boot too). A
+  `config.json` broken in other ways than bad JSON (a list, `"profiles": ["Work"]`, `"port": 1e999`) no longer skips the
+  boot lockdown.
+- **Linux:** `/run/veroscudo/firewall.lock` was readable by everyone, and a lock on it by any local user stopped the
+  guard (no arm, no redial, no Off). It is root's alone now. Hiddify's service is let in for replies only.
+- **macOS:** the daemon's output file (`/var/log/veroscudo.out`, world-readable) no longer gets a copy of the log; rules
+  loaded into a pf that could not be enabled count as an error.
+
+### Fixed: Off, redial and tray robustness (Windows, Linux, macOS)
+- **Off works with a broken `config.json`:** `off` / `disarm` remove the armed flag and the kill-switch also when the
+  config does not load (the VPN connection itself is left as it is). Before, an armed machine with a broken config
+  could not be turned off.
+- Linux/macOS: a dial VeroScudo had started that succeeds within 30 s after your Off is taken down again instead of
+  turning the VPN back on (as on Windows).
+- Windows: while the watchdog itself redials (Hiddify, WireGuard) the tray no longer reports *Guard not running* after
+  3 minutes, and those minutes are recorded as *not connected* in the statistics.
+- A Reconnect marker read while it was being written no longer makes VeroScudo's own hang-up look like your Off.
+- Windows: a log line that cannot be written (another process is writing) no longer stops an arm or a sync halfway;
+  the server addresses in the filter set are sorted, so a name whose answers rotate does not re-apply every filter.
+- Linux/macOS: `nmcli` / `scutil` questions time out after 20 s; an error in one pass no longer ends the VPN watch or
+  the tray's refresh timer (the icon kept its last state).
+- Releases: a tag is published only after the full CI passes on it and when it equals the version in the code.
+
 ### Changed: Linux is stable
 - Live-tested on a real machine with SSTP, OpenVPN, WireGuard and Hiddify (VPN mode) profiles - no leak in any phase,
   the VPN server unreachable included - plus the tray, a reboot while on and uninstall (`docs/TESTING.md`).

@@ -5,12 +5,15 @@ a drop here is final whatever other tables (ufw, docker, firewalld) accept."""
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import subprocess
 from dataclasses import dataclass, field
 
 from .config import Config, server_rules
-from .netutil import IFNAME  # also re-exported for the pf backend
+from .netutil import IFNAME, plain_ip, plain_net, rule_token  # IFNAME: also re-exported for the pf backend
+
+log = logging.getLogger("veroscudo")
 
 _CGROUP = re.compile(r"^[A-Za-z0-9_.@-]+(/[A-Za-z0-9_.@-]+){0,7}$")   # a cgroup path: nothing that could end a rule
 
@@ -20,17 +23,19 @@ TABLE = "inet veroscudo"
 @dataclass(frozen=True)
 class DnsPolicy:
     """Who may send DNS while blocked (redial needs to resolve the server): the system resolver's uid, else only the
-    configured upstream resolvers, else (logged) any destination."""
+    configured upstream resolvers; with neither known there is no DNS permit."""
     uid: int | None = None
     servers: tuple[str, ...] = field(default_factory=tuple)
 
 
 def split_families(addrs) -> tuple[list[str], list[str]]:
-    """IPv4 and IPv6 entries apart (shared with the pf backend)."""
+    """IPv4 and IPv6 entries apart, each in its canonical form (shared with the pf backend). Raises ValueError on anything
+    that is not a plain address or network - these strings are written into the ruleset."""
     v4, v6 = [], []
     for a in addrs:
-        net = ipaddress.ip_network(str(a), strict=False)          # raises on anything that is not an address/network
-        (v4 if net.version == 4 else v6).append(str(a))
+        s = str(a)
+        text = rule_token(plain_net(s) if "/" in s else plain_ip(s))
+        (v4 if ipaddress.ip_network(text, strict=False).version == 4 else v6).append(text)
     return v4, v6
 
 
@@ -42,7 +47,7 @@ def group_endpoints(endpoints) -> list[tuple[int, int, tuple[str, ...], list[str
     (family, port, protocols, addresses) - one rule each. Every address is checked again here. Pure; shared with pf."""
     groups: dict[tuple[int, int, tuple[str, ...]], list[str]] = {}
     for addr, port, protos in endpoints:
-        a = ipaddress.ip_address(str(addr))                       # raises on anything that is not an address
+        a = ipaddress.ip_address(rule_token(plain_ip(addr)))      # raises on anything that is not a plain address
         port = int(port)
         if not 1 <= port <= 65535 or not protos or any(x not in ("tcp", "udp") for x in protos):
             raise ValueError(f"refusing endpoint {addr!r} {port!r} {protos!r}")
@@ -168,7 +173,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                     plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
                     lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} {proto} sport {plist} accept")
     if cg_match:                                                        # Hiddify: replies to its core's own sockets
-        lines.append(f"    {cg_match} accept")
+        lines.append(f"    {cg_match} ct state established,related accept")
     for ver, port, protos, addrs in groups:                             # Hiddify: replies from its servers (see output)
         fam = "ip" if ver == 4 else "ip6"
         l4 = f"{protos[0]} sport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th sport {port}"
@@ -220,7 +225,13 @@ def render_lockdown() -> str:
 
 
 def apply(ruleset: str) -> None:
-    subprocess.run(["nft", "-f", "-"], input=ruleset, text=True, check=True)
+    """One transaction: all of it or nothing. A refused ruleset raises CalledProcessError; what nft said goes to the log
+    (not to the terminal of whoever ran the command)."""
+    r = subprocess.run(["nft", "-f", "-"], input=ruleset, text=True, check=False, capture_output=True)
+    if r.returncode != 0:
+        said = " | ".join((r.stderr or "").strip().splitlines()[:4])[:400]
+        log.error("nft refused the ruleset (exit %s): %s", r.returncode, said or "no message")
+        raise subprocess.CalledProcessError(r.returncode, "nft", r.stdout, r.stderr)
 
 
 def clear() -> None:

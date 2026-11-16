@@ -28,7 +28,7 @@ $script:TypeHandler = @{
         DialFailure   = { param($Config) $ev = Get-VeroRasCode -EventId 20227 -Profile $Config.Profile; "RasDial $($script:LastDialCode)$(if ($ev -ne -1) { ', RAS ' + $ev })" }
         StatusDetail  = { '-' }
         ForeignText   = { param($F) "Windows VPN '$($F.Name)' is connected$(if ($F.Configured) { ' (another VeroScudo profile)' } else { ' (not a VeroScudo profile)' })" }
-        ForeignHangUp = { param($F) & $script:Rasdial $F.Id /disconnect 2>&1 | Out-Null }
+        ForeignHangUp = { param($F) if ([string]$F.Id -and [string]$F.Id -notmatch '^[/-]|[\x00-\x1f"]') { & $script:Rasdial $F.Id /disconnect 2>&1 | Out-Null } }   # a name, never a switch
     }
     openvpn = @{
         Label = 'OpenVPN'; DefaultPort = 1194; PasswordCapable = $true; HasDco = $true; OwnLayer = 'OpenVPN'; HangUpOnOffAlways = $true

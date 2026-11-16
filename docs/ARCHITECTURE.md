@@ -60,7 +60,7 @@ because the platforms report differently, and each value was chosen for its plat
 
 | | Windows (`windows/Core`) | Linux / macOS (`daemon.py`) |
 |---|---|---|
-| after Off, nothing re-arms by itself | 30 s (`Test-VeroRecentOff`) | the off marker explains the down-event for 60 s (`OFF_MARKER_SECONDS`) |
+| after Off, nothing re-arms by itself | 30 s (`Test-VeroRecentOff`) | the off marker explains the down-event for 60 s (`OFF_MARKER_SECONDS`); a dial VeroScudo had started that succeeds within 30 s is taken down again (`OFF_RECENT_SECONDS`) |
 | own hang-up for Reconnect | until 30 s after the hang-up finished, marker at most 5 min old (`Test-VeroRenewHangUp`) | 120 s (`RENEW_MARKER_SECONDS`) |
 
 RAS writes its records with a delay and VeroScudo waits 3 s before reading them, so the Windows rule is tied to the
@@ -94,7 +94,7 @@ refuses the rule, and the guard falls back to the server list alone (logged once
 permit is the servers of Hiddify's **live** sing-box config (`configPath` -> `current-config.json`):
 every proxy outbound's `server:server_port` for TCP and UDP plus its direct DNS servers, host names resolved; read every pass
 with limits (64 endpoints, 2 MB, a regular file owned by root or that user, no private/loopback/link-local/multicast
-addresses; a broken file keeps the last good set). The guard (root) reads a user-owned file here: that user can already turn
+addresses and none with an IPv6 zone; a broken file keeps the last good set). The guard (root) reads a user-owned file here: that user can already turn
 VeroScudo off through the passwordless rule, so this opens nothing new. Up = a Hiddify process and an up tun/utun device
 holding the tun inbound's address. Profile entry: Windows `{"profile":"Hiddify","type":"hiddify"}`, Linux/macOS
 `{"profile":"Hiddify","vpnType":"hiddify","configPath":"..."}`. A Hiddify tunnel that is not the active profile is shown as
@@ -108,8 +108,10 @@ profile while armed: your file first, then VeroScudo's options so they win - `--
 filters on CONNECTED / RECONNECTING / EXITING) and restarts OpenVPN every `retrySeconds` when it ends on its own. It stops on
 Off, on a switch to another profile, on a rejected password and on VeroScudo's stop request. Imported configs may use only an
 **allow-list** of known client options (no `up`/`down`/`plugin`/`pkcs11-providers`/`providers`/`engine`/`management`/`config`/
-`log`/proxies, no `script-security` above 1, no option names with quotes or escapes); inline blocks end where OpenVPN ends them;
-referenced key files are inlined at import and refused if they contain tag lines; the stored result is checked again as a whole.
+`log`/proxies, no `script-security` above 1, no option names with quotes or escapes; `setenv` only for `FORWARD_COMPATIBLE`,
+`CLIENT_CERT`, `GENERIC_CONFIG`, `PUSH_PEER_INFO` and `UV_*` - OpenVPN reads `setenv opt <option>` as that option; no line
+over 255 characters, which OpenVPN would cut); inline blocks end where OpenVPN ends them; referenced key files are inlined
+at import and refused if they contain tag lines; the stored result is checked again as a whole, and again at every start.
 
 **WireGuard watch.** Only the long-running watchdog keeps the previous state of each WireGuard tunnel service, so it alone
 sees the edges: *not running -> running* while not the armed active profile = activated in the WireGuard app -> arm and
@@ -159,7 +161,7 @@ IPv4 and IPv6, outbound and unsolicited inbound, and on Linux anything forwarded
 |---|---|---|
 | loopback | - | always |
 | the tunnel | its interface (Windows: LUID, Linux: `oifname`, macOS: `on ipsecN`) - only the **active** profile's | while up |
-| the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows TCP/UDP only from `svchost.exe` (SstpSvc, IKEEXT, RasMan) | always (keeps the tunnel and lets it redial) |
+| the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows SSTP's TCP only from `svchost.exe` (SstpSvc); IKEv2, L2TP and PPTP by address, protocol and port (their packets are sent by the kernel's IPsec/GRE drivers, which have no program to match) | always (keeps the tunnel and lets it redial) |
 | DHCP / DHCPv6, IPv6 neighbour discovery (link-local only) | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
 | DNS | UDP/TCP 53, Windows: only `svchost.exe` (DNS Client) and only to the resolvers of the up physical links; Linux: only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; macOS: only those resolvers. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
 | certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check** - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
@@ -194,7 +196,10 @@ makes a BLOCK in any sublayer final, so no firewall rule can override it; the PE
 - **Self-checking**: `Install.ps1` verifies every layer/field id against the running WFP before it
   changes anything; filter keys are derived from an index so the watchdog can count them.
 - **Fail closed**: if applying filters fails, the guard falls back to the firewall's default-outbound
-  Block (weaker, never open) and logs `EMERGENCY`; the next successful sync removes it.
+  Block (weaker, never open) and logs `EMERGENCY`; the next successful sync removes it. Linux/macOS: a ruleset that
+  cannot be built or loaded leaves the rules in force as they are (the transaction changed nothing); with none in force
+  the lockdown ruleset (loopback, DHCP, neighbour discovery) is applied, `EMERGENCY` is logged and the watchdog keeps
+  trying the real one.
 - **Uninstall / Off** delete every filter; `Uninstall.ps1` also removes the provider and sublayer.
   1.0.x firewall rules and profile defaults are migrated away on upgrade (filters first).
 
@@ -276,13 +281,14 @@ connecting a VPN that is not configured is ignored.
 | state + log | `%ProgramData%\VeroScudo\state\` - Administrators/SYSTEM full, Users read only | `/var/lib/veroscudo/` (armed flag, active profile, server cache - survive reboot), `/run/veroscudo/` (lock), `/var/log/veroscudo.log` | `/var/lib/veroscudo/`, `/var/run/veroscudo/`, `/var/log/veroscudo.log` |
 | per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `keypass-<profile>.xml` (OpenVPN key), `otp-<profile>.txt` (one-time code, read once), `switch.request`, `update.json`, `tray.json` (keep awake, last profile for the switch notice) | `~/.config/veroscudo/tray.json` | – |
 | OpenVPN (Windows) | `%ProgramData%\VeroScudo\openvpn\<profile>.ovpn` (administrators/SYSTEM only); `state\ovpn-<profile>.json/.log` | – | – |
-| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,Watchdog,On,OnDisconnect,OnForce,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
+| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,NetDown,Watchdog,On,OnDisconnect,OnForce,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
 | kill-switch | WFP provider/sublayer "VeroScudo" + Hyper-V rule `VeroScudo-WSL` | nftables table `inet veroscudo` | pf anchor `com.apple/250.VeroScudo` |
 
 The Windows state location is fixed: it is never taken from an environment variable (a value a
 non-admin process can plant in `HKCU\Environment` must not redirect an elevated guard).
 
-`config.json` (same keys everywhere; the 1.0 single `"vpn": {...}` object is still accepted):
+`config.json` (the same keys everywhere, except the profile's kind: `type` on Windows, `vpnType` on Linux/macOS - see
+below; the 1.0 single `"vpn": {...}` object is still accepted). The example is a Windows file:
 
 ```json
 {
@@ -304,9 +310,13 @@ non-admin process can plant in `HKCU\Environment` must not redirect an elevated 
 ```
 
 Every value is validated (it ends up in filters, nft rules and command arguments run as root):
-profile names without control/wildcard characters, host names or IPs, ports 1-65535,
-`retrySeconds` 3-3600, `serverIps` real addresses, `lanAllow` real ranges no wider than IPv4 /8
-or IPv6 /16 (never `0.0.0.0/0`, `Any`).
+profile names without control characters, quotes or backslashes (Windows: no wildcard characters either), host names or
+IPs, ports 1-65535, `retrySeconds` 3-3600, `serverIps` plain addresses (no IPv6 zone, no number forms such as `1`),
+`lanAllow` real ranges no wider than IPv4 /8 or IPv6 /16 (never `0.0.0.0/0`, `Any`). Linux/macOS: every address is
+written into the ruleset in its canonical form and checked once more there - digits, hex, dots, colons and one `/prefix`.
+
+**Off never needs the config.** `off` / `disarm` with a `config.json` that does not load remove the armed flag and the
+kill-switch all the same (logged); only the VPN connection itself is left as it is - its name is in that file.
 
 - `id` (written by VeroScudo): the profile's lasting id - statistics follow it across a rename (see *Statistics*).
 - `profile`: the OS's name for the VPN (Windows Settings > VPN, NetworkManager connection id, macOS VPN service; the
@@ -424,5 +434,6 @@ only (flag files, active profile, the OS's VPN status); every action runs the sa
 task / `sudo veroscudo` command the shortcuts use, so the guard logic lives in one place.
 Icon = state (Protected / Blocked / Off / Attention), menu = Turn on / Turn off / **VPN profile ▸** /
 Status / Log / Settings / About / Exit. Settings (Windows) edits the profiles list; it writes
-`config.json` through an elevated, re-validating PowerShell (UAC prompt), passing the JSON inside
-`-EncodedCommand` - no temp file. Passwords are stored per profile for the signed-in user only.
+`config.json` through an elevated, re-validating PowerShell (UAC prompt). The config and the OpenVPN texts to import go
+in one payload file in the user's own folder; the approved command names that file and its SHA-256, and the elevated side
+refuses a file with another hash (one swapped after the prompt). Passwords are stored per profile for the signed-in user only.

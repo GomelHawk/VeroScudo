@@ -19,6 +19,9 @@ BeforeAll {
     function Remove-TestFile([string[]]$Paths) { foreach ($f in $Paths) { if (Test-IsTestDir $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } else { throw "test tried to delete outside its temp folder: $f" } } }
     Set-VeroHome $script:TestHomeDir
     if (-not (Test-IsTestDir (Get-VeroPath).Home)) { throw "SAFETY: module home is '$((Get-VeroPath).Home)', not the test folder - refusing to run" }
+    # the per-user folder too: credentials, switch requests and tray files must never be written to the real one
+    if (-not (Test-IsTestDir (Get-VeroPath).UserDir)) { throw "SAFETY: user folder is '$((Get-VeroPath).UserDir)', not the test folder - refusing to run" }
+    New-Item -ItemType Directory -Path (Get-VeroPath).UserDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Get-VeroPath).State -Force | Out-Null
     $script:cfgJson = '{"vpn":{"profile":"MyVPN","server":"vpn.example.com","port":443,"username":"jdoe"},"retrySeconds":7,"vm":"auto","wifiRecoveryFix":true,"lanAllow":[]}'
     $script:multiJson = '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"},{"profile":"Backup","server":"vpn2.example.com","port":8443,"username":"jdoe2"}],"activeProfile":"Work"}'
@@ -89,6 +92,9 @@ Describe 'Get-VeroConfig' {
         @{ what = 'port 70000';              json = '{"vpn":{"profile":"X","server":"s","username":"u","port":70000}}'; msg = '*port must be*' }
         @{ what = 'retrySeconds 0';          json = '{"vpn":{"profile":"X","server":"s","username":"u"},"retrySeconds":0}'; msg = '*retrySeconds*' }
         @{ what = 'an invalid serverIps';    json = '{"vpn":{"profile":"X","server":"s","username":"u","serverIps":["999.1.1.1"]}}'; msg = '*serverIps*' }
+        @{ what = 'a serverIps that is a number'; json = '{"vpn":{"profile":"X","server":"s","username":"u","serverIps":["1"]}}'; msg = '*serverIps*' }
+        @{ what = 'a serverIps with a zone'; json = '{"vpn":{"profile":"X","server":"s","username":"u","serverIps":["fe80::1%5"]}}'; msg = '*serverIps*' }
+        @{ what = 'a serverIps that is a range'; json = '{"vpn":{"profile":"X","server":"s","username":"u","serverIps":["10.0.0.0/8"]}}'; msg = '*serverIps*' }
         @{ what = 'lanAllow 0.0.0.0/0';      json = '{"vpn":{"profile":"X","server":"s","username":"u"},"lanAllow":["0.0.0.0/0"]}'; msg = '*lanAllow*' }
         @{ what = 'lanAllow Any';            json = '{"vpn":{"profile":"X","server":"s","username":"u"},"lanAllow":["Any"]}'; msg = '*lanAllow*' }
         @{ what = 'lanAllow 10.0.0.0/4';     json = '{"vpn":{"profile":"X","server":"s","username":"u"},"lanAllow":["10.0.0.0/4"]}'; msg = '*lanAllow*' }
@@ -680,12 +686,20 @@ Describe 'Get-VeroPath' {
         try { (Get-VeroPath).Home | Should -Be $script:TestHomeDir } finally { Remove-Item Env:\VEROSCUDO_HOME }
     }
     It 'keeps one credential per profile, outside the shared home' {
-        $a = (Get-VeroPath -VpnProfile 'Work').Cred; $b = (Get-VeroPath -VpnProfile 'Backup').Cred
+        # the installed layout: paths are only computed here, nothing is read or written
+        Set-VeroHome $null
+        try { $a = (Get-VeroPath -VpnProfile 'Work').Cred; $b = (Get-VeroPath -VpnProfile 'Backup').Cred } finally { Set-VeroHome $script:TestHomeDir }
         $a | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\cred-*.xml"; $a | Should -Not -Be $b
     }
+    It 'a redirected home takes the user folder with it' {
+        (Get-VeroPath).UserDir | Should -Be (Join-Path $script:TestHomeDir 'user')
+        (Get-VeroPath -VpnProfile 'Work').Cred | Should -BeLike (Join-Path $script:TestHomeDir 'user\cred-*.xml')
+    }
     It 'keeps tray-writable files in the user folder' {
-        (Get-VeroPath).SwitchRequest | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
-        (Get-VeroPath).UpdateFile | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
+        Set-VeroHome $null                                                  # the installed layout: paths only, nothing read or written
+        try { $inst = Get-VeroPath } finally { Set-VeroHome $script:TestHomeDir }
+        $inst.SwitchRequest | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
+        $inst.UpdateFile | Should -BeLike "$env:LOCALAPPDATA\VeroScudo\*"
     }
 }
 
@@ -1000,6 +1014,15 @@ Describe 'Test-VeroRenewHangUp (our own hang-up is not "you hung up")' {
     It 'ignores another profile' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Backup' -EventTime $script:now.AddSeconds(-12) -Now $script:now | Should -BeFalse }
     It 'ignores a disconnect well after the reconnect (a real Off)' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Work' -EventTime $script:now.AddSeconds(25) -Now $script:now.AddSeconds(30) | Should -BeFalse }
     It 'ignores a stale marker' { Test-VeroRenewHangUp -Marker $script:mk -ProfileName 'Work' -EventTime $script:now -Now $script:now.AddMinutes(10) | Should -BeFalse }
+    It 'takes a marker that could not be read (empty, half-written) by the file''s own time, for any profile' {
+        $f = (Get-VeroPath).Renew
+        Set-Content -Path $f -Value ''
+        $m = Get-VeroRenewMarker
+        $m | Should -Not -BeNullOrEmpty
+        Test-VeroRenewHangUp -Marker $m -ProfileName 'Work' -EventTime (Get-Date) -Now (Get-Date) | Should -BeTrue
+        Test-VeroRenewHangUp -Marker $m -ProfileName 'Work' -EventTime (Get-Date).AddMinutes(10) -Now (Get-Date).AddMinutes(10) | Should -BeFalse
+        Remove-TestFile $f
+    }
     It 'ignores no marker' { Test-VeroRenewHangUp -Marker $null -ProfileName 'Work' -EventTime $script:now | Should -BeFalse }
 }
 
@@ -1050,9 +1073,21 @@ Describe 'Test-VeroOpenVpnConf is an allow-list that reads lines like OpenVPN' {
         @{ what = 'replay-persist (writes a file)'; line = 'replay-persist C:\Windows\x' }
         @{ what = 'an unknown option';             line = 'ignore-unknown-option plugin' }
         @{ what = 'setenv opt';                    line = 'setenv opt plugin x.dll' }
+        @{ what = 'setenv with a quoted opt';      line = 'setenv "opt" plugin x.dll' }
+        @{ what = 'setenv with a single-quoted opt'; line = "setenv 'opt' plugin x.dll" }
+        @{ what = 'setenv with an escaped opt';    line = 'setenv o\pt plugin x.dll' }
+        @{ what = 'setenv of any other name';      line = 'setenv PATH C:\Users\me' }
+        @{ what = 'setenv with more than a value'; line = 'setenv FORWARD_COMPATIBLE 1 plugin' }
+        @{ what = 'a line OpenVPN would cut';      line = ('# ' + ('x' * 254) + 'plugin x.dll') }
+        @{ what = 'a long line inside a block';    line = ("<ca>`n" + ('-' * 255) + "</ca>`n</ca>") }
+        @{ what = 'a NUL character';               line = ("verb 3" + [char]0) }
         @{ what = 'a port out of range';           line = 'port 70000' }
         @{ what = 'an unknown inline block';       line = "<plugin>`nx`n</plugin>" }
     ) { (Test-VeroOpenVpnConf -Text ("remote vpn.example.com`n" + $line)).Errors.Count | Should -BeGreaterThan 0 }
+    It 'accepts the setenv lines client configs carry, and one long base64 line inside a block (an inlined pkcs12)' {
+        $r = Test-VeroOpenVpnConf -Text ("remote vpn.example.com`nsetenv FORWARD_COMPATIBLE 1`nsetenv CLIENT_CERT 0`nsetenv UV_ID abc-1`n<pkcs12>`n" + ('QUJD' * 200) + "`n</pkcs12>")
+        $r.Errors | Should -BeNullOrEmpty
+    }
     It 'refuses a key file that would close its block and smuggle options in' {
         $evil = { param($f) $null = $f; [Text.Encoding]::UTF8.GetBytes("-----BEGIN-----`n</ca>`nplugin C:\evil.dll`n<ca>`n-----END-----") }
         (Test-VeroOpenVpnConf -Text "remote vpn.example.com`nca ca.crt" -ReadFile $evil).Errors -join ' ' | Should -Match 'tag line'
@@ -1634,6 +1669,11 @@ Describe 'install folder: no ancestor a user can rename or replace (B8)' {
         Test-VeroAdminOnlyRules @((Rule 'DESKTOP\someone' 'FullControl')) | Should -BeFalse
         Test-VeroAdminOnlyRules @((Rule 'Everyone' 268435456)) | Should -BeFalse          # GENERIC_ALL as Get-Acl shows it
         Test-VeroAdminOnlyRules @((Rule 'BUILTIN\Users' 'ChangePermissions')) | Should -BeFalse
+        # -Contents (a folder whose programs are trusted by path): creating or writing a file counts too
+        Test-VeroAdminOnlyRules @((Rule 'BUILTIN\Users' 'CreateFiles')) | Should -BeTrue
+        Test-VeroAdminOnlyRules -Contents @((Rule 'BUILTIN\Users' 'CreateFiles')) | Should -BeFalse
+        Test-VeroAdminOnlyRules -Contents @((Rule 'BUILTIN\Users' 'AppendData')) | Should -BeFalse
+        Test-VeroAdminOnlyRules -Contents @((Rule 'BUILTIN\Users' 'ReadAndExecute, Synchronize')) | Should -BeTrue
     }
     It 'a real rule collection is enumerated, not taken as one item' -Skip:($env:OS -ne 'Windows_NT') {
         Test-VeroAdminOnlyRules (Get-Acl -LiteralPath $env:LOCALAPPDATA).Access | Should -BeFalse       # the user has full control there
@@ -1760,7 +1800,7 @@ Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads on
     It 'imports every OpenVPN text, saves the config, then removes what deleted profiles left' {
         $f = Join-Path (Get-VeroPath).State 'payload.json'
         @{ Config = $script:cfgJson; Imports = @(@{ Profile = 'ovpn'; Text = "client`ndev tun" }) } | ConvertTo-Json -Depth 4 | Set-Content $f
-        Import-VeroSavePayload -Path $f
+        Import-VeroSavePayload -Path $f -Sha256 (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
         Should -Invoke -ModuleName VeroScudo.Core Import-VeroOpenVpnText -Times 1 -Exactly -ParameterFilter { $ProfileName -eq 'ovpn' -and $Text -eq "client`ndev tun" }
         Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 1 -Exactly -ParameterFilter { $Json -eq $script:cfgJson }
         Should -Invoke -ModuleName VeroScudo.Core Remove-VeroStaleOpenVpnFile -Times 1 -Exactly -ParameterFilter { @($Config.Profiles).Count -eq 1 -and $Config.Profiles[0].Profile -eq 'MyVPN' }
@@ -1770,15 +1810,26 @@ Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads on
         Mock -ModuleName VeroScudo.Core Save-VeroConfig { throw 'invalid config' }
         $f = Join-Path (Get-VeroPath).State 'payload3.json'
         @{ Config = $script:cfgJson; Imports = @() } | ConvertTo-Json -Depth 4 | Set-Content $f
-        { Import-VeroSavePayload -Path $f } | Should -Throw '*invalid config*'
+        { Import-VeroSavePayload -Path $f -Sha256 (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } | Should -Throw '*invalid config*'
         Should -Invoke -ModuleName VeroScudo.Core Remove-VeroStaleOpenVpnFile -Times 0 -Exactly
+        Remove-TestFile $f
+    }
+    It 'a payload that is not the approved one (swapped after the prompt) is refused before anything is read from it' {
+        $f = Join-Path (Get-VeroPath).State 'payload4.json'
+        @{ Config = $script:cfgJson; Imports = @() } | ConvertTo-Json -Depth 4 | Set-Content $f
+        $approved = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+        @{ Config = $script:cfgJson; Imports = @(@{ Profile = 'ovpn'; Text = 'client' }) } | ConvertTo-Json -Depth 4 | Set-Content $f
+        { Import-VeroSavePayload -Path $f -Sha256 $approved } | Should -Throw '*not the one that was approved*'
+        { Import-VeroSavePayload -Path $f -Sha256 'abc' } | Should -Throw '*not the one that was approved*'
+        Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 0 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Import-VeroOpenVpnText -Times 0 -Exactly
         Remove-TestFile $f
     }
     It 'a payload without a config, or no file, is refused before anything is written' {
         $f = Join-Path (Get-VeroPath).State 'payload2.json'
         '{"Imports":[]}' | Set-Content $f
-        { Import-VeroSavePayload -Path $f } | Should -Throw '*without a config*'
-        { Import-VeroSavePayload -Path (Join-Path (Get-VeroPath).State 'missing.json') } | Should -Throw
+        { Import-VeroSavePayload -Path $f -Sha256 (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } | Should -Throw '*without a config*'
+        { Import-VeroSavePayload -Path (Join-Path (Get-VeroPath).State 'missing.json') -Sha256 ('0' * 64) } | Should -Throw
         Should -Invoke -ModuleName VeroScudo.Core Save-VeroConfig -Times 0 -Exactly
         Remove-TestFile $f
     }
@@ -2433,5 +2484,69 @@ Describe 'Server addresses: never a fake-DNS answer or loopback' {
     It 'is the same rule as usable_server_ip on Linux/macOS' {
         foreach ($bad in '198.18.0.81', '198.19.255.1', 'fc00::44', '127.0.0.1', '::1', '0.0.0.0', 'fe80::1', '224.0.0.1', 'x') { Test-VeroUsableServerIp $bad | Should -BeFalse -Because $bad }
         foreach ($good in '203.0.113.5', '185.72.199.130', '10.0.0.5', '192.168.1.10', '2001:db8::1', 'fd00::5') { Test-VeroUsableServerIp $good | Should -BeTrue -Because $good }
+    }
+}
+
+Describe 'Off works without a config that loads' {
+    It '<action> removes the flag and the filters, and touches nothing else' -ForEach @(@{ action = 'off' }, @{ action = 'disarm' }) {
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { throw 'config.json: invalid' }
+        Mock -ModuleName VeroScudo.Core Disable-VeroKillSwitch { }
+        Mock -ModuleName VeroScudo.Core Invoke-VeroHangUp { }
+        Set-VeroArmed $true 'test'
+        Invoke-VeroAction -Action $action
+        Test-VeroArmed | Should -BeFalse
+        Should -Invoke -ModuleName VeroScudo.Core Disable-VeroKillSwitch -Times 1 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroHangUp -Times 0 -Exactly
+        Remove-TestFile (Get-VeroPath).OffAt
+    }
+    It 'every other action still fails on a broken config' {
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { throw 'config.json: invalid' }
+        { Invoke-VeroAction -Action on } | Should -Throw '*invalid*'
+    }
+}
+
+Describe 'Write-VeroSecretFile: administrators and SYSTEM only, from the first moment' {
+    It 'writes the text, replaces an older file and gives nobody else a rule' {
+        $f = Join-Path (Get-VeroPath).State 'secret-test.pw'
+        Set-Content -Path $f -Value 'old'
+        if (-not (Test-IsTestDir $f)) { throw 'SAFETY: path outside the test folder' }
+        & (Get-Module VeroScudo.Core) { param($path) Write-VeroSecretFile -Path $path -Text 's3cret' } $f
+        # not elevated (the usual test run): the file's own creator may not read it - that is the point
+        if (Test-VeroElevated) { [IO.File]::ReadAllText($f) | Should -Be 's3cret' } else { { [IO.File]::ReadAllText($f) } | Should -Throw }
+        $acl = Get-Acl -LiteralPath $f
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+        $sids | Should -Be @('S-1-5-18', 'S-1-5-32-544')
+        Remove-TestFile $f
+    }
+}
+
+Describe 'the CRL window never lasts longer than VeroScudo writes it' {
+    It 'ignores an end time further away than 2 minutes' {
+        $f = (Get-VeroPath).CrlWindow
+        @{ Until = (Get-Date).AddMinutes(1).ToString('o') } | ConvertTo-Json | Set-Content $f
+        Test-VeroCrlWindow | Should -BeTrue
+        @{ Until = (Get-Date).AddDays(30).ToString('o') } | ConvertTo-Json | Set-Content $f
+        Test-VeroCrlWindow | Should -BeFalse
+        Remove-TestFile $f
+    }
+}
+
+Describe 'stored credentials: only a credential is taken from the user''s file' {
+    BeforeAll {
+        Set-VeroHome $script:TestHomeDir -UserDir (Join-Path $script:TestHomeDir 'user')
+        if (-not (Test-IsTestDir (Get-VeroPath).UserDir)) { throw 'SAFETY: user folder outside the test folder' }
+        New-Item -ItemType Directory -Path (Get-VeroPath).UserDir -Force | Out-Null
+    }
+    AfterAll { Set-VeroHome $script:TestHomeDir }
+    It 'ignores a file that holds something else' {
+        $cfg = Get-VeroConfig -Raw $script:cfgJson
+        $p = Get-VeroPath -VpnProfile $cfg.Profile
+        if (-not (Test-IsTestDir $p.Cred) -or -not (Test-IsTestDir $p.KeyPass)) { throw 'SAFETY: credential path outside the test folder' }
+        @{ UserName = 'x'; Password = 'y' } | Export-Clixml -LiteralPath $p.Cred
+        Get-VeroCredential -Config $cfg | Should -BeNullOrEmpty
+        'text' | Export-Clixml -LiteralPath $p.KeyPass
+        Get-VeroKeyPassphrase -ProfileName $cfg.Profile | Should -BeNullOrEmpty
+        Remove-TestFile $p.Cred, $p.KeyPass
     }
 }

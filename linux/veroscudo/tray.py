@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -28,12 +30,16 @@ def _runtime_base() -> Path:
     # the user's own runtime folder (Linux XDG_RUNTIME_DIR, macOS TMPDIR): never a shared /tmp another user could hold
     base = Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or f"/tmp/veroscudo-{os.getuid()}")
     base.mkdir(mode=0o700, exist_ok=True)
+    st = os.lstat(base)                             # in /tmp another user could have made it first (or a link with its name)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise OSError(f"{base} is not this user's own folder")
     return base
 
 
 def _single_instance():
     """One tray per session: returns the held lock file, or None when another tray already holds it."""
-    f = open(_runtime_base() / "veroscudo-tray.lock", "w")  # noqa: SIM115 - held until exit
+    fd = os.open(_runtime_base() / "veroscudo-tray.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    f = os.fdopen(fd, "w")                          # held until exit
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -516,7 +522,7 @@ class Windows:
                 tags = [kind_label(self.app.kind(name))]
                 if name == cfg.profile:
                     tags.append("active")
-                lab = self._label(f"{name}   <span alpha='60%'>{self.GLib.markup_escape_text(' · '.join(tags))}</span>",
+                lab = self._label(f"{self.GLib.markup_escape_text(name)}   <span alpha='60%'>{self.GLib.markup_escape_text(' · '.join(tags))}</span>",
                                   markup=True, wrap=False)
                 lab.set_margin_start(8)
                 lab.set_margin_top(6)
@@ -858,7 +864,7 @@ class TrayApp:
         self.ind.set_menu(m)
         self.ind.set_secondary_activate_target(self.status_item)      # middle click: status, like the Windows left click
         self.refresh()
-        self.GLib.timeout_add_seconds(3, self.refresh)
+        self.GLib.timeout_add_seconds(3, self._tick)
         self.GLib.timeout_add(500, self.drain)
         self.GLib.timeout_add_seconds(120, lambda: (self.check_updates(), False)[1])
 
@@ -1000,6 +1006,15 @@ class TrayApp:
                                expect=self.expect.kind, check_enabled=cfg.check.enabled,
                                quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None,
                                auth=self.store.auth_failed(cfg.profile))
+
+    def _tick(self) -> bool:
+        """The 3 s timer. An error in one pass is logged and the timer goes on: an icon that stopped following the guard
+        would keep showing its last state."""
+        try:
+            self.refresh()
+        except Exception:
+            logging.getLogger("veroscudo.tray").exception("refresh")
+        return True
 
     def refresh(self) -> bool:
         changed = self.reload_config()

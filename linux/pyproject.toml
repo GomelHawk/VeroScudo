@@ -16,7 +16,7 @@ dependencies = []
 dev = ["pytest>=8", "ruff==0.17.4"]     # ruff pinned: its default rules change between releases (Dependabot bumps it)
 
 [project.scripts]
-veroscudo = "veroscudo.cli:main"
+veroscudo = "veroscudo.cli:run"
 
 [tool.setuptools.dynamic]
 version = { attr = "veroscudo.__version__" }    # one source of truth

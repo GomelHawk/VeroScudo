@@ -366,7 +366,7 @@ def test_nft_lets_hiddifys_service_out_by_its_cgroup_and_pf_ignores_it():
         rs = firewall.render_ruleset(hcfg(), [], tun, vm_allowed=False, endpoints=EPS, cgroup=cg)
         out, inp = rs.split("chain input")[0], rs.split("chain input")[1].split("chain forward")[0]
         assert 'socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" accept comment "Hiddify core, cgroup 4242"' in out
-        assert '    socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" accept\n' in inp      # its replies
+        assert '    socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" ct state established,related accept\n' in inp      # its replies
     assert "cgroup" not in firewall.render_ruleset(hcfg(), [], "tun0", vm_allowed=False, endpoints=EPS)
     assert "cgroup" not in pf.render_ruleset(hcfg(), [], "utun5", vm_allowed=False, endpoints=EPS, cgroup=cg)
     for bad in ('x" accept; #', "a b", "../etc", ""):

@@ -86,7 +86,13 @@ class StateStore:
         remove that table: armed but open until the next pass."""
         with self._fw_rlock:
             if self._fw_depth == 0:
-                self._fw_fd = os.open(self.fw_lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+                # 0600: flock works on a read-only handle too - a file others can open is a lock others can hold
+                self._fw_fd = os.open(self.fw_lock_file, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                try:
+                    if os.fstat(self._fw_fd).st_mode & 0o077:
+                        os.fchmod(self._fw_fd, 0o600)            # one made by an earlier version
+                except OSError:
+                    pass
                 fcntl.flock(self._fw_fd, fcntl.LOCK_EX)
             self._fw_depth += 1
             try:
