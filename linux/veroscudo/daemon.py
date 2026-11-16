@@ -11,7 +11,7 @@ from . import hiddify, quality, stats
 from .backend import firewall, nm
 from .config import Config, config_path
 from .netutil import usable_server_ip
-from .state import Decision, StateStore, decide
+from .state import Decision, StateStore, decide, write_atomic
 
 log = logging.getLogger("veroscudo")
 WATCHDOG_SECONDS = 15
@@ -26,13 +26,38 @@ RENEW_MARKER_SECONDS = 120.0
 OFF_RECENT_SECONDS = 30.0
 
 
+OFF_STAMP = "off.at"            # when Off last ran (a redial in flight must not undo it); in the run folder
+
+
+def force_off(store: StateStore) -> None:
+    """Off without a Guard - for a config.json that does not load: the note that Off just ran, the flag, the rules. The
+    VPN connection itself is left as it is (its name is in the file that cannot be read)."""
+    try:
+        (store.home / OFF_STAMP).write_text(str(time.time()))
+    except OSError:
+        pass
+    with store.firewall_lock():
+        if store.set_armed(False):
+            log.info("DISARMED")
+        firewall.clear()
+        store.set_applied(None, None)
+
+
+def lockdown(store: StateStore) -> None:
+    """Under the firewall lock: everything but loopback, DHCP and neighbour discovery blocked, and noted as "nothing
+    is let through" - the one fallback of every path that cannot apply the real rules to an armed machine."""
+    firewall.apply(firewall.render_lockdown())
+    store.set_applied(None, None)
+
+
 class Guard:
     def __init__(self, cfg: Config, store: StateStore | None = None) -> None:
         self.base = cfg
         self.store = store or StateStore()
         self.off_marker = self.store.home / "off.marker"     # set by `veroscudo off` so a polling backend knows it was deliberate
         self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
-        self.off_stamp = self.store.home / "off.at"          # when `veroscudo off` last ran (a redial in flight must not undo it)
+        self.off_stamp = self.store.home / OFF_STAMP         # when `veroscudo off` last ran (a redial in flight must not undo it)
+        self._events = threading.RLock()                     # one VPN event at a time: read the markers, decide, act
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
         # how many dials a redial loop makes before it hands over: None = until connected (the daemon). The CLI (and so the
@@ -98,7 +123,7 @@ class Guard:
         live = [ip for ip in nm.live_endpoints(cfg.profile) if ip not in ips and usable_server_ip(ip)]
         if live:                                               # WireGuard: the address it really uses (its own lookup)
             ips = list(dict.fromkeys(live + ips))[:8]
-            self.store.server_cache(cfg.profile).write_text("\n".join(ips))
+            write_atomic(self.store.server_cache(cfg.profile), "\n".join(ips))
             log.info("WireGuard '%s' uses %s - allowed and cached", cfg.profile, ", ".join(live))
         return ips
 
@@ -109,7 +134,7 @@ class Guard:
         cached = self.cached_server_ips(cfg)
         merged = list(dict.fromkeys(nm.resolve(cfg.server) + cached))[:8]
         if merged and merged != cached:
-            cache.write_text("\n".join(merged))
+            write_atomic(cache, "\n".join(merged))
         if not merged:
             log.warning("cannot resolve %s and no cached IP", cfg.server)
         return merged
@@ -157,7 +182,7 @@ class Guard:
         if resolved != self._hiddify_good.get(p.id):
             self._hiddify_good[p.id] = resolved
             try:
-                cache.write_text(hiddify.dump_cache(resolved))
+                write_atomic(cache, hiddify.dump_cache(resolved))
             except OSError:
                 pass
         return tuple(resolved)
@@ -192,27 +217,43 @@ class Guard:
         or `pfctl -d` by another tool). Atomic: nft -f replaces the table in one transaction. The rules are built from the
         cached server addresses; the name is looked up afterwards, outside the lock, while the tunnel is allowed (DNS goes
         through it) or after a failed redial - and the rules are applied again if the addresses changed."""
+        plan = self._plan(tunnel_up)                           # name lookups and questions to the VPN service: not under the lock
         with self.store.firewall_lock():
-            tun = self._apply(tunnel_up, force)
+            tun = self._apply(tunnel_up, force, plan)
         cfg = self.cfg
         if not (tun or self._lookup_next) or not self._looks_up(cfg):
             return
         self._lookup_next = False
         before = self.cached_server_ips(cfg)
         if self.lookup_server_ips(cfg) != before:
+            plan = self._plan(tunnel_up)
             with self.store.firewall_lock():
-                self._apply(tunnel_up, False)
+                self._apply(tunnel_up, False, plan)
 
     @staticmethod
     def _looks_up(cfg: Config) -> bool:
         """The profile's server is known by name (not pinned with serverIps, not Hiddify's endpoints)."""
         return bool(cfg.server) and not cfg.server_ips and cfg.current.vpn_type != hiddify.KIND
 
-    def _apply(self, tunnel_up: bool, force: bool) -> str | None:
-        """Under the firewall lock: the ruleset for this state, applied if needed. Returns the tunnel it allows.
-        Fail closed: when the rules cannot be built or loaded, an armed machine is never left without a table."""
+    def _plan(self, tunnel_up: bool):
+        """The ruleset for this state and the tunnel it allows - or the error that kept it from being built, which
+        _apply then handles under the lock like a refused ruleset."""
         try:
-            tun = self._apply_rules(tunnel_up, force)
+            return self.desired_ruleset(tunnel_up)
+        except Exception as e:  # noqa: BLE001 - whatever it was, _apply fails closed on it
+            return e
+
+    def _apply(self, tunnel_up: bool, force: bool, plan) -> str | None:
+        """Under the firewall lock: the planned ruleset, applied if needed. Returns the tunnel it allows.
+        Not armed (any more - an Off since the caller looked): nothing is applied; rules on a machine that is off would
+        block it until the next watchdog pass. Fail closed: when the rules cannot be built or loaded, an armed machine is
+        never left without a table."""
+        if not self.store.armed:
+            return None
+        try:
+            if isinstance(plan, Exception):
+                raise plan
+            tun = self._apply_rules(tunnel_up, force, plan)
         except Exception:
             self._fail_closed()
             raise
@@ -230,16 +271,15 @@ class Guard:
                 self._say_once("emergency", "kill-switch: the new rules could not be applied - the rules in force stay",
                                logging.ERROR)
                 return
-            firewall.apply(firewall.render_lockdown())
+            lockdown(self.store)
             self._applied = None
-            self.store.set_applied(None, None)
             self._say_once("emergency", "EMERGENCY: the kill-switch rules could not be applied - everything but DHCP is "
                                         "blocked until they can (see the error that follows)", logging.CRITICAL)
         except Exception:
             log.exception("EMERGENCY: the kill-switch rules AND the lockdown could not be applied - NOT PROTECTED")
 
-    def _apply_rules(self, tunnel_up: bool, force: bool) -> str | None:
-        rs, tun = self.desired_ruleset(tunnel_up)
+    def _apply_rules(self, tunnel_up: bool, force: bool, plan: tuple[str, str | None]) -> str | None:
+        rs, tun = plan
         if not force and rs == self._applied and firewall.is_active():
             return tun
         try:
@@ -282,15 +322,15 @@ class Guard:
             return
         cfg = self.cfg
         hid = cfg.current.vpn_type == hiddify.KIND               # Hiddify: its last good servers, from the state folder
-        ips = [] if hid else list(cfg.server_ips) or self.cached_server_ips(cfg)
-        eps = tuple(self.cached_hiddify_endpoints(cfg)) if hid else ()
+        ips, eps = [], ()
         with self.store.firewall_lock():
             try:
+                ips = [] if hid else list(cfg.server_ips) or self.cached_server_ips(cfg)
+                eps = tuple(self.cached_hiddify_endpoints(cfg)) if hid else ()
                 firewall.apply(firewall.render_ruleset(cfg, ips, None, vm_allowed=False, dns=firewall.DnsPolicy(), endpoints=eps))
             except Exception:                                  # never boot open: the lockdown instead, the daemon retries
                 log.exception("boot: armed, but the kill-switch rules could not be applied - everything but DHCP is blocked")
-                firewall.apply(firewall.render_lockdown())
-                self.store.set_applied(None, None)
+                lockdown(self.store)
                 return
             self.store.set_applied(cfg.profile, None)
         shown = ips or [f"{a}:{p}" for a, p, _ in eps]
@@ -304,10 +344,13 @@ class Guard:
             # nothing is blocked yet: look the name up now, so the address the VPN client dials (a name can answer with
             # changing addresses) is allowed from the first rule on
             self.lookup_server_ips(self.cfg)
-        with self.store.firewall_lock():                   # flag and filters change together, never interleaved with another process
+        with self.store.firewall_lock():                   # the flag never changes while another process applies or clears
             if self.store.set_armed(True):
                 log.info("ARMED")
-            self.enable_killswitch(nm.is_connected(self.cfg.profile))
+        # the rules right after it. Not inside that lock: working them out asks the VPN service and may look names up,
+        # and an Off must not wait for that. Whoever takes the lock in between sees "armed" and applies the same rules;
+        # an Off in between wins (_apply looks at the flag again)
+        self.enable_killswitch(nm.is_connected(self.cfg.profile))
 
     def disarm(self) -> None:
         with self.store.firewall_lock():
@@ -415,6 +458,10 @@ class Guard:
             log.info("password pause lifted - redialing")
 
     def on_event_auth(self, profile: str, which: str) -> None:
+        with self._events:
+            self._on_event_auth(profile, which)
+
+    def _on_event_auth(self, profile: str, which: str) -> None:
         """The VPN refused the active profile for its password: stop redialing, so the server does not lock the account;
         traffic stays blocked. The tray shows Password missing / rejected (Windows: Set-VeroAuthFailed)."""
         if profile != self.cfg.profile or not self.store.armed:
@@ -425,6 +472,10 @@ class Guard:
                      "MISSING" if which == "missing" else "REJECTED", profile)
 
     def on_event_up(self, profile: str) -> None:
+        with self._events:
+            self._on_event_up(profile)
+
+    def _on_event_up(self, profile: str) -> None:
         if profile not in self.base.names:
             return
         self.store.clear_auth_failed()                         # connected: whatever was wrong with the password is fixed
@@ -440,6 +491,10 @@ class Guard:
         self.arm()
 
     def on_event_down(self, profile: str, user_requested: bool) -> None:
+        with self._events:
+            self._on_event_down(profile, user_requested)
+
+    def _on_event_down(self, profile: str, user_requested: bool) -> None:
         if profile != self.cfg.profile:
             log.info("VPN '%s' went down - not the active profile, ignored", profile)
             return
@@ -581,7 +636,10 @@ class Guard:
     # ---- main loop -----------------------------------------------------------
     def run(self) -> None:
         log.info("VeroScudo daemon, profiles: %s (active '%s')", ", ".join(self.base.names), self.cfg.profile)
-        self.watchdog()
+        try:
+            self.watchdog()
+        except Exception:                                      # the loop below tries again in 15 s; the watch must start
+            log.exception("watchdog")
 
         def tick():
             while True:

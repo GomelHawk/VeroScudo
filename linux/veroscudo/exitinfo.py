@@ -11,13 +11,13 @@ from __future__ import annotations
 import json
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from . import keepawake
 from .countries import country_name
+from .netutil import fetch_https
 
 IPINFO_URL = "https://ipinfo.io/json"
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
@@ -54,9 +54,7 @@ def parse_trace(raw: bytes) -> dict | None:
 
 
 def _get(url: str, timeout: float) -> bytes:
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "VeroScudo"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:      # fixed https URLs only
-        return r.read(65536)
+    return fetch_https(url, timeout, 65536)                      # fixed https addresses; no redirect followed
 
 
 def lookup(get=_get, timeout: float = TIMEOUT) -> dict:

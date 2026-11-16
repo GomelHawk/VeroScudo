@@ -1,14 +1,17 @@
 #Requires -RunAsAdministrator
-<# Removes tasks, the WFP filters (and any 1.0.x firewall changes), the Wi-Fi fix, shortcuts and the program.
-   Keeps config + credentials unless -Purge. #>
+<# Removes tasks, the WFP filters (and any 1.0.x firewall changes), the Wi-Fi fix, shortcuts and the program (when run
+   from another folder than the program's own - a script cannot remove the folder it runs from, and says so).
+   Keeps the config and state unless -Purge. Your own folder with the stored passwords is never removed from here: the
+   script names it for you to delete. #>
 param([string]$InstallDir = '', [switch]$Purge)
 # Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
 # module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
 # System folders only, before anything else is loaded (-NoProfile does not cover this).
-$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
-# the signed-in user's folders are removed below: with over-the-shoulder UAC this session is another account - refuse, like Install.ps1
+$env:PSModulePath = "$PSHOME\Modules;" + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules')   # no cmdlet before the pin is in force
+# the signed-in user's shortcuts are removed below: with over-the-shoulder UAC this session is another account - refuse, like Install.ps1
 $console = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
-if ($console -and $console -ne "$env:USERDOMAIN\$env:USERNAME") { throw "signed in as '$console', but this elevated session runs as '$env:USERDOMAIN\$env:USERNAME' - run Uninstall.ps1 from the signed-in administrator account." }
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().Name            # the account this session really runs as, not what its environment says
+if ($console -and $console -ne $me) { throw "signed in as '$console', but this elevated session runs as '$me' - run Uninstall.ps1 from the signed-in administrator account." }
 # system folders from the OS and HKLM, never from environment variables (this runs elevated with your environment)
 function Get-SysFolder([string]$Name, [string]$Key) {
     $drive = [IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd('\')
@@ -49,15 +52,35 @@ $d = [Environment]::GetFolderPath('Desktop')
 Remove-Item "$d\VeroScudo On.lnk", "$d\VeroScudo Off.lnk" -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Programs')) 'VeroScudo.lnk') -Force -ErrorAction SilentlyContinue   # Start menu entry (one file)
 Remove-Item "$state\reconnect.lock", "$state\wfp.json", "$state\emergency.flag" -Force -ErrorAction SilentlyContinue
+function Remove-VeroTreeNoFollow([string]$Path) {
+    <# Removes a folder of VeroScudo's with what is in it - and never anything a link in it points to. The user's own
+       VeroScudo folder is among those removed here, as administrator: a junction placed in it (or in its place) is removed
+       as the link it is, its target is not entered. File by file, no recursive delete command. #>
+    $di = New-Object IO.DirectoryInfo $Path
+    if (-not $di.Exists) { return }
+    if ($di.Attributes -band [IO.FileAttributes]::ReparsePoint) { $di.Delete(); return }     # the link itself, never its target
+    foreach ($f in $di.GetFiles()) { $f.Attributes = [IO.FileAttributes]::Normal; $f.Delete() }
+    foreach ($s in $di.GetDirectories()) { Remove-VeroTreeNoFollow $s.FullName }
+    $di.Delete()
+}
 if ($Purge) {
-    foreach ($d in (Join-Path $ProgramDataDir 'VeroScudo'), (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'VeroScudo')) {
-        if ($ProgramDataDir -and (Split-Path $d -Leaf) -eq 'VeroScudo' -and (Test-Path -LiteralPath $d -PathType Container)) { Remove-Item -LiteralPath $d -Recurse -Force }   # errors shown, never silenced
-    }
+    $d = Join-Path $ProgramDataDir 'VeroScudo'
+    if ($ProgramDataDir -and (Split-Path $d -Leaf) -eq 'VeroScudo' -and (Test-Path -LiteralPath $d -PathType Container)) { Remove-VeroTreeNoFollow $d }   # errors shown, never silenced
+    # Your own folder (stored passwords, tray settings) is NOT removed from here: this script runs as administrator, and a
+    # folder its owner can change at any moment is no place for an administrator's delete. It is yours to remove.
+    $own = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'VeroScudo'
+    if (Test-Path -LiteralPath $own) { Write-Host "Your own VeroScudo folder holds the stored VPN passwords (readable by your account only) and the tray's settings. Delete it yourself if you want them gone: $own" }
 }
 # only ever a folder named VeroScudo that holds our module - never whatever path was passed in
 $dirOk = $InstallDir -and (Split-Path $InstallDir -Leaf) -eq 'VeroScudo' -and (Test-Path -LiteralPath (Join-Path $InstallDir 'VeroScudo.Core.psm1'))
-if ($InstallDir -ne $PSScriptRoot -and $dirOk) { Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+# ... and only one that is the administrators' own all the way up: a folder its user can change while it is being removed
+# is no place for an administrator's delete (a copy of the files unpacked somewhere is removed by hand)
+$dirSafe = $dirOk -and (Get-Command Test-VeroAdminOnlyPath -ErrorAction SilentlyContinue) -and -not (Test-VeroAdminOnlyPath (Join-Path $InstallDir 'VeroScudo.Core.psm1')) -and
+           (Test-VeroAdminOnlyRules -Contents @((Get-Acl -LiteralPath $InstallDir).Access | ForEach-Object { $_ }))
+if ($dirOk -and -not $dirSafe) { Write-Warning "not removing '$InstallDir': others than administrators can change it or a folder above it. Delete it yourself." }
+elseif ($InstallDir -ne $PSScriptRoot -and $dirOk) { try { Remove-VeroTreeNoFollow $InstallDir } catch { Write-Warning "'$InstallDir' not removed completely: $($_.Exception.Message)" } }
 elseif (-not $dirOk) { Write-Warning "not removing '$InstallDir': it does not look like a VeroScudo install folder" }
+elseif ($InstallDir -eq $PSScriptRoot) { Write-Host "The program folder is the one this script runs from and cannot remove itself. Delete it yourself: $InstallDir" }
 $filters = try { [VeroScudo.Wfp]::Count() } catch { '?' }
 Write-Host "tasks left: $(@(Get-ScheduledTask -TaskPath '\VeroScudo\' -ErrorAction SilentlyContinue).Count); WFP filters: $filters; outbound: $((Get-NetFirewallProfile | ForEach-Object DefaultOutboundAction) -join ',')"
 Write-Host 'UNINSTALL OK'

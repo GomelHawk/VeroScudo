@@ -26,7 +26,7 @@ if (-not [Environment]::Is64BitProcess) { throw 'Run Install.ps1 from 64-bit Pow
 # Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
 # module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
 # System folders only, before anything else is loaded (-NoProfile does not cover this).
-$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
+$env:PSModulePath = "$PSHOME\Modules;" + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules')   # no cmdlet before the pin is in force
 $Src = $PSScriptRoot
 Import-Module (Join-Path $Src 'VeroScudo.Core.psm1') -Force
 # system folders from the OS: this runs elevated with YOUR environment, where any program you run can plant %ProgramFiles%
@@ -43,28 +43,67 @@ if ($weak) { throw "refusing -InstallDir '$InstallDir': '$weak' lets non-adminis
 $p = Get-VeroPath
 # %ProgramData% lets every user create folders. One made before the first install - by another account, or by a program
 # without administrator rights - could hold a config, an OpenVPN file or state the guard would then trust: refused.
-if (Test-Path -LiteralPath $p.Home) {
-    $owner = (Get-Acl -LiteralPath $p.Home).GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($owner -notmatch '^(S-1-5-18|S-1-5-32-544|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)$') {
+function Assert-HomeTrusted {
+    <# The state folder must be a real folder (not a link to another one), belong to Administrators or SYSTEM, and give
+       nobody else a way to create or change files in it. #>
+    $di = New-Object IO.DirectoryInfo $p.Home
+    if ($di.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing to use '$($p.Home)': it is a link to another folder, not a folder. Remove the link and run Install.ps1 again." }
+    $acl = Get-Acl -LiteralPath $p.Home
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notmatch '^(S-1-5-18|S-1-5-32-544|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)\z') {
         throw "refusing to use '$($p.Home)': it exists already and does not belong to Administrators or SYSTEM (owner: $owner), so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
     }
+    if (-not (Test-VeroAdminOnlyRules -Contents @($acl.Access | ForEach-Object { $_ }))) {
+        throw "refusing to use '$($p.Home)': it exists already and lets others than Administrators and SYSTEM create or change files in it, so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
+    }
 }
+if (Test-Path -LiteralPath $p.Home) { Assert-HomeTrusted }
+# The state folder is made with its protection (administrators and SYSTEM full, users read) - never with ProgramData's
+# "users may create files" for a moment, in which another account could put something in.
+if (-not (Test-Path -LiteralPath $p.Home)) {
+    $sd = New-Object System.Security.AccessControl.DirectorySecurity
+    $sd.SetSecurityDescriptorSddlForm('O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
+    [void][IO.Directory]::CreateDirectory($p.Home, $sd)
+}
+Assert-HomeTrusted                                                        # again: also a folder somebody made in the instant between the look and the creation
 New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-Null
+# icacls below walks these folders: a link inside them would carry the walk (and its ownership changes) somewhere else
+function Assert-NoLinkInside([string]$Root) {
+    $todo = New-Object System.Collections.Generic.Stack[string]; $todo.Push($Root)
+    while ($todo.Count -gt 0) {
+        $d = New-Object IO.DirectoryInfo ($todo.Pop())
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing to continue: '$($d.FullName)' is a link, not a folder. Remove it and run Install.ps1 again." }
+        foreach ($s in $d.GetDirectories()) { $todo.Push($s.FullName) }
+    }
+}
+Assert-NoLinkInside $p.Home
+if (Test-Path -LiteralPath $InstallDir) { Assert-NoLinkInside $InstallDir }
+$icacls = "$Sys\icacls.exe"                                              # by full path, like every other system program
 
 # --- program folder: administrators and SYSTEM write, everyone else reads. Program Files gives that by default; a custom
 # -InstallDir inherits whatever its parent allows - and the elevated tasks run run.vbs / VeroScudo.ps1 from here.
-& icacls.exe $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-& icacls.exe $InstallDir /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+& $icacls $InstallDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+# what is in the folder already takes the folder's rules too (a file copied over an old one keeps the old one's rules)
+foreach ($child in @(Get-ChildItem -LiteralPath $InstallDir -Force)) { & $icacls $child.FullName /reset /T /C /L /Q | Out-Null }
+& $icacls $InstallDir /setowner '*S-1-5-32-544' /T /C /L /Q | Out-Null
 
 # --- state folder: administrators and SYSTEM only; users may read (the tray shows state and log)
 # Without this, ProgramData's default ACL lets any user create files in it (and own them).
-& icacls.exe $p.Home /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+& $icacls $p.Home /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 # reset everything below to the folder's rules - except the OpenVPN folder, which keeps its own stricter ones (private keys)
-foreach ($child in @(Get-ChildItem -LiteralPath $p.Home -Force | Where-Object { $_.FullName -ne $p.OpenVpnDir })) { & icacls.exe $child.FullName /reset /T /C /Q | Out-Null }
-& icacls.exe $p.Home /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+# and except state\locks (administrators and SYSTEM only): giving it "Users: read" even for a moment lets somebody open a
+# lock file then and hold it afterwards. Its neighbours in state\ are reset one by one.
+$locks = Join-Path $p.State 'locks'
+$resetList = @(Get-ChildItem -LiteralPath $p.Home -Force | Where-Object { $_.FullName -ne $p.OpenVpnDir -and $_.FullName -ne $p.State }) +
+             @(Get-ChildItem -LiteralPath $p.State -Force | Where-Object { $_.FullName -ne $locks })
+& $icacls $p.State /reset /C /L /Q | Out-Null                                # the state folder itself (not what is in it)
+foreach ($child in $resetList) { & $icacls $child.FullName /reset /T /C /L /Q | Out-Null }
+& $icacls $p.Home /setowner '*S-1-5-32-544' /T /C /L /Q | Out-Null
 $null = Protect-VeroOpenVpnDir
-# the reset above gave state\locks the folder's "Users: read" - enough to open a lock file and hold it: administrators only again
-$null = Get-VeroLockDir
+# the files in it take that folder's rules (administrators and SYSTEM only): one that kept rules of its own could stay
+# writable for somebody, and the config OpenVPN reads would not be the one that was checked
+foreach ($child in @(Get-ChildItem -LiteralPath $p.OpenVpnDir -Force)) { & $icacls $child.FullName /reset /T /C /L /Q | Out-Null }
+$null = Get-VeroLockDir                                                   # made, or its rules checked: administrators and SYSTEM only
 Write-Host "locked down: $($p.Home) (Administrators/SYSTEM full, Users read; openvpn\ and state\locks\ Administrators/SYSTEM only)"
 
 function New-ProfileEntry([string]$Name, [string]$Kind, [string]$Srv, [int]$Prt, [string]$User, [string]$Ovpn, [string]$WgConf, [bool]$KeepDco) {
@@ -201,7 +240,8 @@ $compileStart = Get-Date
 if (Test-Path -LiteralPath $dll) { Remove-Item -LiteralPath $dll -Force }   # no SilentlyContinue: a locked old DLL must stop the install
 $q = { param($s) $s -replace "'", "''" }                                                   # a quote in a path must not end the string
 $compile = "Add-Type -TypeDefinition ([IO.File]::ReadAllText('$(& $q "$InstallDir\VeroScudo.Native.cs")')) -Language CSharp -OutputAssembly '$(& $q $dll)' -OutputType Library"
-& "$Sys\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile
+# in a temp folder of the administrators' own: the compiler writes the source it compiles there (20-Native.ps1)
+Invoke-VeroWithPrivateTemp { & "$Sys\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $compile }
 # a DLL that is not brand new is the OLD one: never report INSTALL OK with a helper that does not match the scripts
 if (-not (Test-Path -LiteralPath $dll) -or (Get-Item -LiteralPath $dll).LastWriteTime -lt $compileStart.AddSeconds(-2)) { throw "native helper was not compiled: $dll" }
 $iconsSrc = @((Join-Path $Src 'icons'), (Join-Path (Split-Path $Src -Parent) 'assets\icons')) | Where-Object { Test-Path $_ } | Select-Object -First 1   # release zip layout, then repo layout
@@ -232,7 +272,7 @@ Remove-VeroLegacyFirewall -Action install
 # user typing an administrator's password) this session runs as that administrator: the tasks, the tray, the shortcuts and
 # the DPAPI credential would belong to two different accounts, and the real user would get no redial and no tray. The guard
 # tasks run elevated, so the signed-in user has to be an administrator in the first place.
-$user      = "$env:USERDOMAIN\$env:USERNAME"
+$user      = [Security.Principal.WindowsIdentity]::GetCurrent().Name     # the account this session really runs as, not what its environment says
 $console   = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
 if ($console -and $console -ne $user) {
     throw "signed in as '$console', but this elevated session runs as '$user'. VeroScudo's tasks and tray must belong to the signed-in user, and the guard tasks need an administrator account: sign in as an administrator (or make '$console' one) and run Install.ps1 again."
@@ -267,6 +307,7 @@ $tasks = @(
     @{ Name = 'Off';        Action = (Act 'off');      Trigger = @();                    P = $guard; Desc = 'manual: disarm + disconnect' }
     @{ Name = 'Switch';     Action = (Act 'switch');   Trigger = @();                    P = $guard; Desc = 'switch the VPN profile requested by the tray' }
     @{ Name = 'Reconnect';  Action = (Act 'reconnect'); Trigger = @();                   P = $guard; Desc = 'manual: block, hang up, redial; traffic again once the tunnel is back' }
+    @{ Name = 'Redial';     Action = (Act 'redial');   Trigger = @();                    P = $guard; Desc = 'redials until the tunnel is up or VeroScudo is off (started by the guard when the tunnel is down)' }
     @{ Name = 'OpenVPN';    Action = (Act 'openvpn');  Trigger = @();                    P = $guard; Desc = 'runs openvpn.exe for an OpenVPN profile while VeroScudo is on (started by the guard)' }
 )
 if (-not $NoTray) {
@@ -299,8 +340,8 @@ if (-not $NoShortcuts) {
         Write-Host 'shortcut: Start menu > VeroScudo (tray)'
     }
 }
-schtasks /run /tn "$Folder`Watchdog" | Out-Null
-if (-not $NoTray) { schtasks /run /tn "$Folder`Tray" | Out-Null }
+& "$Sys\schtasks.exe" /run /tn "$Folder`Watchdog" | Out-Null
+if (-not $NoTray) { & "$Sys\schtasks.exe" /run /tn "$Folder`Tray" | Out-Null }
 Write-Host ''
 Write-Host "INSTALL OK ($(Get-VeroVersion)).  Next: store the VPN password once per profile - tray > Settings, or"
 Write-Host "            powershell -ExecutionPolicy Bypass -File `"$InstallDir\Set-VpnCredential.ps1`""

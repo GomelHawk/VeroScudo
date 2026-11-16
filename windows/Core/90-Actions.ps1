@@ -64,7 +64,7 @@ function Invoke-VeroActionArm {
         if (@($Config.Profiles | ForEach-Object Profile) -notcontains $c) {
             if (Test-VeroArmed) {                                       # tell the user (tray) - its traffic goes nowhere
                 Write-VeroLog "WARNING: VPN '$c' connected, but it is not a VeroScudo profile - its traffic is blocked. Disconnect it, or import it in Settings." $Action
-                @{ Name = $c; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.Foreign
+                Write-VeroStateFile -Path $p.Foreign -Text (@{ Name = $c; Time = (Get-Date).ToString('o') } | ConvertTo-Json)
             } else { Write-VeroLog "VPN '$c' connected - not a configured profile, VeroScudo is off: ignored" $Action }
             return
         }
@@ -85,7 +85,7 @@ function Invoke-VeroActionOn {
         $what = ($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) -join '; '
         if (-not (Test-VeroArmed)) {
             Write-VeroLog "NOT turned on: $what. Use Turn VPN on in the tray to choose, or -DisconnectOthers / -Force." $Action
-            @{ Time = (Get-Date).ToString('o'); Items = @($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) } | ConvertTo-Json -Depth 3 | Set-Content $p.OnRefused
+            Write-VeroStateFile -Path $p.OnRefused -Text (@{ Time = (Get-Date).ToString('o'); Items = @($foreign | ForEach-Object { Format-VeroForeignVpn $_ }) } | ConvertTo-Json -Depth 3)
             return
         }
         Write-VeroLog "WARNING: already on, next to: $what - their traffic is blocked" $Action   # already on: On just redials
@@ -96,8 +96,7 @@ function Invoke-VeroActionOn {
     }
     if ($Action -eq 'on-force' -and $foreign.Count -gt 0) { Write-VeroLog ("turned on anyway (your choice) next to: {0} - their traffic is blocked" -f (($foreign | ForEach-Object Name) -join ', ')) $Action }
     Clear-VeroAuthFailed -ProfileName $Config.Profile -Action $Action           # you asked: one more try with the stored password
-    Update-VeroServerIpBeforeArm -Config $Config -Action $Action
-    Set-VeroArmed $true $Action; Sync-VeroKillSwitch -Config $Config -Action $Action
+    Enter-VeroArmed -Config $Config -Action $Action
     $notice = Get-VeroSwitchNotice -Type (Get-VeroConfigType $Config) -ProfileName $Config.Profile
     if ($notice) { Write-VeroLog "NOTICE: $notice" $Action }
     if (-not (Test-VeroVpnConnected $Config.Profile)) { Invoke-VeroReconnect -Config $Config -Action $Action }
@@ -106,21 +105,26 @@ function Invoke-VeroActionOn {
 function Invoke-VeroActionOff {
     <# Your Off: disarm, filters away, hang up - and nothing re-arms by itself for 30 s. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'off')
-    $p = Get-VeroPath
-    Set-Content -Path $p.OffAt -Value (Get-Date).ToString('o')             # for 30 s nothing re-arms by itself (see Test-VeroRecentOff)
-                      Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action
-                      Remove-Item $p.Renew -Force -ErrorAction SilentlyContinue
-                      $type = Get-VeroConfigType $Config
-                      # OpenVPN runs only under VeroScudo: always stop it (also mid-connect); the others only when connected
-                      if ($type -eq 'hiddify') { Write-VeroLog "kill-switch off - Hiddify stays as it is (connect and disconnect it in Hiddify)" $Action }
-                      elseif ((Get-VeroTypeHandler $type).HangUpOnOffAlways -or (Test-VeroVpnConnected $Config.Profile -Type $type)) {
-                          Invoke-VeroHangUp $Config.Profile $type; Write-VeroLog "disconnected '$($Config.Profile)' by user (off; source: VeroScudo Off)" $Action }
+    Stop-VeroGuardState -Stamp -Action $Action
+    $type = Get-VeroConfigType $Config
+    $h = Get-VeroTypeHandler $type
+    # OpenVPN runs only under VeroScudo: always stop it (also mid-connect); the others only when connected
+    if (-not $h.Dials) { Write-VeroLog "kill-switch off - $($h.Label) stays as it is (connect and disconnect it in $($h.Label))" $Action }
+    elseif ($h.HangUpOnOffAlways -or (Test-VeroVpnConnected $Config.Profile -Type $type)) {
+        Invoke-VeroHangUp $Config.Profile $type
+        Write-VeroLog "disconnected '$($Config.Profile)' by user (off; source: VeroScudo Off)" $Action
+    }
 }
 
 function Invoke-VeroActionOnEvent {
     <# A VPN terminated (Terminated task): forged/stale/foreign records are weeded out, then the one strict decision - disarm or redial. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'on-event')
-    # let RAS write all its records first: a forged 631 raced in right after a real failure must meet the real
+    # first of all, the filters for "down" (which also blocks the VMs and WSL): blocking needs no decision about who hung
+    # up, and must not wait for the pause below or for the Redial task to start
+    if ((Test-VeroArmed) -and -not (Test-VeroVpnConnected $Config.Profile)) {
+        try { Sync-VeroKillSwitch -Config $Config -Action $Action } catch { Write-VeroLog "ERROR: $($_.Exception.Message)" $Action }
+    }
+    # then let RAS write all its records: a forged 631 raced in right after a real failure must meet the real
     # record (same connection: conflict) - and a 631 for any other connection id than the one we saw connect is refused
     if ($script:EventSettleSeconds -gt 0) { Start-Sleep -Seconds $script:EventSettleSeconds }
     $t = Get-VeroRasTermination
@@ -136,8 +140,8 @@ function Invoke-VeroActionOnEvent {
     $code = $r.Code
     Write-VeroLog ("decision source: RAS reason code {0} -> {1}" -f $code, $(if ($code -eq 631) { 'you hung up' } else { 'link failure' })) $Action
     switch (Get-VeroDecision -ReasonCode $code -Armed (Test-VeroArmed)) {
-        'disarm'    { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }
-        'reconnect' { Invoke-VeroReconnect -Config $Config -Action $Action }
+        'disarm'    { Exit-VeroArmed -Action $Action }
+        'reconnect' { Start-VeroRedial -Config $Config -Action $Action }
     }
 }
 
@@ -152,9 +156,11 @@ function Invoke-VeroActionWatchdog {
     if (-not $single) { return }
     try {
         if (-not (Test-VeroNativeRetryDue (Get-VeroNativeBlocked))) { return }      # helper blocked: not yet time to retry
+        # by the UTC clock: local time goes back an hour when summer time ends, and a loop that waits for "15 s from now"
+        # in local time would then sleep for that hour
         $nextCheck = [datetime]::MinValue; $nextProbe = [datetime]::MinValue
         while ($true) {
-            if ((Get-Date) -ge $nextCheck) {
+            if ([datetime]::UtcNow -ge $nextCheck) {
                 try {
                     Invoke-VeroCheck -Action $Action
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
@@ -168,27 +174,20 @@ function Invoke-VeroActionWatchdog {
                     if ($script:NativeLoadFailed) { Set-VeroNativeBlocked -Message $_.Exception.Message -Action $Action; break }   # exit: a fresh process retries
                     Write-VeroLog "ERROR: $($_.Exception.Message)" $Action
                 }
-                $nextCheck = (Get-Date).AddSeconds(15)
+                $nextCheck = [datetime]::UtcNow.AddSeconds(15)
             }
-            if ((Get-Date) -ge $nextProbe) {
+            if ([datetime]::UtcNow -ge $nextProbe) {
                 $wait = 30
                 try { $wait = Update-VeroQuality -Action $Action } catch { Write-VeroLog "ERROR: connection check: $($_.Exception.Message)" $Action }
-                $nextProbe = (Get-Date).AddSeconds($wait)
+                $nextProbe = [datetime]::UtcNow.AddSeconds($wait)
             }
             $due = if ($nextCheck -lt $nextProbe) { $nextCheck } else { $nextProbe }
-            Start-Sleep -Seconds ([Math]::Max(1, [int][Math]::Ceiling(($due - (Get-Date)).TotalSeconds)))
+            Start-Sleep -Seconds ([Math]::Min(60, [Math]::Max(1, [int][Math]::Ceiling(($due - [datetime]::UtcNow).TotalSeconds))))   # never longer than a minute, whatever the clock does
         }
     } finally {
         try { Save-VeroStatsMinute } catch { Write-Verbose 'statistics: last minute not saved' }   # the minute so far (a restart adds to it)
         $single.Dispose()
     }
-}
-
-function Test-VeroStatsUp {
-    <# Statistics: VeroScudo's own VPN is up right now (armed and the active profile connected). Other VPNs do not count. #>
-    if (-not (Test-VeroArmed)) { return $false }
-    $cfg = try { Get-VeroConfig } catch { $null }
-    [bool]($cfg -and (Test-VeroVpnConnected $cfg.Profile -Type $cfg.Type))
 }
 
 function Invoke-VeroActionSwitch {
@@ -213,7 +212,7 @@ function Invoke-VeroActionStatus {
 
 function Invoke-VeroAction {
     [CmdletBinding()] param(
-        [Parameter(Mandatory)][ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'netdown', 'reconnect', 'watchdog', 'check', 'switch', 'status', 'openvpn')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'netdown', 'reconnect', 'redial', 'watchdog', 'check', 'switch', 'status', 'openvpn')][string]$Action,
         $Config,
         [string]$VpnProfile
     )
@@ -226,15 +225,13 @@ function Invoke-VeroAction {
             # itself is left as it is (its name is in the file that cannot be read)
             if ($Action -notin 'off', 'disarm') { throw }
             Write-VeroLog "config.json unusable ($($_.Exception.Message)) - turning off: kill-switch removed; the VPN connection itself is not touched" $Action
-            if ($Action -eq 'off') { Set-Content -Path $p.OffAt -Value (Get-Date).ToString('o') }
-            Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action
-            if (Test-Path $p.Renew) { Remove-Item $p.Renew -Force -ErrorAction SilentlyContinue }
+            Stop-VeroGuardState -Stamp:($Action -eq 'off') -Action $Action
             return
         }
     }
     switch ($Action) {
         'arm'       { Invoke-VeroActionArm -Config $Config -Action $Action }
-        'disarm'    { Set-VeroArmed $false $Action; Disable-VeroKillSwitch -Action $Action }
+        'disarm'    { Exit-VeroArmed -Action $Action }
         { $_ -in 'on', 'on-disconnect', 'on-force' } { Invoke-VeroActionOn -Config $Config -Action $Action }
         'off'       { Invoke-VeroActionOff -Config $Config -Action $Action }
         'on-event'  { Invoke-VeroActionOnEvent -Config $Config -Action $Action }
@@ -245,6 +242,7 @@ function Invoke-VeroAction {
             Clear-VeroAuthFailed -ProfileName $Config.Profile -Action $Action
             Invoke-VeroReconnect -Config $Config -Action $Action -Renew
         }
+        'redial'    { if (Test-VeroArmed) { Invoke-VeroReconnect -Config $Config -Action $Action } }   # the Redial task: the loop's one owner
         'openvpn'   { Invoke-VeroOpenVpnRunner -Action $Action }
         'check'     { Invoke-VeroCheck -Action $Action }
         'watchdog'  { Invoke-VeroActionWatchdog -Action $Action }
@@ -259,8 +257,14 @@ function Test-VeroNewerVersion {
     <# True when a release tag (v1.2.3) is newer than the running version. Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [string]$Current = $script:Version)
     $t = $Tag.Trim() -replace '^[vV]', ''
-    if ($t -notmatch '^\d+(\.\d+){1,3}$') { return $false }
-    return ([version]$t -gt [version]$Current)
+    if ($t -notmatch '^\d+(\.\d+){1,3}\z' -or $Current -notmatch '^\d+(\.\d+){1,3}\z') { return $false }
+    # number by number, missing ones are 0: 1.3 = 1.3.0 = 1.3.0.0 ([version] alone calls 1.3.0.0 newer than 1.3.0)
+    $a = @($t -split '\.' | ForEach-Object { [int]$_ }); $b = @($Current -split '\.' | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt 4; $i++) {
+        $x = if ($i -lt $a.Count) { $a[$i] } else { 0 }; $y = if ($i -lt $b.Count) { $b[$i] } else { 0 }
+        if ($x -ne $y) { return ($x -gt $y) }
+    }
+    return $false
 }
 
 function Test-VeroReleaseUrl {
@@ -277,9 +281,14 @@ function Get-VeroLatestRelease {
     [CmdletBinding()] param([string]$Repo = 'GomelHawk/VeroScudo', [int]$TimeoutSec = 10)
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec $TimeoutSec -UseBasicParsing `
+        # no redirect followed, like the trays' other lookups: the answer comes from the address that was asked
+        $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec $TimeoutSec -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop `
                 -Headers @{ 'User-Agent' = "VeroScudo/$script:Version"; Accept = 'application/vnd.github+json' }
-        if ($r.tag_name -and (Test-VeroReleaseUrl ([string]$r.html_url))) { return [pscustomobject]@{ Tag = [string]$r.tag_name; Url = [string]$r.html_url; Name = [string]$r.name } }
+        # the link is built here from the tag (digits and dots only), not taken from the answer: what is opened is what was checked
+        if ([string]$r.tag_name -match '^[vV]?\d+(\.\d+){1,3}\z') {
+            $url = $script:ReleasePrefix + 'tag/' + [string]$r.tag_name
+            if (Test-VeroReleaseUrl $url) { return [pscustomobject]@{ Tag = [string]$r.tag_name; Url = $url; Name = ([string]$r.name -replace '[\x00-\x1f]', ' ') } }
+        }
     } catch { Write-Verbose "update check failed: $($_.Exception.Message)" }
     return $null
 }

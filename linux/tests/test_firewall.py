@@ -22,14 +22,14 @@ def test_no_dns_outside_the_tunnel_while_protected():
 
 def test_dns_while_blocked_only_from_the_system_resolver():
     rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(uid=101, servers=("192.168.1.1",)))
-    assert "meta skuid 101 udp dport 53 ct mark set 0x5653 accept" in rs and "meta skuid 101 tcp dport 53 ct mark set 0x5653 accept" in rs
+    assert "meta skuid 101 udp dport 53 ct mark set 0x5654 accept" in rs and "meta skuid 101 tcp dport 53 ct mark set 0x5654 accept" in rs
     assert "\n    udp dport 53 accept" not in rs
 
 
 def test_dns_while_blocked_only_to_the_resolvers_without_systemd_resolved():
     rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(servers=("192.168.1.1", "fd00::1")))
-    assert "ip daddr { 192.168.1.1 } udp dport 53 ct mark set 0x5653 accept" in rs
-    assert "ip6 daddr { fd00::1 } udp dport 53 ct mark set 0x5653 accept" in rs
+    assert "ip daddr { 192.168.1.1 } udp dport 53 ct mark set 0x5654 accept" in rs
+    assert "ip6 daddr { fd00::1 } udp dport 53 ct mark set 0x5654 accept" in rs
     assert "\n    udp dport 53 accept" not in rs
 
 
@@ -94,7 +94,10 @@ def test_established_traffic_only_for_flows_veroscudo_allowed():
     rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False)
     out = rs.split("chain output")[1].split("chain input")[0]
     est = [ln.strip() for ln in out.splitlines() if "established" in ln]
-    assert est == ["ct state established,related ct mark 0x5653 accept"]   # a tunnel flow re-routed to the NIC is unmarked: dropped
+    # a tunnel flow re-routed to the NIC is unmarked: dropped. While down, also the DNS flows of the block (their own mark)
+    assert est == ["ct state established,related ct mark 0x5653 accept", "ct state established,related ct mark 0x5654 accept"]
+    up = render_ruleset(CFG, ["203.0.113.5"], "tun0", vm_allowed=False).split("chain output")[1].split("chain input")[0]
+    assert [ln.strip() for ln in up.splitlines() if "established" in ln] == ["ct state established,related ct mark 0x5653 accept"]
 
 
 def test_no_dns_permit_when_no_resolver_is_known():
@@ -157,3 +160,13 @@ def test_wireguard_server_keeps_networkmanagers_own_conntrack_mark():
         assert "203.0.113.30 } udp dport 3389 ct mark" not in rs
     other = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False)            # every other type: unchanged
     assert "ip daddr { 203.0.113.5 } tcp dport 443 ct mark set 0x5653 accept" in other and "sport 443 accept" not in other
+
+
+def test_a_dns_flow_opened_while_blocked_does_not_outlive_the_block():
+    from veroscudo.firewall import DnsPolicy
+    cfg = Config.from_text('{"profiles":[{"profile":"Work","server":"vpn.example.com"}]}')
+    down = render_ruleset(cfg, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(101))
+    up = render_ruleset(cfg, ["203.0.113.5"], "tun0", vm_allowed=False, dns=DnsPolicy(101))
+    assert down.count("ct state established,related ct mark 0x5654 accept") == 2     # out and the answers in
+    assert "0x5654" not in up                                                        # no rule lets such a flow go on
+    assert up.count("ct state established,related ct mark 0x5653 accept") == 2

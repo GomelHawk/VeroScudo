@@ -39,6 +39,60 @@ All notable changes to VeroScudo are recorded here. The format follows
   guard (no arm, no redial, no Off). It is root's alone now. Hiddify's service is let in for replies only.
 - **macOS:** the daemon's output file (`/var/log/veroscudo.out`, world-readable) no longer gets a copy of the log; rules
   loaded into a pf that could not be enabled count as an error.
+- **Windows, tray Save:** the two paths in the command the administrator approves are passed as data. A folder name
+  with a typographic quote could end the quoted path and add a command; such a folder also made Save fail.
+- **Windows, tray:** a config chosen for import may name only local key files of at most 1 MB (a network path would
+  hand your Windows sign-in to that computer). The exit-location and status-page lookups follow no redirects, read at
+  most 256 KB with a limit on every step, and never wait on the window's thread; what they return is shown as one short line. A Save
+  payload left behind by an ended tray is removed once it is 10 minutes old. The update link is built from the checked tag.
+  The elevated Save stores an OpenVPN text only for an OpenVPN profile of a config that was accepted.
+- **Linux, tray:** a notification's text is plain text (a connection's name could carry markup); a name that starts with
+  a dash is never read as an option by `veroscudo import/remove/set`.
+- **All platforms:** the patterns that check names, addresses and versions end at the end of the text - a value with a
+  line break after it no longer passes.
+- **Windows, `Uninstall.ps1 -Purge`:** the user's own VeroScudo folder was removed with a recursive delete, as
+  administrator; a junction in it (or in its place) took the delete to its target. That folder is no longer removed
+  from there at all (the script names it for you to delete); the administrators' own folders are removed file by
+  file, and a link is removed as a link.
+- **Windows:** the elevated guard no longer deletes or writes anything in the user's own folder (it removed the switch
+  request and the one-time code file there - through a junction, any file). It reads them and notes "taken" in its own
+  state folder; the tray removes its own files. Stored credentials are read as two values from their XML, not by the
+  general deserializer.
+- **Windows, elevated tasks:** the launcher removes the environment variables the .NET runtime acts on before any script
+  runs (a profiler set in the user's environment would load into every guard task). The native helper is compiled in a
+  temp folder of the administrators' own, not the user's.
+- **Windows, installer:** the state folder is created with its protection (it was open to every user for a moment);
+  files already in the OpenVPN folder take that folder's rules; links inside the folders are refused before any
+  ownership change walks them; `icacls` and `schtasks` run by full path.
+- **Windows:** when the filters cannot even be worked out (the helper does not load, an adapter cannot be read) an armed
+  PC gets the emergency block - before, only a failed apply did; the emergency block switches the firewall profiles on.
+  The revocation window at arm opens only for a connect the System log shows and no longer counts as the one window
+  per 15 minutes. The management password goes only to the process at the other end of that very connection.
+- **Linux:** DNS allowed while blocked has its own connection mark; such a connection ends when the tunnel comes up
+  (it could go on outside the tunnel for as long as it lived). An interface that is missing right now is never taken
+  for the tunnel. The log is opened without following a link and its mode is set on the open file. The lock file has a new
+  name (`fw.lock`), so nobody who opened the old, readable one still holds the lock. Installers run Python isolated (`-I`).
+- **Windows, IKEv2 / L2TP / PPTP:** the server's ports (UDP 500, 4500, 1701, TCP 1723) were open to any program while
+  VeroScudo was on - a way out to the server's addresses for whatever runs on the PC. They now pass only traffic sent
+  as Local System or by an elevated administrator (Windows' IKE service, its tunnel drivers, the guard's own dial).
+  `Install.ps1` asks Windows whether it accepts such a filter (in a transaction it rolls back) before it changes
+  anything. SSTP was limited to its service already.
+- **Windows, OpenVPN:** `openvpn.exe` is started with the system's environment, not the signed-in user's - a variable
+  such as `OPENSSL_CONF` in the user's environment made OpenSSL load a library of that user's choosing, as
+  administrator. The launcher drops `OPENSSL_*` and `APPDOMAIN_MANAGER_*` as well.
+- **Windows:** the VM and WSL blocking steps no longer depend on a state file being writable (a file held open by any
+  local account skipped them: after a drop the VMs kept their way out); a filter plan that fails blocks them too.
+  `Uninstall.ps1 -Purge` no longer removes your own VeroScudo folder as administrator - it names the folder for you to
+  delete. The installer checks the state folder's owner and rules also right after creating it, refuses a link in its
+  place, and never opens `state\locks` to users, not for a moment. A server written as a number shorthand (`10.1`) is
+  refused on every platform. A stored user name with `_x` in it was sent to the server changed.
+- **Windows:** a filter set that cannot be applied blocks the VMs and WSL as well (only one that could not be worked
+  out did); the emergency block is set even when the firewall's old settings cannot be noted first, and lifted only
+  after the real filters and the VM steps are in force. A server written as a hexadecimal number or with a leading
+  zero is refused on every platform. `Uninstall.ps1` removes a custom install folder only when it is the
+  administrators' own.
+- **macOS:** rules that the main pf ruleset no longer reaches (another program replaced it) count as *not active*; a
+  bridge is host-only only when every member is a VM's own port.
 
 ### Fixed: Off, redial and tray robustness (Windows, Linux, macOS)
 - **Off works with a broken `config.json`:** `off` / `disarm` remove the armed flag and the kill-switch also when the
@@ -46,14 +100,51 @@ All notable changes to VeroScudo are recorded here. The format follows
   could not be turned off.
 - Linux/macOS: a dial VeroScudo had started that succeeds within 30 s after your Off is taken down again instead of
   turning the VPN back on (as on Windows).
-- Windows: while the watchdog itself redials (Hiddify, WireGuard) the tray no longer reports *Guard not running* after
-  3 minutes, and those minutes are recorded as *not connected* in the statistics.
+- Windows: during a long outage of a Hiddify or WireGuard profile the tray reported *Guard not running* after 3 minutes
+  and the minutes were missing from the statistics (the watchdog was busy redialing; it now hands that to the `Redial`
+  task and keeps checking).
 - A Reconnect marker read while it was being written no longer makes VeroScudo's own hang-up look like your Off.
 - Windows: a log line that cannot be written (another process is writing) no longer stops an arm or a sync halfway;
   the server addresses in the filter set are sorted, so a name whose answers rotate does not re-apply every filter.
 - Linux/macOS: `nmcli` / `scutil` questions time out after 20 s; an error in one pass no longer ends the VPN watch or
   the tray's refresh timer (the icon kept its last state).
+- Trays: the update check runs in the background (the icon froze for up to 10 s); *Check for updates* says so when it
+  got no answer instead of "You have the latest version". macOS: the icon keeps following the guard while an alert or
+  a menu is open. Linux: without a valid `config.json` the status window no longer shows the last tunnel. Windows: a
+  WireGuard profile is not shown as protected when the guard has stopped judging its link.
+- Linux and macOS trays share one controller (`traymodel.TrayController`); each keeps only its windows and menus.
+  The Windows tray's decisions (the notices, the menu, the update check, which leftover files it removes) are in its
+  tested module; the update menu reads the same on every platform.
+- Tests: the Windows unit tests are one file per topic with a shared setup; the watchdog loop, the filter lock's
+  timeout, the one-time-code wait and the WireGuard health rule are now run by tests; a list of the tray's sentences
+  is checked to be word for word the same in the Windows and the Linux/macOS sources.
 - Releases: a tag is published only after the full CI passes on it and when it equals the version in the code.
+
+### Changed: structure of the guard (Windows, Linux, macOS)
+- Windows: the redial loop got a task of its own, `Redial`. The watchdog, the `Terminated` task and a profile switch
+  start it and return: the watchdog keeps its 15 s checks during an outage, and an event that arrives during a redial
+  is no longer dropped. (Your own On and Reconnect still dial in their own task - one loop at a time, by the lock.) Run
+  `Install.ps1` again to get the task; until then the loop runs where it did.
+- Windows: one function arms (`Enter-VeroArmed`) and one disarms (`Exit-VeroArmed`) for every caller; a WireGuard tunnel
+  activated in its app now gets the same server lookup before arming as the other types. Most of the guard's
+  "which type is this" questions moved into the type table (arm, redial, watch, Off, the connection check).
+- Windows: state files are written whole or not at all, in UTF-8 (a profile name with letters the system's code page
+  lacks came back changed, and Reconnect then read its own hang-up as your Off). A file somebody is reading at that
+  instant is tried again and, as the last way, written in place; Off never fails over its own note.
+- Windows: the certificate-revocation window opens at most once per 15 minutes for failed dials (it reopened after
+  every attempt on a network that kept the dial failing that way).
+- Linux/macOS: the redial lock names its process by id and start time; an id reused by another process no longer
+  blocks the redial.
+- Off landing while rules were being applied could leave them on a machine that is off until the next check (up to
+  15 s, all platforms): the armed flag is looked at again under the lock. Linux/macOS: the rules are worked out before
+  the lock is taken, so Off never waits for a name lookup. Windows: a WireGuard tunnel that comes up within 30 s after
+  Off no longer turns the VPN back on; a Hiddify profile whose programs are not in an administrators-only folder
+  stopped every sync with an error instead of allowing only its tunnel.
+- Profile names may not start with a dash; `serverIps`, server addresses and the status page address follow one rule
+  on every platform.
+- Windows and Linux/macOS agree, checked by one shared list of cases (`shared/vectors.json`) that both test suites
+  read: `lanAllow` takes a prefix length, never a netmask; a release tag `v1.3.0.0` is not newer than 1.3.0; a tag may
+  start with `V`.
 
 ### Changed: Linux is stable
 - Live-tested on a real machine with SSTP, OpenVPN, WireGuard and Hiddify (VPN mode) profiles - no leak in any phase,
@@ -271,10 +362,10 @@ All notable changes to VeroScudo are recorded here. The format follows
   texts and notifications (connection lost, protected again, not connected after 2 minutes, turned off). The decisions
   live in one tested module (`traymodel.py`); GTK (Linux) and AppKit through PyObjC (macOS) only draw them. Linux:
   `python3 -m veroscudo.tray --preview DIR` renders every window into PNGs.
-- **Settings** (Linux window, macOS submenu): import one of the system's VPN connections, remove a profile, choose the
-  default, update check, containers/VMs (Linux). Each change asks for an administrator's password (pkexec / the macOS
+- **Settings** (a window on Linux and macOS): import one of the system's VPN connections, remove a profile, update
+  check, containers/VMs (Linux). Each change asks for an administrator's password (pkexec / the macOS
   password dialog) - the passwordless sudo rule still covers only on, off, reconnect and use. New root actions
-  `veroscudo remove|default|set`; the daemon picks a changed `config.json` up within 15 s (a broken file keeps the running
+  `veroscudo remove|set`; the daemon picks a changed `config.json` up within 15 s (a broken file keeps the running
   configuration). There is no setting that weakens the rule.
 - **Installers** (`sudo ./install.sh [--profile <connection>]`): Linux installs the missing packages (asks, or `--yes`),
   both list the system's VPN connections to pick from instead of asking for server, port and protocol (`veroscudo setup`),
@@ -322,7 +413,7 @@ All notable changes to VeroScudo are recorded here. The format follows
   folder with a weak ancestor - one that lets a non-administrator rename or replace folders (a data drive's root, the
   user profile): the folder itself could be renamed away and a planted one put in its place, and the elevated tasks
   run the scripts from there. Program Files gave all of that by default.
-- macOS: the daemon's venv is built from Apple's `/usr/bin/python3` only (Homebrew's is user-owned on Intel Macs), and
+- macOS: the program runs on Apple's `/usr/bin/python3` only (Homebrew's is user-owned on Intel Macs), and
   the installer refuses to continue when `/opt` or the program folder is not root's and closed to others.
 - macOS: the program moved from `/usr/local/lib/veroscudo` to **`/opt/veroscudo`**. On Intel Macs Homebrew makes
   `/usr/local/lib` and `/usr/local/bin` writable by the user, so the folder the root daemon and the passwordless sudo
@@ -343,8 +434,8 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Windows: the installer refuses to continue when the account that elevated is not the signed-in one (over-the-shoulder
   UAC): the tasks, the tray and the DPAPI credential would belong to two accounts, and the real user would get no redial
   and no tray. The signed-in user must be an administrator; README says so.
-- Linux: the installer checks for pip up front, puts the command pip actually installed (`/usr/local/bin` on Debian,
-  `/usr/bin` on Arch) into the units and the sudoers rule, and refuses a command or interpreter that is not root's and
+- Linux: the installer puts the command it installed (`/opt/veroscudo/bin/veroscudo`, run with the system's
+  `python3 -I`) into the units and the sudoers rule, and refuses a command or interpreter that is not root's and
   closed to others.
 - Release: the tag name reaches the workflows only as environment data and must look like a version; CI installs
   Pester and PSScriptAnalyzer at exact versions.
@@ -357,9 +448,9 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Windows: the guard's single-instance locks (watchdog, filter sync, OpenVPN runner) are exclusive file handles in an
   administrators-only folder instead of named mutexes, which any process of the account could have created first and
   so stalled self-repair and redial for good.
-- Windows: `Uninstall.ps1` refuses over-the-shoulder UAC like the installer (it removes the signed-in user's folders).
+- Windows: `Uninstall.ps1` refuses over-the-shoulder UAC like the installer (it removes the signed-in user's shortcuts).
 - Linux: `veroscudo status` without root says the kill-switch state is unknown instead of "inactive"; the log file is
-  created readable by root only.
+  created root:adm 0640 (root and the administrators' group read it).
 - Documented: IKEv2's "you hung up" defence is weaker on a PC with several accounts (README, SECURITY.md).
 
 ### Fixed
@@ -405,7 +496,7 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Windows: `Invoke-VeroAction` is a 25-line dispatcher; each action (arm, on, off, on-event, watchdog, switch, status) is
   its own function with the body it had. `Sync-VeroKillSwitchCore` is split into `Get-VeroSyncPlan` (what the filters
   must look like now) and the apply/log/refresh step. No behaviour change.
-- Windows: the core module is split by topic into `windows/Core/NN-<topic>.ps1` (13 files, 40-540 lines each);
+- Windows: the core module is split by topic into `windows/Core/NN-<topic>.ps1`;
   `VeroScudo.Core.psm1` is the loader that dot-sources them in a fixed order and exports the public functions. One
   module, one scope: callers, tests and the installed layout see the same module name as before. The installer copies
   the parts; the release archive and the signing step include them.
@@ -416,8 +507,8 @@ All notable changes to VeroScudo are recorded here. The format follows
   parametrized fixture that reads rulesets only through a backend-neutral check.
 - Windows: **the tray has unit tests.** What the tray decides - state, title and text from the guard's facts, the exit
   location line, "a state file changed", the per-user preferences, the update-notice rule - moved from the WinForms
-  script into `VeroScudo.Tray.psm1` as functions with explicit inputs, tested in `tests/VeroScudo.Tray.Tests.ps1`
-  (6 groups). `VeroScudoTray.ps1` calls them with its globals and only draws.
+  script into `VeroScudo.Tray.psm1` as functions with explicit inputs, tested in `tests/VeroScudo.Tray.Tests.ps1`.
+  `VeroScudoTray.ps1` calls them with its globals and only draws.
 - CI: PSScriptAnalyzer now fails on parse errors too (the settings listed Error and Warning only, so a script that no
   test imports - installer, tray - could have shipped unparseable).
 - Windows: the anti-forgery rule for a "you hung up" record is one pure function, `Resolve-VeroTerminationCode`
@@ -433,8 +524,8 @@ All notable changes to VeroScudo are recorded here. The format follows
   reuses the nftables backend's address helpers (one copy); the tray takes its VPN backend from `backend.py` like the
   daemon; the guard is now tested with the pf backend swapped in; two Windows test
   groups named after a commit are named after what they check.
-- Windows: the watchdog's single-instance mutex is named per home folder, so the unit tests (temp home) no longer meet
-  the installed watchdog's mutex - one test failed on a machine with VeroScudo running, passed on a clean CI runner.
+- Windows: the watchdog's single-instance lock file lives in the state folder of its home folder, so the unit tests
+  (temp home) no longer meet the installed watchdog's lock - one test failed on a machine with VeroScudo running, passed on a clean CI runner.
 
 ## [1.3.0] - 2026-11-04
 

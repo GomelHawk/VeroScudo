@@ -10,10 +10,8 @@ A click on the menu-bar icon opens the menu (the macOS habit); an Option-click o
 tray's left click)."""
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
-import time
 from pathlib import Path
 
 import objc  # type: ignore
@@ -70,13 +68,19 @@ from AppKit import (  # type: ignore
     NSWindowStyleMaskTitled,
     NSZeroRect,
 )
-from Foundation import NSAttributedString, NSObject, NSString, NSTimer  # type: ignore
+from Foundation import (  # type: ignore
+    NSAttributedString,
+    NSObject,
+    NSRunLoop,
+    NSRunLoopCommonModes,
+    NSString,
+    NSTimer,
+)
 from PyObjCTools import AppHelper  # type: ignore
 
-from . import __version__, exitinfo, importer, keepawake, quality, stats, statuspage, traymodel, update
+from . import __version__, importer, keepawake, quality, stats, statuspage, traymodel
 from .backend import nm
-from .config import Config, config_path, is_host
-from .state import StateStore, kind_label, switch_notice
+from .state import kind_label
 
 ICONS = traymodel.env_icons(Path("/opt/veroscudo/icons"))
 CONNECTION_NOTE = ("The first rating comes one full period after each connect and each change here. The checks go through "
@@ -245,26 +249,7 @@ class Tray(NSObject):
         self = objc.super(Tray, self).init()     # noqa: PLW0642 - PyObjC's init pattern: init may return another object
         if self is None:
             return None
-        self.store = StateStore()
-        self.cfg, self.cfg_error, self.cfg_mtime = None, "", -1.0
-        self.kinds = {}
-        self.runner = traymodel.Runner()
-        self.expect = traymodel.Expect()
-        self.awake = keepawake.KeepAwake()
-        self.last = None
-        self.facts = traymodel.Facts(configured=False)
-        self.view = traymodel.tray_state(self.facts)
-        self.tunnel = None
-        self.update_url = ""
         self.shown_profiles = None
-        self.exit = exitinfo.ExitFetch()
-        self.protected_since = 0.0
-        self.was_up = False
-        self.status_page = statuspage.StatusFetch()
-        self.foreign = []
-        self.foreign_at = 0.0
-        self.foreign_shown = set()
-        self.last_drop = "-"
         self.icons = {}
         self.win = None                          # the Settings window (three tabs, as on Windows and Linux)
         self.win_ui = {}
@@ -272,7 +257,9 @@ class Tray(NSObject):
         self.st = {}
         self.stats_win = None                    # the Statistics window
         self.stats_ui = {}
-        self.reload_config()
+        # what happens is decided in traymodel.TrayController; this object is its `ui` (the hooks below), it draws
+        self.ctl = traymodel.TrayController(nm, self, menu_name="menu-bar menu", refresh_after_admin=True)
+        self.ctl.reload_config()
         self.item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
         self.menu = NSMenu.alloc().init()
         self.menu.setAutoenablesItems_(False)
@@ -293,7 +280,7 @@ class Tray(NSObject):
         self.add("Statistics…", "statistics:")
         self.add("Settings…", "settings:")
         self.awake_item = self.add("Keep awake", "toggleAwake:")
-        self.awake_item.setState_(NSOnState if self.awake.set(keepawake.load_pref()) else NSOffState)
+        self.awake_item.setState_(NSOnState if self.ctl.awake.set(keepawake.load_pref()) else NSOffState)
         self.menu.addItem_(NSMenuItem.separatorItem())
         self.upd_item = self.add("Check for updates", "checkUpdates:")
         self.add("About VeroScudo", "about:")
@@ -304,11 +291,13 @@ class Tray(NSObject):
         btn.setTarget_(self)
         btn.setAction_("iconClick:")
         btn.sendActionOn_(NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown)
-        self.refresh()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(3.0, self, "tick:", None, True)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.5, self, "drain:", None, True)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(120.0, self, "autoUpdate:", None, False)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(60.0, self, "statsTick:", None, True)
+        self.ctl.refresh()
+        # in the common run-loop modes: a timer of the default mode alone does not fire while an alert or a menu is open,
+        # and the icon would stop following the guard for as long as it stays open
+        for seconds, selector, repeats in ((3.0, "tick:", True), (0.5, "drain:", True), (120.0, "autoUpdate:", False),
+                                           (60.0, "statsTick:", True)):
+            timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(seconds, self, selector, None, repeats)
+            NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
         return self
 
     @objc.python_method
@@ -333,77 +322,6 @@ class Tray(NSObject):
     def menuDidClose_(self, _menu):
         self.item.setMenu_(None)
 
-    # ---- facts
-    @objc.python_method
-    def kind(self, name):
-        if name not in self.kinds:
-            self.kinds[name] = nm.kind(name)
-        return self.kinds[name]
-
-    @objc.python_method
-    def reload_config(self):
-        m = traymodel.config_mtime(config_path())
-        if m == self.cfg_mtime:
-            return False
-        self.cfg_mtime = m
-        try:
-            self.cfg, self.cfg_error = Config.load(active=self.store.active), ""
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            self.cfg, self.cfg_error = None, str(e)
-        self.kinds = {}
-        self.shown_profiles = None
-        if self.win is not None:
-            self.fill_settings()
-        return True
-
-    @objc.python_method
-    def find_foreign(self, force=False):
-        """Other VPNs next to the active profile; asked at most every 10 s (the window refreshes every 3 s)."""
-        if force or time.time() - self.foreign_at >= 10:
-            self.foreign_at = time.time()
-            cfg = self.cfg
-            tunnels = nm.other_tunnels(self.tunnel)
-            try:
-                owners = nm.tunnel_owners()
-            except (OSError, subprocess.SubprocessError):
-                owners = {}
-            self.foreign = traymodel.foreign_list(tunnels, owners, self.tunnel, cfg.profile if cfg else "", cfg.names if cfg else ())
-        return self.foreign
-
-    @objc.python_method
-    def collect(self):
-        cfg = self.cfg
-        if cfg is None:
-            self.tunnel = None
-            return traymodel.Facts(configured=False, config_error=self.cfg_error, guard_running=traymodel.guard_running())
-        active = self.store.active
-        if active in cfg.names and active != cfg.profile:
-            self.cfg = cfg = cfg.with_active(active)
-        armed = self.store.armed
-        up = nm.is_connected(cfg.profile) and (not armed or self.store.allowed_tunnel(cfg.profile) is not None)
-        self.tunnel = (self.store.allowed_tunnel(cfg.profile) or nm.iface(cfg.profile)) if up else None
-        foreign = self.find_foreign()
-        self.last_drop = traymodel.last_drop_text(self.store.last_drop(), cfg.profile)
-        return traymodel.Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up,
-                               guard_running=traymodel.guard_running(), others=tuple(x.name for x in foreign) if armed else (),
-                               expect=self.expect.kind, check_enabled=cfg.check.enabled,
-                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None,
-                               auth=self.store.auth_failed(cfg.profile))
-
-    @objc.python_method
-    def events(self, view=False):
-        """The newest log lines; view=True: as the status window shows them (after Clear, without dates)."""
-        ev = traymodel.read_events()
-        if view and ev is not None:
-            return traymodel.filter_events(ev, str(keepawake.get_pref("eventsClearedAt", "") or ""))
-        return ev
-
-    @objc.python_method
-    def exit_view(self):
-        return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
-                                  self.exit.checking, self.exit.failure, refused=self.exit.refused, tunnel_up=self.facts.up,
-                                  kind=self.facts.kind)
-
     @objc.python_method
     def icon(self, state, awake):
         """The state icon, with the keep-awake badge while Keep awake is on (drawn once per state)."""
@@ -416,105 +334,89 @@ class Tray(NSObject):
     # ---- timers
     def tick_(self, _timer):
         try:                                # one failed pass is logged; the icon keeps following the guard
-            self.refresh()
+            self.ctl.refresh()
         except Exception:
             logging.getLogger("veroscudo.tray").exception("refresh")
 
     def drain_(self, _timer):
-        for tag, argv, rc, _out, err in self.runner.results():
-            if rc == 0:
-                if tag.startswith("admin:"):
-                    self.reload_config()
-                    self.fill_settings()
-                    self.refresh()
-                continue
-            if tag.startswith("admin:") and traymodel.cancelled(rc, err):
-                self.fill_settings()                 # put the option back the way config.json has it
-                continue
-            what = traymodel.explain_failure(argv, rc, err)
-            if tag.startswith("admin:"):
-                self.fill_settings()
-                self.alert("The change was not made", what)
-            else:
-                self.expect.kind = None
-                notify(f"VeroScudo - {tag} failed", what)
+        try:                                # one failed pass is logged; later results are still shown
+            self.ctl.drain()
+        except Exception:
+            logging.getLogger("veroscudo.tray").exception("drain")
 
     def autoUpdate_(self, _timer):
-        self.check_updates(False)
+        self.ctl.check_updates(False)
 
     def statsTick_(self, _timer):
-        if self.stats_win is not None and self.stats_win.isVisible():     # the picture moves on while open
-            self.fill_stats()
+        try:
+            if self.stats_win is not None and self.stats_win.isVisible():     # the picture moves on while open
+                self.fill_stats()
+        except Exception:
+            logging.getLogger("veroscudo.tray").exception("statistics")
+
+    # ---- the controller's hooks (traymodel.TrayController)
+    @objc.python_method
+    def notice(self, title, body, urgency="normal", state="attention"):
+        notify(title, body)                 # a macOS notification has no urgency and no icon of its own
 
     @objc.python_method
-    def refresh(self):
-        self.reload_config()
-        self.facts = self.collect()
-        self.view = v = traymodel.tray_state(self.facts)
-        if traymodel.turned_on_elsewhere(self.last, v, self.expect.kind):
-            self.expect.start("connect")
-            self.facts = self.collect()
-            self.view = v = traymodel.tray_state(self.facts)
-        if self.expect.update(v):
-            notify(*traymodel.expired_notice(self.facts.name)[:2])
-            self.facts = self.collect()
-            self.view = v = traymodel.tray_state(self.facts)
-        if self.facts.up and not self.was_up:                          # a tunnel came up: older lookups are not fresh
-            self.protected_since, self.exit.refused = time.time(), ""
-        self.was_up = self.facts.up
-        if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
-            self.protected_since = time.time()
-            self.exit.start(self.facts.name)
-            self.status_page.on_connected()                            # the service status too - the same rule
-        self.exit.poll()
-        self.status_page.tick()
-        img = self.icon(v.state, self.awake.active)
+    def message(self, title, text, error=False):
+        self.alert(title, text)
+
+    @objc.python_method
+    def config_reloaded(self):
+        self.shown_profiles = None          # the profiles' kinds are asked again: the menu is filled again
+        if self.win is not None:
+            self.fill_settings()
+
+    @objc.python_method
+    def show_state(self):
+        ctl = self.ctl
+        v = ctl.view
+        img = self.icon(v.state, ctl.awake.active)
         if img is not None:
             self.item.button().setImage_(img)
         else:
             self.item.button().setTitle_("VS")
-        self.item.button().setToolTip_(traymodel.tooltip(v, self.awake.active, self.facts))
-        self.head.setTitle_(traymodel.menu_head(v, self.facts))
-        ms = traymodel.menu_state(v, self.facts.kind)
-        self.on_item.setEnabled_(ms.on and self.facts.configured)
+        self.item.button().setToolTip_(traymodel.tooltip(v, ctl.awake.active, ctl.facts))
+        self.head.setTitle_(traymodel.menu_head(v, ctl.facts))
+        ms = traymodel.menu_state(v, ctl.facts.kind)
+        self.on_item.setEnabled_(ms.on and ctl.facts.configured)
         self.off_item.setEnabled_(ms.off)
         self.redo_item.setEnabled_(ms.reconnect)
-        self.redo_item.setToolTip_(traymodel.RECONNECT_HIDDIFY if self.facts.kind == "hiddify" else None)
+        self.redo_item.setToolTip_(traymodel.RECONNECT_HIDDIFY if ctl.facts.kind == "hiddify" else None)
         self.fill_menus()
-        noticed = self.switch_notice() or self.foreign_notice(v)
-        n = None if noticed else traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
-        if n:
-            notify(n[0], n[1])
-        self.last = v.state
-        self.awake_item.setState_(NSOnState if self.awake.active else NSOffState)
-        self.update_status()
 
     @objc.python_method
-    def switch_notice(self):
-        name = self.facts.name
-        if self.facts.configured and keepawake.get_pref("lastProfile") != name:       # every switch, once
-            keepawake.set_pref("lastProfile", name)
-            n = switch_notice(self.facts.kind, name)
-            if n:
-                notify("VeroScudo - WireGuard profile", n)
-                return True
-        return False
+    def show_windows(self):
+        self.awake_item.setState_(NSOnState if self.ctl.awake.active else NSOffState)
+        self.update_status()                # the settings were filled in config_reloaded already
 
     @objc.python_method
-    def foreign_notice(self, v):
-        """Another VPN connected while VeroScudo is on: once per detection (it is blocked - say so, and what to do)."""
-        if not v.armed:
-            self.foreign_shown = set()
-            return False
-        new, self.foreign_shown = traymodel.new_foreign(self.foreign_shown, self.foreign)
-        if new:
-            notify(*traymodel.foreign_notice(new[0]))
-            return True
-        return False
+    def update_settings(self):
+        self.fill_settings()
+
+    @objc.python_method
+    def refresh_soon(self):
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(1.5, self, "tick:", None, False)
+
+    @objc.python_method
+    def show_update(self, text):
+        self.upd_item.setTitle_(text)
+
+    @objc.python_method
+    def open_url(self, url):
+        _popen(["open", url])
+
+    @objc.python_method
+    def set_clipboard(self, text):
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
 
     @objc.python_method
     def fill_menus(self):
-        cfg = self.cfg
+        cfg = self.ctl.cfg
         key = (tuple(cfg.names), cfg.profile) if cfg else ()
         if key == self.shown_profiles:
             return
@@ -523,9 +425,9 @@ class Tray(NSObject):
         self.prof_item.setEnabled_(bool(cfg))
         if cfg:
             for name in cfg.names:
-                it = self.add(f"{name} ({kind_label(self.kind(name))})", "useProfile:", self.prof_menu, name)
+                it = self.add(f"{name} ({kind_label(self.ctl.kind(name))})", "useProfile:", self.prof_menu, name)
                 it.setState_(NSOnState if name == cfg.profile else NSOffState)
-            self.prof_item.setTitle_(f"VPN profile: {cfg.profile} ({kind_label(self.kind(cfg.profile))})")
+            self.prof_item.setTitle_(f"VPN profile: {cfg.profile} ({kind_label(self.ctl.kind(cfg.profile))})")
         else:
             self.prof_item.setTitle_("VPN profile")
 
@@ -688,7 +590,8 @@ class Tray(NSObject):
         if win is None or not win.isVisible() and st.get("h"):
             return
         W = self.STATUS_W
-        f, v = self.facts, self.view
+        ctl = self.ctl
+        f, v = ctl.facts, ctl.view
         dark = _dark()
         img = _image(v.state, 64)
         if img is not None:
@@ -698,11 +601,11 @@ class Tray(NSObject):
         st["text"].setStringValue_(v.text)
         y = max(18 + 64, 50 + self.fit(st["text"], 96, 50, W - 114)) + 14
         # exit location
-        show = self.exit.enabled()
+        show = ctl.exit_enabled()
         st["loc"].setHidden_(not show)
         if show:
             st["loc"].setFrame_(NSMakeRect(18, y, W - 36, 34))
-            xv = self.exit_view()
+            xv = ctl.exit_view()
             st["badge"].setHidden_(not xv.has)
             st["right"].setHidden_(not xv.has)
             if xv.has:
@@ -725,7 +628,7 @@ class Tray(NSObject):
                 st["place"].setToolTip_(xv.tip or None)
             y += 34 + 12
         # the service status page (Settings > Connection): its own line under the exit location, None = off
-        sv = self.status_page.view()
+        sv = ctl.service_view()
         st["svc"].setHidden_(sv is None)
         if sv is not None:
             st["svc"].setFrame_(NSMakeRect(18, y, W - 36, 34))
@@ -739,10 +642,10 @@ class Tray(NSObject):
                 st[k].setToolTip_(sv.tip)
             y += 34 + 12
         # the table: CONNECTION coloured by its rating with the details as a tooltip, the firewall red while blocked
-        cv = traymodel.connection_view(f, v, self.cfg.check if self.cfg else None)
+        cv = traymodel.connection_view(f, v, ctl.cfg.check if ctl.cfg else None)
         tones = {"Connection": (cv.tone, cv.tip), "Firewall": (traymodel.firewall_tone(f, v), "")}
         rows = [(k, val, *tones.get(k, ("normal", "")))
-                for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop, foreign=())]
+                for k, val in traymodel.status_rows(f, v, ctl.awake.active, ctl.tunnel, last_drop=ctl.last_drop, foreign=())]
         if (rows, dark) != st["rows"]:
             for x in st["row_views"]:
                 x.removeFromSuperview()
@@ -760,7 +663,7 @@ class Tray(NSObject):
             fr = x.frame()
             x.setFrame_(NSMakeRect(fr.origin.x, y + (i // 2) * 22, fr.size.width, 20))
         y += len(rows) * 22 + 8
-        other = traymodel.foreign_text(self.foreign)
+        other = traymodel.foreign_text(ctl.foreign)
         st["other"].setHidden_(not other)
         if other:
             st["other"].setStringValue_(f"Other VPNs: {other}")
@@ -772,7 +675,7 @@ class Tray(NSObject):
         y += 24
         st["sv"].setFrame_(NSMakeRect(18, y, W - 36, 170))
         y += 170 + 14
-        ev = self.events(view=True)
+        ev = ctl.events(view=True)
         text = traymodel.log_hint() if ev is None else ("\n".join(ev) or "(no events yet)")
         if text != st["events"]:
             st["events"] = text
@@ -807,40 +710,20 @@ class Tray(NSObject):
         self.update_status()
 
     def statusOnOff_(self, _):
-        self.toggle_on_off()
+        self.ctl.toggle_on_off()
 
     def statusCopy_(self, sender):
-        self.copy_report()
+        self.ctl.copy_report()
         self.set_link_title(sender, "Copied")
 
     def statusClear_(self, _):
-        keepawake.set_pref("eventsClearedAt", traymodel.clear_stamp())
-        self.update_status()
+        self.ctl.clear_events()
 
     def statusRefreshExit_(self, _):
-        """The Refresh link: asked whenever a VPN tunnel is up - otherwise the answer would show your real address."""
-        self.exit.refresh(self.facts.name, self.facts.up)
-        self.update_status()
+        self.ctl.refresh_exit()
 
     def statusRefreshService_(self, _):
-        """The service card's Refresh link: a fetch now; "checking..." until it ends."""
-        self.status_page.refresh()
-        self.update_status()
-
-    @objc.python_method
-    def copy_report(self):
-        f, v = self.facts, self.view
-        xl = exitinfo.report_line(self.exit_view()) if self.exit.enabled() else None
-        sv = self.status_page.view()
-        lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
-                                                                     foreign=self.find_foreign(), exit_line=xl,
-                                                                     service=sv.text if sv else None)]
-        ev = traymodel.read_events(n=15)
-        text = "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events", *(ev or [traymodel.log_hint()])])
-        pb = NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        pb.setString_forType_(text, NSPasteboardTypeString)
-        return text
+        self.ctl.refresh_status_page()
 
     # ---- the Statistics window: 7 days, one row per day, one bar per 10 minutes (Windows: Show-Stats)
     @objc.python_method
@@ -880,20 +763,10 @@ class Tray(NSObject):
         win.center()
 
     @objc.python_method
-    def stats_week(self, pid):
-        return stats.week(self.store.state, pid)
-
-    @objc.python_method
-    def stats_choices(self):
-        cfg = self.cfg
-        return stats.choices(stats.profiles_seen(self.store.state), [(p.id, p.name) for p in cfg.profiles] if cfg else [],
-                             cfg.current.id if cfg else None)
-
-    @objc.python_method
     def fill_stats(self):
         pick, chart = self.stats_ui["pick"], self.stats_ui["chart"]
         current = self.selected(pick)                      # the id of the shown profile (renamed: same id, new name)
-        items = self.stats_choices()                       # a profile used for the first time shows up on Refresh
+        items = self.ctl.stats_choices()                   # a profile used for the first time shows up on Refresh
         pick.removeAllItems()
         for pid, label in items:
             pick.addItemWithTitle_(label)
@@ -901,7 +774,7 @@ class Tray(NSObject):
         ids = [pid for pid, _ in items]
         if current in ids:
             pick.selectItemAtIndex_(ids.index(current))
-        chart.days = self.stats_week(self.selected(pick))
+        chart.days = self.ctl.stats_week(self.selected(pick))
         chart.setNeedsDisplay_(True)
 
     def statsProfile_(self, _):
@@ -1020,13 +893,13 @@ class Tray(NSObject):
 
     @objc.python_method
     def fill_settings(self):
-        ui, cfg = self.win_ui, self.cfg
+        ui, cfg = self.win_ui, self.ctl.cfg
         if not ui:
             return
         names = list(cfg.names) if cfg else []
         ui["prof"].removeAllItems()
         for n in names:
-            tags = [kind_label(self.kind(n))] + (["active"] if cfg and n == cfg.profile else [])
+            tags = [kind_label(self.ctl.kind(n))] + (["active"] if cfg and n == cfg.profile else [])
             ui["prof"].addItemWithTitle_(f"{n}  ({' · '.join(tags)})")
             ui["prof"].lastItem().setRepresentedObject_(n)
         have = set(names)
@@ -1043,9 +916,9 @@ class Tray(NSObject):
             ui["imp"].lastItem().setRepresentedObject_("")
         ui["upd"].setState_(NSOnState if (cfg is None or cfg.update_check) else NSOffState)
         ui["vm"].setState_(NSOnState if (cfg is None or cfg.vm) else NSOffState)
-        ui["loc"].setState_(NSOnState if self.exit.enabled() else NSOffState)
-        ui["sp"].setState_(NSOnState if self.status_page.enabled() else NSOffState)
-        ui["sp_url"].setStringValue_(self.status_page.url())
+        ui["loc"].setState_(NSOnState if self.ctl.exit_enabled() else NSOffState)
+        ui["sp"].setState_(NSOnState if self.ctl.status_page_enabled() else NSOffState)
+        ui["sp_url"].setStringValue_(self.ctl.status_page_url())
         chk = cfg.check if cfg else quality.CheckConfig()
         ui["en"].setState_(NSOnState if chk.enabled else NSOffState)
         ui["every"].setStringValue_(str(chk.interval_seconds))
@@ -1081,23 +954,21 @@ class Tray(NSObject):
             return
         title, text = traymodel.remove_question(name)
         if self.confirm(title, text, "Remove"):
-            self.admin(["remove", name])
+            self.ctl.admin(["remove", name])
 
     def settingsImport_(self, _):
         name = self.selected(self.win_ui["imp"])
         if name:
-            self.admin(["import", name])
+            self.ctl.admin(["import", name])
 
     def settingsUpdate_(self, sender):
-        self.admin(["set", "updateCheck", "true" if sender.state() == NSOnState else "false"])
+        self.ctl.admin(["set", "updateCheck", "true" if sender.state() == NSOnState else "false"])
 
     def settingsVm_(self, sender):
-        self.admin(["set", "vm", "true" if sender.state() == NSOnState else "false"])
+        self.ctl.admin(["set", "vm", "true" if sender.state() == NSOnState else "false"])
 
     def settingsExit_(self, sender):
-        # your own setting (tray.json): saved at once, no administrator's password
-        keepawake.set_pref("showExit", sender.state() == NSOnState)
-        self.update_status()
+        self.ctl.set_exit_enabled(sender.state() == NSOnState)
 
     def settingsCheckToggle_(self, _):
         self.show_check_fields()
@@ -1107,17 +978,14 @@ class Tray(NSObject):
             port.setEnabled_(method_of(m.indexOfSelectedItem()) in quality.PORT_METHODS)
 
     def settingsStatusPage_(self, sender):
-        # your own setting (tray.json): saved at once, no administrator's password
-        self.status_page.set_enabled(sender.state() == NSOnState)
-        self.update_status()
+        self.ctl.set_status_page(sender.state() == NSOnState)
 
     def settingsStatusUrl_(self, sender):
-        text = str(sender.stringValue()).strip()
-        if text == self.status_page.url():
+        err = self.ctl.save_status_url(str(sender.stringValue()))
+        if err is None:
             return
-        err = self.status_page.set_url(text)
         if err:
-            sender.setStringValue_(self.status_page.url())       # not saved: the saved address again
+            sender.setStringValue_(self.ctl.status_page_url())   # not saved: the saved address again
             self.alert("Not saved", err)
         self.update_status()
 
@@ -1128,85 +996,38 @@ class Tray(NSObject):
         try:
             rows = [(str(h.stringValue()), method_of(m.indexOfSelectedItem()), int(str(p.stringValue()) or 443))
                     for h, m, p in ui["rows"]]
-            chk = quality.from_form(ui["en"].state() == NSOnState, int(str(ui["every"].stringValue()) or 10),
-                                    int(str(ui["over"].stringValue()) or 1), rows, is_host)
+            enabled = ui["en"].state() == NSOnState
+            every, over = int(str(ui["every"].stringValue()) or 10), int(str(ui["over"].stringValue()) or 1)
         except ValueError as e:
-            msg = str(e) if "Address" in str(e) else "Seconds, minutes and ports must be whole numbers."
-            self.alert("Not saved", msg)
-            return
-        self.admin(["set", "connectionCheck", json.dumps(chk.to_json())])
+            err = str(e)
+        else:
+            err = self.ctl.save_check(enabled, every, over, rows)
+        if err:
+            self.alert("Not saved",
+                       err if "Address" in err else "Seconds, minutes and ports must be whole numbers.")
 
     # ---- actions
-    @objc.python_method
-    def run_action(self, action, arg=None, before=None):
-        if action == "on":
-            self.expect.start("connect")
-        elif action == "reconnect":
-            if self.facts.kind == "hiddify":
-                notify("VeroScudo", traymodel.RECONNECT_HIDDIFY)
-                return
-            if not self.store.armed:
-                notify("VeroScudo", "The VPN is off - use Turn VPN on.")
-                return
-            self.expect.start("reconnect")
-            notify("VeroScudo - reconnecting", f"Traffic is blocked while '{self.facts.name}' reconnects; it flows again once "
-                   "the tunnel is back.")
-        elif action == "use":
-            self.expect.start("switch")
-            notify("VeroScudo", f"Switching to '{arg}'" + (" - traffic stays blocked until it is connected" if self.store.armed else ""))
-        # `before`: other VPNs to disconnect first (as you, through scutil); a failure stops before the turn on
-        self.runner.start(action, *(before or []), traymodel.action_argv(action, arg))
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(1.5, self, "tick:", None, False)
-
-    @objc.python_method
-    def request_on(self):
-        """Turn VPN on: first asks when another VPN is connected (it would be blocked silently otherwise)."""
-        if not self.cfg:
-            self.run_action("on")
-            return
-        foreign = self.find_foreign(force=True)
-        if not foreign:
-            self.run_action("on")
-            return
-        answer = self.choose_foreign(traymodel.foreign_prompt(foreign, self.cfg.profile))
-        self.foreign_shown = {x.iface for x in foreign}            # just seen in the question: no notice for them again
-        if answer == "disconnect":
-            self.run_action("on", before=[nm.down_argv(x.connection) for x in foreign if x.connection])
-        elif answer == "anyway":
-            self.run_action("on")
-
-    @objc.python_method
-    def toggle_on_off(self):
-        if traymodel.offers_off(self.view, self.facts.kind):
-            self.run_action("off")
-        else:
-            self.request_on()
-
-    @objc.python_method
-    def admin(self, args):
-        self.runner.start("admin:" + args[0], traymodel.admin_argv(args))
-
     def turnOn_(self, _):
-        self.request_on()
+        self.ctl.request_on()
 
     def turnOff_(self, _):
-        self.run_action("off")
+        self.ctl.act("off")
 
     def reconnect_(self, _):
-        self.run_action("reconnect")
+        self.ctl.act("reconnect")
 
     def useProfile_(self, sender):
         name = str(sender.representedObject())
-        if self.cfg and name != self.cfg.profile:
-            self.run_action("use", name)
+        if self.ctl.cfg and name != self.ctl.cfg.profile:
+            self.ctl.act("use", name)
 
     def toggleAwake_(self, _):
-        want = not self.awake.active
-        held = self.awake.set(want)
+        want = not self.ctl.awake.active
+        held = self.ctl.awake.set(want)
         keepawake.save_pref(held)
         if want and not held:
             notify("Keep awake is not available", "No sleep inhibitor found (caffeinate).")
-        self.refresh()
+        self.ctl.refresh()
 
     def openLog_(self, _):
         if traymodel.read_events(n=1) is None:
@@ -1215,37 +1036,7 @@ class Tray(NSObject):
         _popen(["open", "-a", "Console", str(traymodel.LOG)])
 
     def checkUpdates_(self, _):
-        self.check_updates(True)
-        if self.update_url and update.is_release_url(self.update_url):
-            _popen(["open", self.update_url])
-        elif self.store.armed and not self.facts.up:
-            notify("VeroScudo", "Traffic is blocked right now - check again once the VPN is connected.")
-        else:
-            notify("VeroScudo", f"You have the latest version ({__version__}).")
-
-    @objc.python_method
-    def check_updates(self, force):
-        if not force and (not self.cfg or not self.cfg.update_check):
-            return
-        if self.store.armed and not self.facts.up:          # blocked: nothing may leave the machine
-            return
-        f = keepawake.pref_file().parent / "update.json"
-        info = traymodel.UpdateInfo()
-        try:
-            info.notified = str(json.loads(f.read_text()).get("notified", ""))
-        except (OSError, ValueError, AttributeError):
-            pass
-        rel = update.fetch_latest()
-        text, show = traymodel.update_notice(info, rel.tag if rel else None, bool(rel and update.is_newer(rel.tag)))
-        self.update_url = rel.url if rel and text != "Check for updates" else ""
-        self.upd_item.setTitle_(text)
-        if show:
-            notify(f"VeroScudo {rel.tag} is available", f"You run {__version__}. Open the menu-bar menu to see the release.")
-        try:
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps({"checked": info.checked, "notified": info.notified}))
-        except OSError:
-            pass
+        self.ctl.update_clicked()
 
     def about_(self, _):
         r = self.alert(f"VeroScudo {__version__}",
@@ -1257,10 +1048,10 @@ class Tray(NSObject):
                 "Uninstall VeroScudo?", "Removes the guard, the kill-switch, this menu-bar app and the sudo rule. Your VPN "
                 "services stay as they are; a connected VPN stays connected. config.json is kept for a later install.",
                 "Uninstall"):
-            self.admin(["uninstall"])
+            self.ctl.admin(["uninstall"])
 
     def quit_(self, _):
-        self.awake.release()
+        self.ctl.awake.release()
         NSApplication.sharedApplication().terminate_(None)
 
     # ---- dialogs

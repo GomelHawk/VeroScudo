@@ -22,7 +22,7 @@ from . import quality
 
 KEEP_DAYS = 8                                    # 7 full days + today
 BUCKET_MINUTES = 10
-_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 
 
 def format_line(minute: int, pid: str, name: str, sent: int = 0, lost: int = 0, down: bool = False, slow: int = 0) -> str:

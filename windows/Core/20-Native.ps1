@@ -2,6 +2,25 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
 # ---------------------------------------------------------------- native helpers (WFP, RasDial, LUIDs)
+function Invoke-VeroWithPrivateTemp {
+    <# Runs $Work with TEMP/TMP pointing at a folder only administrators and SYSTEM can use, when this process is elevated:
+       the C# compiler writes the source it compiles to the temp folder, and an elevated process shares the signed-in
+       user's - where any program of that user could swap the file before it is compiled. The folder is made with its
+       protection (never open for a moment), under ProgramData with a name nobody can have prepared, and removed again
+       when it is empty. Not elevated: $Work runs as it is. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][scriptblock]$Work)
+    if (-not (Test-VeroElevated)) { return (& $Work) }
+    $dir = Join-Path (Get-VeroSystemDir ProgramData) ('VeroScudo-build-' + [guid]::NewGuid().ToString('N'))
+    $sd = New-Object System.Security.AccessControl.DirectorySecurity
+    $sd.SetSecurityDescriptorSddlForm('O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+    [void][IO.Directory]::CreateDirectory($dir, $sd)
+    $oldTemp = $env:TEMP; $oldTmp = $env:TMP
+    try { $env:TEMP = $dir; $env:TMP = $dir; & $Work }
+    finally {
+        $env:TEMP = $oldTemp; $env:TMP = $oldTmp
+        try { [IO.Directory]::Delete($dir, $false) } catch { Write-Verbose "build folder kept (not empty): $dir" }   # this folder only, never its content
+    }
+}
 function Import-VeroNative {
     if ('VeroScudo.Wfp' -as [type]) { return }
     $dll = Join-Path $script:ModuleRoot 'VeroScudo.Native.dll'
@@ -11,7 +30,12 @@ function Import-VeroNative {
         # the same way the tray's own Add-Type helpers load. It also leaves the file unlocked, so a reinstall can replace it.
         # The file sits in Program Files (administrators only), so its bytes are as trusted as the file was.
         if (Test-Path $dll) { [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($dll)) }
-        else { Add-Type -TypeDefinition (Get-Content (Join-Path $script:ModuleRoot 'VeroScudo.Native.cs') -Raw) -Language CSharp }
+        else {
+            # no compiled helper (the installer's first self-test, a test run): compiled from source here. The compiler
+            # writes its working files to the temp folder - for an elevated process that must not be the user's own
+            $src = Get-Content (Join-Path $script:ModuleRoot 'VeroScudo.Native.cs') -Raw
+            Invoke-VeroWithPrivateTemp { Add-Type -TypeDefinition $src -Language CSharp }   # $src: this function's, seen by the block
+        }
         if (-not ('VeroScudo.Wfp' -as [type])) { throw "native helper loaded, but its types are missing: $dll" }
     } catch { $script:NativeLoadFailed = $true; throw }                    # see "the native helper blocked by Windows"
 }
@@ -37,8 +61,9 @@ function Set-VeroNativeBlocked {
     $count = if ($FromTask) { $(if ($old) { [int]$old.Count } else { 0 }) } elseif ($old) { [int]$old.Count + 1 } else { 1 }
     $wait = if ($FromTask) { 0 } else { Get-VeroNativeRetrySeconds $count }
     $now = Get-Date
-    @{ First = $(if ($old) { [string]$old.First } else { $now.ToString('o') }); Last = $now.ToString('o'); Count = $count
-       Next = $(if ($FromTask -and $old) { [string]$old.Next } else { $now.AddSeconds($wait).ToString('o') }); Message = $Message } | ConvertTo-Json | Set-Content (Get-VeroPath).NativeBlocked
+    $rec = @{ First = $(if ($old) { [string]$old.First } else { $now.ToString('o') }); Last = $now.ToString('o'); Count = $count
+       Next = $(if ($FromTask -and $old) { [string]$old.Next } else { $now.AddSeconds($wait).ToString('o') }); Message = $Message }
+    Write-VeroStateFile -Path (Get-VeroPath).NativeBlocked -Text ($rec | ConvertTo-Json)
     Write-VeroLog ("ERROR: Windows blocked VeroScudo's native helper (Smart App Control or App Control: {0}). The kill-switch filters stay in place; self-repair and automatic redial are paused - next try at {1:HH:mm} (failure {2} in a row)." -f $Message, $now.AddSeconds($wait), $count) $Action
 }
 function Clear-VeroNativeBlocked {

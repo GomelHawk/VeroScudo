@@ -83,12 +83,13 @@ function Get-VeroVmAclState {
     $p = (Get-VeroPath).VmAcl
     if (-not (Test-Path -LiteralPath $p)) { return @() }
     # ConvertFrom-Json (PowerShell 5.1) emits a JSON array as ONE object: assign it first, then enumerate the variable
-    try { $j = [IO.File]::ReadAllText($p) | ConvertFrom-Json; @($j | ForEach-Object { $_ } | Where-Object { $_ }) } catch { @() }
+    try { $j = [IO.File]::ReadAllText($p) | ConvertFrom-Json; @($j | ForEach-Object { $_ } | Where-Object { $_ }) }
+    catch { Write-VeroLog "WARNING: the record of the Hyper-V port rules VeroScudo added cannot be read ($($_.Exception.Message)) - rules it added earlier may stay on the VMs' adapters (remove them with Remove-VMNetworkAdapterAcl)" 'core'; @() }
 }
 function Save-VeroVmAclState([object[]]$Entries) {
     $p = (Get-VeroPath).VmAcl
     if (@($Entries).Count -eq 0) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }; return }
-    [IO.File]::WriteAllText($p, (ConvertTo-Json -InputObject @($Entries) -Depth 3))
+    Write-VeroStateFile -Path $p -Text (ConvertTo-Json -InputObject @($Entries) -Depth 3)   # whole or not at all: it records the rules to remove later
 }
 
 function Set-VeroVmBlock {
@@ -210,8 +211,9 @@ function Invoke-VeroActionNetDown {
         if (-not (Test-VeroArmed)) { return }
         $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]0 }
         if (-not (Get-VeroNetSuspect)) { Write-VeroLog 'network disconnected - Hyper-V VMs blocked until the tunnel is proven to work again' $a }
-        [IO.File]::WriteAllText((Get-VeroPath).NetSuspect, (@{ Time = (Get-Date).ToString('o'); Tunnel = [string]$tun } | ConvertTo-Json))
-        $null = Set-VeroVmBlock -Block $true -Action $a
+        $null = Set-VeroVmBlock -Block $true -Action $a                    # first the block, then the note of why
+        try { Write-VeroStateFile -Path (Get-VeroPath).NetSuspect -Text (@{ Time = (Get-Date).ToString('o'); Tunnel = [string]$tun } | ConvertTo-Json) }
+        catch { Write-VeroLog "WARNING: the note of the network drop could not be written ($($_.Exception.Message))" $a }
         $script:AclBlocked = $true
     } -Arguments @($Config, $Action)
 }

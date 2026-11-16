@@ -12,8 +12,10 @@ PURGE=0
 launchctl bootout system/com.gomelhawk.veroscudo 2>/dev/null
 rm -f /Library/LaunchDaemons/com.gomelhawk.veroscudo.plist /etc/sudoers.d/veroscudo
 pfctl -a com.apple/250.VeroScudo -F all 2>/dev/null      # the kill-switch: the network is normal from here on
-[ -f /var/run/veroscudo-pf.token ] && pfctl -X "$(cat /var/run/veroscudo-pf.token)" 2>/dev/null
-rm -f /var/run/veroscudo-pf.token /var/run/veroscudo/*.lock /var/run/veroscudo/*.marker
+for t in /var/run/veroscudo/pf.token /var/run/veroscudo-pf.token; do      # the second: where versions up to 1.3 kept it
+  [ -f "$t" ] && pfctl -X "$(cat "$t")" 2>/dev/null
+done
+rm -f /var/run/veroscudo-pf.token /var/run/veroscudo/pf.token /var/run/veroscudo/*.lock /var/run/veroscudo/*.marker /var/run/veroscudo/off.at
 rmdir /var/run/veroscudo 2>/dev/null
 rm -f /var/lib/veroscudo/armed.flag                       # a later install must not start armed
 

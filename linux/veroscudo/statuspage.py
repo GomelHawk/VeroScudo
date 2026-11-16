@@ -15,12 +15,11 @@ from __future__ import annotations
 import json
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from . import keepawake
+from .netutil import fetch_https
 
 PREF_ON, PREF_URL = "statusPage", "statusPageUrl"
 DEFAULT_URL = "https://status.claude.com/api/v2/status.json"
@@ -28,7 +27,8 @@ OLD_DEFAULT = "https://status.anthropic.com/api/v2/status.json"   # redirects to
 RETRY_AFTER = (10.0, 30.0)  # a failed fetch after a connect: tried again after these seconds
 MAX_URL = 300
 INTERVAL = 300.0            # seconds between two fetches while on
-TIMEOUT = 6.0
+TIMEOUT = 6.0               # one request
+GIVE_UP = 3 * TIMEOUT       # a fetch that has not ended by then is reported as failed
 BAD_URL = "The status page must be an https:// address"
 ABOUT = "Atlassian Statuspage format (…/api/v2/status.json) - Claude's by default."
 LABEL = "Show a service status page in the status window"
@@ -37,7 +37,7 @@ TONES = {"none": "good", "minor": "warn", "major": "bad", "critical": "bad"}
 
 def url_error(url: str) -> str:
     """'' for an address that may be saved, else BAD_URL: https only, a host, at most MAX_URL characters. Pure."""
-    u = (url or "").strip()
+    u = url or ""                                   # as it is: white space anywhere, also at an end, is refused
     if not u or len(u) > MAX_URL or any(c.isspace() for c in u):
         return BAD_URL
     try:
@@ -108,26 +108,15 @@ def service_view(result: dict | None, url: str, checked: float | None = None, ch
 
 
 def badge_colours(tone: str, dark: bool) -> tuple[str | None, str | None]:
-    """The badge's (background, text) colours: the tone's colour (traymodel.tone_colour) with dark text on the bright green and
-    amber of a dark theme, white on red and on the deeper colours of a light theme (dark text on them is hard to read);
-    (None, None) for "?" - the exit badge's neutral background and the theme's text colour. Pure."""
-    del tone, dark                                        # secondary information: always the neutral badge (as Windows)
+    """The badge's (background, text) colours: always (None, None) - the neutral background of the exit badge and the
+    theme's text colour, whatever the tone and the theme (the service status is secondary information; Windows shows
+    it the same way). The trays call it for each badge they draw. Pure."""
+    del tone, dark
     return None, None
 
 
-class _HttpsOnly(urllib.request.HTTPRedirectHandler):
-    """A redirect may lead to another https address only."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if url_error(newurl):
-            raise urllib.error.HTTPError(newurl, code, "redirected to a non-https address", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
 def _get(url: str, timeout: float) -> bytes:
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "VeroScudo"})
-    with urllib.request.build_opener(_HttpsOnly).open(req, timeout=timeout) as r:      # https only (url_error)
-        return r.read(262144)
+    return fetch_https(url, timeout, 262144)                     # https only, no redirect followed, at most 256 KB
 
 
 def fetch(url: str, get=_get, timeout: float = TIMEOUT) -> dict:
@@ -226,8 +215,8 @@ class StatusFetch:
         now = time.time() if now is None else now
         job = self._job
         if job is None or job["result"] is None:
-            if job is not None and now - job["started"] > 3 * TIMEOUT:
-                self._finish(job, {"error": f"no answer within {TIMEOUT:g} s"}, now)
+            if job is not None and now - job["started"] > GIVE_UP:
+                self._finish(job, {"error": f"no answer within {GIVE_UP:g} s"}, now)
                 return True
             return False
         self._finish(job, job["result"], now)

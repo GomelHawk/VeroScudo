@@ -7,7 +7,7 @@
 # (management, config, log, proxies). Anything else - also an option spelled with quotes or escapes - is refused.
 # 'setenv' is allowed only for the client-compatibility names below: OpenVPN reads 'setenv opt <option>' as that option
 # (after removing quotes and escapes from "opt"), which would carry any option past this list.
-$script:OvpnSetenv = '^(FORWARD_COMPATIBLE|CLIENT_CERT|GENERIC_CONFIG|PUSH_PEER_INFO|UV_[A-Z0-9_]{1,60})$'
+$script:OvpnSetenv = '^(FORWARD_COMPATIBLE|CLIENT_CERT|GENERIC_CONFIG|PUSH_PEER_INFO|UV_[A-Z0-9_]{1,60})\z'
 $script:OvpnLineMax = 255                                                   # OpenVPN's own line buffer (OPTION_LINE_SIZE 256)
 $script:OvpnAllowed = @('client', 'tls-client', 'pull', 'dev', 'dev-type', 'proto', 'remote', 'remote-random', 'remote-random-hostname',
     'resolv-retry', 'nobind', 'persist-key', 'persist-tun', 'persist-remote-ip', 'port', 'rport', 'lport', 'float',
@@ -22,7 +22,7 @@ $script:OvpnAllowed = @('client', 'tls-client', 'pull', 'dev', 'dev-type', 'prot
     'dhcp-renew', 'dhcp-release', 'windows-driver', 'disable-dco', 'topology', 'tun-ipv6', 'ifconfig', 'ifconfig-ipv6', 'ifconfig-nowarn',
     'ping', 'ping-restart', 'ping-exit', 'ping-timer-rem', 'keepalive', 'inactive', 'explicit-exit-notify', 'connect-retry',
     'connect-retry-max', 'connect-timeout', 'server-poll-timeout', 'sndbuf', 'rcvbuf', 'fragment', 'mssfix', 'tun-mtu', 'tun-mtu-extra',
-    'link-mtu', 'mtu-disc', 'push-peer-info', 'setenv', 'key-method', 'auth-nocache', 'socket-flags', 'bind', 'script-security',
+    'link-mtu', 'mtu-disc', 'push-peer-info', 'setenv', 'key-method', 'socket-flags', 'bind', 'script-security',
     'remap-usr1', 'single-session', 'tls-exit', 'nice', 'fast-io', 'txqueuelen', 'mark', 'opt-verify', 'auth-token')
 $script:OvpnInline = @('ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2', 'extra-certs', 'crl-verify', 'secret', 'dh', 'pkcs12', 'peer-fingerprint')
 
@@ -38,9 +38,9 @@ function Test-VeroOpenVpnConf {
     $out = New-Object System.Text.StringBuilder
     $g = @{ Proto = 'udp'; Port = 1194 }                                    # global defaults
     $c = $null                                                              # the current <connection> block's own proto/port
-    $auth = $false; $sc = $false; $redirect = $false; $dns = $false; $pull = $false
+    $auth = $false; $sc = $false; $redirect = $false; $dns = $false; $pull = $false; $serverCheck = $false
     $inBlock = $null
-    $toPort = { param($v) if ($v -match '^\d{1,5}$' -and [int]$v -ge 1 -and [int]$v -le 65535) { [int]$v } else { -1 } }
+    $toPort = { param($v) if ($v -match '^\d{1,5}\z' -and [int]$v -ge 1 -and [int]$v -le 65535) { [int]$v } else { -1 } }
     if ($Text.IndexOf([char]0) -ge 0) { $errors.Add('the file contains NUL characters - not a text config') }
     foreach ($raw in ($Text -split "`r?`n")) {
         $line = $raw.Trim()
@@ -74,7 +74,7 @@ function Test-VeroOpenVpnConf {
         $arg = @($tok | Select-Object -Skip 1)
         if ($script:OvpnAllowed -notcontains $d) { $errors.Add("'$d' is not allowed: VeroScudo runs OpenVPN as administrator and accepts only known client options (remove the line)"); continue }
         if ($d -eq 'script-security' -and -not ($arg.Count -gt 0 -and $arg[0] -in '0', '1')) { $errors.Add("'script-security $($arg -join ' ')' would let the config run programs as administrator (remove the line)"); continue }
-        if ($d -eq 'setenv' -and -not ($arg.Count -ge 1 -and $arg.Count -le 2 -and $arg[0] -cmatch $script:OvpnSetenv -and ($arg.Count -lt 2 -or $arg[1] -cmatch '^[A-Za-z0-9_.:-]{1,64}$'))) {
+        if ($d -eq 'setenv' -and -not ($arg.Count -ge 1 -and $arg.Count -le 2 -and $arg[0] -cmatch $script:OvpnSetenv -and ($arg.Count -lt 2 -or $arg[1] -cmatch '^[A-Za-z0-9_.:-]{1,64}\z'))) {
             $errors.Add("'setenv $($arg -join ' ')' is not allowed: only FORWARD_COMPATIBLE, CLIENT_CERT, GENERIC_CONFIG, PUSH_PEER_INFO and UV_* with a plain value ('setenv opt' would hide any option - remove the line)"); continue
         }
         $skip = $false                                                      # NB: 'continue' inside a switch would not skip this line
@@ -99,12 +99,17 @@ function Test-VeroOpenVpnConf {
             }
             'static-challenge' { $sc = $true; $warn.Add('This config asks for a one-time code (static-challenge). Every connect, also an automatic redial, waits for you to type the code in the tray.') }
             'redirect-gateway' { $redirect = $true }
+            { $_ -in 'remote-cert-tls', 'verify-x509-name', 'peer-fingerprint', 'remote-cert-eku', 'remote-cert-ku', 'ns-cert-type' } { $serverCheck = $true }
+            'cipher' { if ($arg.Count -and $arg[0] -eq 'none') { $warn.Add("'cipher none': this config turns encryption of the tunnel off.") } }
+            'auth' { if ($arg.Count -and $arg[0] -eq 'none') { $warn.Add("'auth none': this config turns packet authentication off.") } }
             'pull' { $pull = $true }
             'client' { $pull = $true }
             'dhcp-option' { if ($arg.Count -ge 2 -and $arg[0] -eq 'DNS') { $dns = $true } }
         }
         if ($skip) { continue }
-        if ($script:OvpnInline -contains $d -and $arg.Count -ge 1 -and $arg[0] -ne '[inline]') {
+        # two options of that list also take a plain value instead of a file: a certificate fingerprint, and "dh none"
+        $isValue = ($d -eq 'peer-fingerprint' -and $arg.Count -eq 1 -and $arg[0] -cmatch '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31}\z') -or ($d -eq 'dh' -and $arg.Count -eq 1 -and $arg[0] -ceq 'none')
+        if ($script:OvpnInline -contains $d -and $arg.Count -ge 1 -and $arg[0] -ne '[inline]' -and -not $isValue) {
             if ($d -eq 'crl-verify' -and $arg.Count -ge 2 -and $arg[1] -eq 'dir') { $errors.Add("'crl-verify ... dir' cannot be imported - use a CRL file"); continue }
             $file = $arg[0]
             $full = if ([IO.Path]::IsPathRooted($file) -or -not $BaseDir) { $file } else { [IO.Path]::Combine($BaseDir, $file) }   # no drive check: pure
@@ -130,6 +135,7 @@ function Test-VeroOpenVpnConf {
         if ($pull) { $warn.Add("No 'redirect-gateway' in the file: fine if the server pushes it. If it does not (split tunnel), everything outside the tunnel stays blocked while VeroScudo is on.") }
         else { $warn.Add("No 'redirect-gateway': only the tunnel's own routes work; everything else stays blocked while VeroScudo is on.") }
     }
+    if (-not $serverCheck) { $warn.Add("Nothing in this config says which server certificate to accept (no 'remote-cert-tls server', 'verify-x509-name' or 'peer-fingerprint'): any certificate of the same authority would pass as the server. Ask your provider for a config that has one of them.") }
     if (-not $dns -and -not $pull) { $warn.Add("No DNS server for the tunnel ('dhcp-option DNS'): names may not resolve while VeroScudo blocks the local network's DNS.") }
     [pscustomobject]@{ Errors = @($errors); Warnings = @($warn); Remotes = $resolved; Auth = $auth; StaticChallenge = $sc; Text = $out.ToString() }
 }
@@ -243,7 +249,22 @@ function Get-VeroOpenVpnExe {
 }
 
 function Get-VeroOpenVpnVersion([string]$Exe) {
-    try { $v = (& $Exe --version 2>&1 | Select-Object -First 1) -join ''; if ($v -match 'OpenVPN (\d+\.\d+(\.\d+)?)') { return [version]$Matches[1] } } catch { Write-Verbose 'openvpn --version failed' }
+    # asked with the system's environment too (OpenSSL in it reads its configuration before any option), and never waited
+    # for longer than 10 s
+    try {
+        $si = New-Object System.Diagnostics.ProcessStartInfo $Exe
+        $si.Arguments = '--version'; $si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.RedirectStandardOutput = $true
+        $si.WorkingDirectory = Get-VeroSystemDir System
+        $si.EnvironmentVariables.Clear()
+        $e = Get-VeroCleanEnvironment
+        foreach ($k in $e.Keys) { $si.EnvironmentVariables[[string]$k] = [string]$e[$k] }
+        $pr = [System.Diagnostics.Process]::Start($si)
+        try {
+            $line = $pr.StandardOutput.ReadLineAsync()                     # not ReadLine: a program that prints nothing would be waited for
+            $v = if ($line.Wait(10000)) { [string]$line.Result } else { '' }
+            if (-not $pr.WaitForExit(2000)) { try { $pr.Kill() } catch { Write-Verbose 'openvpn --version already ended' } }
+        } finally { try { if (-not $pr.HasExited) { $pr.Kill() } } catch { Write-Verbose 'openvpn --version already ended' }; $pr.Dispose() }
+        if ($v -match 'OpenVPN (\d+\.\d+(\.\d+)?)') { return [version]$Matches[1] } } catch { Write-Verbose 'openvpn --version failed' }
     [version]'0.0'
 }
 
@@ -307,9 +328,7 @@ function Set-VeroOpenVpnStatus([string]$ProfileName, [hashtable]$Fields) {
     if ($old) { foreach ($k in @($cur.Keys)) { if ($old.PSObject.Properties[$k]) { $cur[$k] = $old.$k } } }
     foreach ($k in $Fields.Keys) { $cur[$k] = $Fields[$k] }
     $cur.Time = (Get-Date).ToString('o')
-    $tmp = "$($p.OvpnStatus).new"
-    $cur | ConvertTo-Json | Set-Content $tmp
-    Move-Item $tmp $p.OvpnStatus -Force
+    Write-VeroStateFile -Path $p.OvpnStatus -Text ($cur | ConvertTo-Json)
 }
 
 function Get-VeroOpenVpnNic([string]$ProfileName) {
@@ -336,7 +355,7 @@ function Invoke-VeroOpenVpnDial {
         Remove-Item $p.OvpnStop -Force -ErrorAction SilentlyContinue
         Set-VeroOpenVpnStatus $Config.Profile @{ State = 'STARTING'; Reason = ''; LocalIp = ''; Challenge = '' }   # not the last run's result
         Write-VeroLog "starting OpenVPN for '$($Config.Profile)'" $Action
-        & $script:Schtasks /run /tn '\VeroScudo\OpenVPN' 2>&1 | Out-Null
+        $null = Start-VeroTask 'OpenVPN'
     }
     $t = Get-Date
     while (((Get-Date) - $t).TotalSeconds -lt 30) {
@@ -353,7 +372,7 @@ function Stop-VeroOpenVpn {
        when it really is that openvpn.exe. #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     $p = Get-VeroPath -VpnProfile $ProfileName
-    Set-Content -Path $p.OvpnStop -Value (Get-Date).ToString('o')
+    Write-VeroStateFile -Path $p.OvpnStop -Text (Get-Date).ToString('o')
     $t = Get-Date
     while ((Test-VeroOpenVpnRunnerAlive) -and ((Get-Date) - $t).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500 }   # gone, so a redial starts a fresh one
     Stop-VeroOpenVpnOrphan -ProfileName $ProfileName
@@ -436,13 +455,17 @@ function Update-VeroMgmtQueue {
     $Queue.InFlight
 }
 
-function Test-VeroPortOwner {
-    <# True when the process listens on that loopback TCP port. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][int]$ProcessId)
+function Test-VeroPeerProcess {
+    <# True when the other end of this connected loopback TCP socket belongs to that process: Windows lists the accepted
+       connection (its local port = our remote port, its remote port = our local port) with the process that owns it.
+       This connection, not "who listens on the port": two programs can share a port, and the one that answered is what
+       counts. Not exactly one such connection, or another owner: $false. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Socket, [Parameter(Mandatory)][int]$ProcessId)
     try {
-        $own = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | ForEach-Object { [int]$_.OwningProcess })
+        $l = $Socket.LocalEndPoint; $r = $Socket.RemoteEndPoint
+        $peer = @(Get-NetTCPConnection -LocalPort $r.Port -RemotePort $l.Port -State Established -ErrorAction Stop)
     } catch { return $false }
-    ($own.Count -gt 0) -and (@($own | Where-Object { $_ -ne $ProcessId }).Count -eq 0)
+    ($peer.Count -eq 1) -and ([int]$peer[0].OwningProcess -eq $ProcessId)
 }
 
 function Connect-VeroMgmt([int]$Port, [string]$Password, $Process) {
@@ -459,9 +482,9 @@ function Connect-VeroMgmt([int]$Port, [string]$Password, $Process) {
                 if ($m.Pending.ToString() -match 'ENTER PASSWORD:') {
                     # only to the OpenVPN this runner started: the port was free a moment ago, and whoever listens on it
                     # is sent the management password and then the VPN password
-                    if (-not (Test-VeroPortOwner -Port $Port -ProcessId $Process.Id)) {
+                    if (-not (Test-VeroPeerProcess -Socket $c.Client -ProcessId $Process.Id)) {
                         $c.Close()
-                        Write-VeroLog "ERROR: port $Port is not held by the OpenVPN that was just started - nothing sent, starting over" 'openvpn'
+                        Write-VeroLog "ERROR: port $Port was answered by another program than the OpenVPN that was just started - nothing sent, starting over" 'openvpn'
                         return $null
                     }
                     $m.Pending.Length = 0; Send-VeroMgmt $m $Password; return $m
@@ -506,7 +529,9 @@ function Invoke-VeroOpenVpnSession {
     $argLine = Get-VeroOpenVpnArgs -ConfigPath $p.OvpnConfig -Port $port -PwFile $p.OvpnPw -LogPath $p.OvpnLog -Version (Get-VeroOpenVpnVersion $exe) -Dco $Config.Dco -Auth $Config.Auth -DevNode $dev
     # the previous run's log is kept (OpenVPN rewrites its log on every start - a failed start's log was lost that way)
     if (Test-Path $p.OvpnLog) { Move-Item -LiteralPath $p.OvpnLog -Destination ($p.OvpnLog -replace '\.log$', '.prev.log') -Force -ErrorAction SilentlyContinue }
-    $proc = Start-Process -FilePath $exe -ArgumentList $argLine -WindowStyle Hidden -PassThru
+    # with the system's environment, not the signed-in user's: OpenSSL in openvpn.exe loads what OPENSSL_CONF / OPENSSL_MODULES
+    # name, and this process runs as administrator (Get-VeroCleanEnvironment)
+    $proc = Start-VeroCleanProcess -FilePath $exe -ArgumentList $argLine
     Set-VeroOpenVpnStatus $name @{ State = 'STARTING'; Reason = ''; LocalIp = ''; RunnerPid = $PID; OvpnPid = $proc.Id; Challenge = '' }
     $result = 'exited'; $reason = ''; $m = $null; $stopping = $null; $deadline = $null
     # what OpenVPN said last (never what VeroScudo sent - that holds the credentials): logged when a start makes no progress
@@ -601,15 +626,17 @@ function Wait-VeroOtp {
        Waits up to 2 minutes; $null when no code came (or VeroScudo was turned off meanwhile). #>
     [CmdletBinding()] param([string]$ProfileName, [string]$Challenge, [string]$Action = 'openvpn')
     $p = Get-VeroPath -VpnProfile $ProfileName
-    Remove-Item $p.Otp -Force -ErrorAction SilentlyContinue
+    $take = 'otp-' + (Get-VeroSafeName $ProfileName)
+    $null = Read-VeroUserInput -Path $p.Otp -Name $take                      # a code left from an earlier question is not this one's answer
     Set-VeroOpenVpnStatus $ProfileName @{ State = 'NEED_OTP'; Challenge = $Challenge }
     Write-VeroLog "OpenVPN '$ProfileName' asks for a one-time code - type it in the tray" $Action
     $t = Get-Date
     while (((Get-Date) - $t).TotalSeconds -lt 120) {
-        if (Test-Path $p.Otp) {
-            $code = (Get-Content $p.Otp -Raw -ErrorAction SilentlyContinue); Remove-Item $p.Otp -Force -ErrorAction SilentlyContinue
+        # read, never deleted here: the file is in the user's folder (the tray removes its own file)
+        $code = Read-VeroUserInput -Path $p.Otp -Name $take
+        if ($code) {
             Set-VeroOpenVpnStatus $ProfileName @{ State = 'AUTH'; Challenge = '' }
-            if ($code) { return $code.Trim() }
+            return $code
         }
         if (Get-VeroOpenVpnStopReason $ProfileName) { break }
         Start-Sleep -Milliseconds 500

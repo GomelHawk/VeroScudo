@@ -69,11 +69,24 @@ slow D-Bus or a laptop that was asleep. Changing either value needs a live test 
 
 ## Profile types (Windows)
 
-Every profile has a `type`; the guard, the filters, the watchdog and the tray are shared, and each type supplies five
-things: how to tell the tunnel is up, its adapter, its server endpoints, how to dial and how to hang up. In the code
+Every profile has a `type`; the guard, the filters, the watchdog and the tray are shared, and each type supplies its own
+answers: how to tell the tunnel is up, its adapter, its server endpoints, how to dial and how to hang up, and a few more. In the code
 that is one table, `$script:TypeHandler` in `windows/Core/95-TypeHandlers.ps1` (`Get-VeroTypeHandler <type>`), with one
-entry per type and one scriptblock per operation; the shared code calls `& $h.Op args` and never asks "which type is
-this" itself. A new type is a new entry in that table plus its own functions.
+entry per type and one scriptblock or flag per question; the guard (arm, redial, watchdog, Off, connection check) calls
+`& $h.Op args` or reads `$h.Flag` instead of asking "which type is this" (what is left of that question: the RAS event
+handling, which is RAS-only code, the conflict list, and the tray's profile editor). A new type is a new entry in that table
+plus its own functions. (The tray's profile editor still has one form section per type.)
+
+**One way in, one way out.** Every path into ARMED - On, a tunnel connected by hand, the WireGuard and Hiddify watches -
+goes through `Enter-VeroArmed` (server lookup while nothing is blocked, flag, filters); every path out through
+`Exit-VeroArmed` (flag, then filters). State files that another process reads are written whole
+(`Write-VeroStateFile`: a temporary file of the writing process, then put in the old one's place in one step; UTF-8,
+so a profile name reads back exactly whatever letters it has). What the unelevated tray leaves for the guard in the
+user's own folder - a profile to switch to, a one-time code - is only ever read there (`Read-VeroUserInput`): the
+elevated guard deletes and writes nothing in a folder the user controls, and notes "taken" in the state folder.
+(Not through that writer: the log and the per-day statistics, which are appended to; the two flag files, of which only
+their existence counts; and, as the last way when a reader holds a state file open for all four tries, a write in
+place.)
 
 | | `ras` (default, stable) | `openvpn` (beta) | `wireguard` (beta) | `hiddify` (beta, kill-switch only) |
 |---|---|---|---|---|
@@ -93,14 +106,16 @@ comment so a restarted service reloads the rules) - the Windows program permit's
 refuses the rule, and the guard falls back to the server list alone (logged once). Besides that, and on macOS only, the
 permit is the servers of Hiddify's **live** sing-box config (`configPath` -> `current-config.json`):
 every proxy outbound's `server:server_port` for TCP and UDP plus its direct DNS servers, host names resolved; read every pass
-with limits (64 endpoints, 2 MB, a regular file owned by root or that user, no private/loopback/link-local/multicast
+with limits (64 servers - at most 256 addresses once their names are looked up -, 2 MB, a regular file owned by root or that user, no private/loopback/link-local/multicast
 addresses and none with an IPv6 zone; a broken file keeps the last good set). The guard (root) reads a user-owned file here: that user can already turn
-VeroScudo off through the passwordless rule, so this opens nothing new. Up = a Hiddify process and an up tun/utun device
+VeroScudo off through the passwordless rule, so this opens nothing new. The Linux service itself is confined
+(`ProtectHome`): it reads Hiddify 5's own root-owned config; a config under a home folder is read by the `veroscudo`
+command (On, Reconnect, a switch), and the service goes on with the servers that command saved last. Up = a Hiddify process and an up tun/utun device
 holding the tun inbound's address. Profile entry: Windows `{"profile":"Hiddify","type":"hiddify"}`, Linux/macOS
 `{"profile":"Hiddify","vpnType":"hiddify","configPath":"..."}`. A Hiddify tunnel that is not the active profile is shown as
 *Hiddify (VPN mode)* (Windows did not recognise its `sing-tun` adapter at all before 1.4).
 
-**OpenVPN runner.** The elevated task `\VeroScudo\OpenVPN` (one per session, mutex) runs `openvpn.exe` for the active
+**OpenVPN runner.** The elevated task `\VeroScudo\OpenVPN` (one per session, by a lock file) runs `openvpn.exe` for the active
 profile while armed: your file first, then VeroScudo's options so they win - `--management 127.0.0.1 <random port>
 <one-time password file>` (administrators only, deleted after login), `--management-hold`, `--management-query-passwords`,
 `--auth-retry interact`, `--auth-nocache`, `--script-security 1`, its own `--log`, `--auth-user-pass` (no file) and
@@ -161,10 +176,10 @@ IPv4 and IPv6, outbound and unsolicited inbound, and on Linux anything forwarded
 |---|---|---|
 | loopback | - | always |
 | the tunnel | its interface (Windows: LUID, Linux: `oifname`, macOS: `on ipsecN`) - only the **active** profile's | while up |
-| the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows SSTP's TCP only from `svchost.exe` (SstpSvc); IKEv2, L2TP and PPTP by address, protocol and port (their packets are sent by the kernel's IPsec/GRE drivers, which have no program to match) | always (keeps the tunnel and lets it redial) |
-| DHCP / DHCPv6, IPv6 neighbour discovery (link-local only) | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
+| the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows SSTP's TCP only from `svchost.exe` (SstpSvc); the ports of IKEv2, L2TP and PPTP (UDP 500/4500/1701, TCP 1723) only for traffic sent as Local System or by an elevated administrator - Windows' IKE service, its tunnel drivers and what they send for the elevated guard's dial, never an ordinary program of the signed-in user; ESP, GRE and IP-in-IP by address (ordinary programs cannot send them) | always (keeps the tunnel and lets it redial) |
+| DHCP / DHCPv6, IPv6 neighbour discovery | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
 | DNS | UDP/TCP 53, Windows: only `svchost.exe` (DNS Client) and only to the resolvers of the up physical links; Linux: only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; macOS: only those resolvers. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
-| certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check** - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
+| certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check, at most once per 15 minutes** (and for 2 minutes after an SSTP tunnel was armed - it may still be checking) - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
 | host ↔ WSL switch (Windows) | the WSL vEthernet interface (LUID, re-bound every 15 s - it changes at every boot) | always |
 | `lanAllow` ranges | each CIDR, IPv4 `/8`+ / IPv6 `/16`+ only | always |
 
@@ -192,11 +207,14 @@ makes a BLOCK in any sublayer final, so no firewall rule can override it; the PE
 (they do not clear the action right), so the user's own firewall blocks still apply.
 
 - **Atomic**: the whole set is replaced in one WFP transaction - no gap, no half state.
-- **Persistent**: filters survive reboots and BFE restarts, so an armed PC is strict from boot.
+- **Persistent**: filters survive reboots and BFE restarts, so an armed PC is strict from the moment Windows' filtering
+  service (BFE) starts at boot - they are not boot-time filters, which act before that.
 - **Self-checking**: `Install.ps1` verifies every layer/field id against the running WFP before it
-  changes anything; filter keys are derived from an index so the watchdog can count them.
-- **Fail closed**: if applying filters fails, the guard falls back to the firewall's default-outbound
-  Block (weaker, never open) and logs `EMERGENCY`; the next successful sync removes it. Linux/macOS: a ruleset that
+  changes anything, and offers WFP one filter of every shape inside a transaction it rolls back (so a condition this
+  Windows does not take is found then, not at the first arm); filter keys are derived from an index so the watchdog can count them.
+- **Fail closed**: if the filters cannot be worked out or applied and none is in force, the guard falls back to the
+  firewall's default-outbound Block (weaker, never open; the firewall profiles are switched on for it), blocks the VMs
+  and WSL, and logs `EMERGENCY`; the next successful sync removes it. Linux/macOS: a ruleset that
   cannot be built or loaded leaves the rules in force as they are (the transaction changed nothing); with none in force
   the lockdown ruleset (loopback, DHCP, neighbour discovery) is applied, `EMERGENCY` is logged and the watchdog keeps
   trying the real one.
@@ -236,7 +254,12 @@ VMware/libvirt bridged mode) send frames below the host's IP stack and are **not
 ## Reconnecting
 
 Every `retrySeconds` (10), forever, in a single loop guarded by an atomic lock file (`CreateNew` /
-`O_EXCL`). Each attempt re-reads the config (it follows a profile switch) and re-syncs the
+`O_EXCL`; on Linux it names the process by id and start time, so an id reused by another process does not count -
+on macOS, where the start time cannot be read that way, by id alone).
+The loop has one owner: on Windows the `Redial` task - the watchdog and the `Terminated` task start it and return, so the
+watchdog keeps checking every 15 s during an outage and the next event finds its task free; on Linux/macOS a thread of
+the daemon. Your own On and Reconnect dial in their own task (Reconnect hangs up first, under the same lock); a
+profile switch hangs the old tunnel up itself and hands the dialing to the `Redial` task. Each attempt re-reads the config (it follows a profile switch) and re-syncs the
 filters. The loop ends only when the tunnel is up or the state becomes DISARMED.
 
 - **Windows**: the `RasDial` API with the DPAPI-stored credential - the password is never on a
@@ -276,12 +299,12 @@ connecting a VPN that is not configured is ignored.
 
 | | Windows | Linux | macOS (alpha) |
 |---|---|---|---|
-| program | `C:\Program Files\VeroScudo\` (+ `VeroScudo.Native.dll`, compiled at install) | python package (pip) | venv in `/opt/veroscudo` (root-owned; never Homebrew's `/usr/local`) |
+| program | `C:\Program Files\VeroScudo\` (+ `VeroScudo.Native.dll`, compiled at install) | `/opt/veroscudo` (root-owned copy of the package, run by the system's Python with `-I`) | `/opt/veroscudo` (root-owned, Apple's Python with `-I`; never Homebrew's `/usr/local`) |
 | config | `%ProgramData%\VeroScudo\config.json` | `/etc/veroscudo/config.json` | `/etc/veroscudo/config.json` |
 | state + log | `%ProgramData%\VeroScudo\state\` - Administrators/SYSTEM full, Users read only | `/var/lib/veroscudo/` (armed flag, active profile, server cache - survive reboot), `/run/veroscudo/` (lock), `/var/log/veroscudo.log` | `/var/lib/veroscudo/`, `/var/run/veroscudo/`, `/var/log/veroscudo.log` |
 | per-user | `%LOCALAPPDATA%\VeroScudo\` - `cred-<profile>.xml`, `keypass-<profile>.xml` (OpenVPN key), `otp-<profile>.txt` (one-time code, read once), `switch.request`, `update.json`, `tray.json` (keep awake, last profile for the switch notice) | `~/.config/veroscudo/tray.json` | – |
-| OpenVPN (Windows) | `%ProgramData%\VeroScudo\openvpn\<profile>.ovpn` (administrators/SYSTEM only); `state\ovpn-<profile>.json/.log` | – | – |
-| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,NetDown,Watchdog,On,OnDisconnect,OnForce,Off,Switch,Reconnect,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
+| OpenVPN (Windows) | `%ProgramData%\VeroScudo\openvpn\<profile>.ovpn` (administrators/SYSTEM only); `state\ovpn-<profile>.json` (status), `openvpn\<profile>.log` | – | – |
+| scheduler | Task Scheduler `\VeroScudo\{Connected,Terminated,NetDown,Watchdog,On,OnDisconnect,OnForce,Off,Switch,Reconnect,Redial,OpenVPN}` (highest) + `Tray` (limited) | `veroscudo.service` + `veroscudo-boot.service` (root) + `veroscudo-tray.service` (user) | launchd `com.gomelhawk.veroscudo` |
 | kill-switch | WFP provider/sublayer "VeroScudo" + Hyper-V rule `VeroScudo-WSL` | nftables table `inet veroscudo` | pf anchor `com.apple/250.VeroScudo` |
 
 The Windows state location is fixed: it is never taken from an environment variable (a value a
@@ -310,7 +333,8 @@ below; the 1.0 single `"vpn": {...}` object is still accepted). The example is a
 ```
 
 Every value is validated (it ends up in filters, nft rules and command arguments run as root):
-profile names without control characters, quotes or backslashes (Windows: no wildcard characters either), host names or
+profile names without control characters or double quotes and not starting with a dash (Linux/macOS: no backslashes;
+Windows: no wildcard characters `* ? [ ] < > | &`), host names or
 IPs, ports 1-65535, `retrySeconds` 3-3600, `serverIps` plain addresses (no IPv6 zone, no number forms such as `1`),
 `lanAllow` real ranges no wider than IPv4 /8 or IPv6 /16 (never `0.0.0.0/0`, `Any`). Linux/macOS: every address is
 written into the ruleset in its canonical form and checked once more there - digits, hex, dots, colons and one `/prefix`.
@@ -325,7 +349,7 @@ kill-switch all the same (logged); only the VPN connection itself is left as it 
   + ESP), `pptp` (TCP 1723 + GRE), `sstp` (TCP port), `openconnect` (TCP+UDP port), `openvpn`/`wireguard`/empty (protocol +
   port). Written by `veroscudo import`. On Windows the protocol is read from the Windows profile itself.
 - `auth` (Windows, `ras`): `false` for a certificate sign-in (no username, no stored password).
-- `type` (Windows): `ras` (default), `openvpn` or `wireguard` - see *Profile types*. `openvpn` needs no `server`
+- `type` (Windows): `ras` (default), `openvpn`, `wireguard` or `hiddify` - see *Profile types*. `openvpn` needs no `server`
   (the imported `.ovpn`'s `remote` lines are used), `auth` says whether it asks for a password, `dco: true` keeps the
   kernel data channel. `wireguard` needs `server` + `port` (its endpoint) and no username.
 - `protocol` (Linux/macOS): `tcp` or `udp` - the VPN control channel. On Windows it follows the profile's tunnel type.
@@ -418,7 +442,9 @@ how long the profile was connected that day and *good %* (the share of that time
 
 Optional, per user (Settings > Connection, saved at once): an Atlassian Statuspage `.../api/v2/status.json` -
 `status.claude.com` by default (the old default `status.anthropic.com` redirects there and is read as it) - fetched by the
-tray by the same rules as the exit location: once after each connect (Protected) and on *Refresh* (6 s timeout). A
+tray by the same rules as the exit location: once after each connect (Protected) and on *Refresh* (6 s timeout). Both
+lookups, on every platform: https only, no redirect followed (the answer comes from the address that was asked),
+at most 256 KB read. A
 tunnel that has just come up may not carry traffic yet: a failed fetch after a connect is retried after 10 s and 30 s
 (*checking...* meanwhile); when those fail too, the last good answer stays shown with its time and the failure goes into
 the tooltip, like the exit location. A failed *Refresh* shows *not reachable* - a fresh answer was asked for. Shown as a card under the exit location, in the same style - it is secondary information, so the

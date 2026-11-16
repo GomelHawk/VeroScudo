@@ -138,23 +138,54 @@ function Get-StateImage([string]$state, [int]$size) {
 # goes through the tunnel and never shows your real address. ipinfo.io first (city, country, IP, provider), Cloudflare's
 # trace page as the fallback (IP and country only). In a background runspace: the window never waits for the network.
 # Cached per user (tray.json); shown grey with its time while not protected. Off: Settings > "Show exit location".
+$global:TrayStarted = Get-Date
+$global:LastBeat = $null
 $global:ExitJob = $null; $global:ExitError = ''; $global:ProtectedSince = [datetime]::MinValue; $global:PreviewExit = $null
 function Test-ExitEnabled { [bool](Get-TrayPref).showExit }
+# The tray's lookups (exit location, service status page) run in a background runspace through this one function: https
+# only, no redirects followed (an answer never comes from another address than the one asked), 6 s to connect and for each read, about 10 s of reading in
+# all, at most 256 KB read - an answer cannot hold the tray's memory or its timer however it is sent. Decoded as UTF-8:
+# Windows PowerShell reads an answer without a charset as Latin-1 (a Polish city name comes out garbled).
+$global:FetchLib = @'
+function Get-VeroBounded([string]$Url) {
+    if ($Url -notmatch '^https://') { throw 'https only' }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $rq = [Net.HttpWebRequest][Net.WebRequest]::Create($Url)
+    $rq.Timeout = 6000; $rq.ReadWriteTimeout = 6000; $rq.AllowAutoRedirect = $false
+    $rq.Accept = 'application/json'; $rq.UserAgent = 'VeroScudo'
+    $rs = $rq.GetResponse()
+    try {
+        if ([int]$rs.StatusCode -ge 300) { throw "HTTP $([int]$rs.StatusCode)" }
+        $sw = [Diagnostics.Stopwatch]::StartNew(); $st = $rs.GetResponseStream(); $buf = New-Object byte[] 262144; $n = 0
+        while ($n -lt $buf.Length -and $sw.Elapsed.TotalSeconds -lt 10) { $k = $st.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k }
+        [Text.Encoding]::UTF8.GetString($buf, 0, $n)
+    } finally { $rs.Close() }
+}
+'@
+$global:StoppedJobs = New-Object System.Collections.ArrayList
+function Stop-TrayJob($Job) {
+    <# A background lookup that ran out of time: asked to stop - never waited for on the window's own thread - and kept
+       until it has stopped, then released (Clear-StoppedJob, on the timer). #>
+    try { $h = $Job.PS.BeginStop($null, $null); [void]$global:StoppedJobs.Add(@{ PS = $Job.PS; Handle = $h }) } catch { Write-Verbose "lookup stop: $($_.Exception.Message)" }
+}
+function Clear-StoppedJob {
+    foreach ($s in @($global:StoppedJobs)) {
+        if ($s.Handle.IsCompleted) { try { $s.PS.Dispose() } catch { Write-Verbose 'lookup already released' }; $global:StoppedJobs.Remove($s) }
+    }
+}
 function Start-ExitFetch {
     if (-not (Test-ExitEnabled) -or $global:ExitJob -or $global:PreviewDir -or -not $global:Config) { return }
     $ps = [powershell]::Create()
+    [void]$ps.AddScript($global:FetchLib); [void]$ps.AddStatement()
     [void]$ps.AddScript({
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $e1 = ''; $e2 = ''
         try {
-            # bytes decoded as UTF-8 here: Windows PowerShell reads an answer without a charset as Latin-1 (a Polish city name comes out garbled)
-            $w = Invoke-WebRequest -Uri 'https://ipinfo.io/json' -TimeoutSec 6 -UseBasicParsing -Headers @{ Accept = 'application/json' }
-            $r = [Text.Encoding]::UTF8.GetString($w.RawContentStream.ToArray()) | ConvertFrom-Json
+            $r = Get-VeroBounded 'https://ipinfo.io/json' | ConvertFrom-Json
             if ($r.ip) { return @{ Ip = [string]$r.ip; City = [string]$r.city; Country = [string]$r.country; Org = [string]$r.org; Source = 'ipinfo.io' } }
         } catch { $e1 = $_.Exception.Message }
         try {
             $kv = @{}
-            foreach ($l in ((Invoke-WebRequest -Uri 'https://www.cloudflare.com/cdn-cgi/trace' -TimeoutSec 6 -UseBasicParsing).Content -split "`n")) { $k, $v = $l -split '=', 2; if ($v) { $kv[$k.Trim()] = $v.Trim() } }
+            foreach ($l in ((Get-VeroBounded 'https://www.cloudflare.com/cdn-cgi/trace') -split "`n")) { $k, $v = $l -split '=', 2; if ($v) { $kv[$k.Trim()] = $v.Trim() } }
             if ($kv['ip']) { return @{ Ip = [string]$kv['ip']; City = ''; Country = [string]$kv['loc']; Org = ''; Source = 'cloudflare.com' } }
         } catch { $e2 = $_.Exception.Message }
         @{ Error = "ipinfo.io: $e1 / cloudflare.com: $e2" }
@@ -170,11 +201,11 @@ function Update-ExitFetch {
         try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $global:ExitError = $_.Exception.Message }
         $j.PS.Dispose(); $global:ExitJob = $null
         if ($out -and $out.Ip) {
-            Set-TrayPref 'exitInfo' ([ordered]@{ Ip = $out.Ip; City = $out.City; Country = $out.Country; Org = $out.Org; Source = $out.Source; Profile = $j.Profile; Time = (Get-Date).ToString('o') })
+            Set-TrayPref 'exitInfo' ([ordered]@{ Ip = (ConvertTo-VeroPlainText $out.Ip 45); City = (ConvertTo-VeroPlainText $out.City); Country = (ConvertTo-VeroPlainText $out.Country 8); Org = (ConvertTo-VeroPlainText $out.Org); Source = $out.Source; Profile = $j.Profile; Time = (Get-Date).ToString('o') })
         } elseif ($out -and $out.Error) { $global:ExitError = [string]$out.Error }
     } elseif (((Get-Date) - $j.Started).TotalSeconds -gt 20) {
-        try { $j.PS.Stop() } catch { Write-Verbose 'lookup stop failed' }
-        $j.PS.Dispose(); $global:ExitJob = $null; $global:ExitError = 'no answer within 20 s'
+        Stop-TrayJob $j
+        $global:ExitJob = $null; $global:ExitError = 'no answer within 20 s'
     }
 }
 
@@ -189,9 +220,8 @@ $global:SvcRetry = @(); $global:SvcRetryAt = $null; $global:SvcGood = $null; $gl
 $global:SvcDefaultUrl = 'https://status.claude.com/api/v2/status.json'
 $global:SvcOldDefaultUrl = 'https://status.anthropic.com/api/v2/status.json'     # redirects to the new one (an extra round trip): read as it
 function Test-StatusPageEnabled { [bool](Get-TrayPref).statusPage }
-function Test-StatusPageUrl([string]$Url) { $Url -match '^https://[^\s]+$' -and $Url.Length -le 300 }
 # the stored address is checked on every read too: tray.json is a file any program of the user can write
-function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u -and $u -ne $global:SvcOldDefaultUrl -and (Test-StatusPageUrl $u)) { $u } else { $global:SvcDefaultUrl } }
+function Get-StatusPageUrl { $u = [string](Get-TrayPref).statusPageUrl; if ($u -and $u -ne $global:SvcOldDefaultUrl -and (Test-VeroStatusPageUrl $u)) { $u } else { $global:SvcDefaultUrl } }
 function Start-StatusPageAfterConnect {
     <# VeroScudo reached Protected: look again through the new tunnel - retried on failure. #>
     $global:SvcRetry = @(10, 30); $global:SvcRetryAt = $null
@@ -204,10 +234,9 @@ function Start-StatusPageFetch([switch]$Now, [switch]$Auto) {
     $global:SvcNext = (Get-Date).AddMinutes(5)
     $url = Get-StatusPageUrl
     $ps = [powershell]::Create()
+    [void]$ps.AddScript($global:FetchLib); [void]$ps.AddStatement()
     [void]$ps.AddScript({ param($u)
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        try { $w = Invoke-WebRequest -Uri $u -TimeoutSec 6 -UseBasicParsing -Headers @{ Accept = 'application/json' }
-              @{ Json = ([Text.Encoding]::UTF8.GetString($w.RawContentStream.ToArray())) } }
+        try { @{ Json = (Get-VeroBounded $u) } }
         catch { @{ Error = $_.Exception.Message } }
     }).AddArgument($url)
     $global:SvcJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Url = $url; Started = (Get-Date); Auto = [bool]$Auto }
@@ -215,11 +244,13 @@ function Start-StatusPageFetch([switch]$Now, [switch]$Auto) {
 function Update-StatusPageFetch {
     if ($global:SvcRetryAt -and (Get-Date) -ge $global:SvcRetryAt -and -not $global:SvcJob) { $global:SvcRetryAt = $null; Start-StatusPageFetch -Now -Auto }
     $j = $global:SvcJob; if (-not $j) { return }
-    if ($j.Handle.IsCompleted -or ((Get-Date) - $j.Started).TotalSeconds -gt 15) {
+    $done = [bool]$j.Handle.IsCompleted                                      # looked at once: it can turn true at any moment
+    if ($done -or ((Get-Date) - $j.Started).TotalSeconds -gt 15) {
         $out = $null
-        if ($j.Handle.IsCompleted) { try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $out = @{ Error = $_.Exception.Message } } }
-        else { try { $j.PS.Stop() } catch { Write-Verbose 'status page stop failed' }; $out = @{ Error = 'no answer within 15 s' } }
-        $j.PS.Dispose(); $global:SvcJob = $null
+        if ($done) { try { $out = @($j.PS.EndInvoke($j.Handle)) | Select-Object -Last 1 } catch { $out = @{ Error = $_.Exception.Message } } }
+        else { Stop-TrayJob $j; $out = @{ Error = 'no answer within 15 s' } }
+        if ($done) { $j.PS.Dispose() }
+        $global:SvcJob = $null
         $res = @{ Url = $j.Url; Time = (Get-Date); Json = $(if ($out) { $out.Json }); Error = $(if ($out) { $out.Error }) }
         $good = [bool]($res.Json -and -not $res.Error -and -not (ConvertTo-VeroStatusPageView -Json $res.Json -Url $res.Url).Text.EndsWith(': not reachable'))
         if ($good) { $global:SvcResult = $res; $global:SvcGood = $res; $global:SvcFailed = ''; $global:SvcRetry = @(); return }
@@ -258,7 +289,7 @@ function Set-TrayExpect([string]$kind) {
     $global:Expect = @{ Kind = $kind; Since = (Get-Date); Until = (Get-Date).AddMinutes(2) }
 }
 function Get-TrayExpect {
-    if ($global:Expect -and (Get-Date) -lt $global:Expect.Until) { return $global:Expect.Kind }
+    if ($global:Expect -and (Get-Date) -lt $global:Expect.Until) { return $global:Expect.Kind }   # (its life: Resolve-VeroTrayExpect)
     $null
 }
 function Get-StateFacts {
@@ -282,8 +313,10 @@ function Get-StateFacts {
 }
 function Get-GuardStale {
     <# Minutes since the watchdog's last good pass, when that is over 3 (it runs every 15 s); 0 = fine or not known yet. #>
-    try { $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]([IO.File]::ReadAllText($global:Paths.Heartbeat).Trim()) } catch { return 0 }
-    if ($age -gt 180) { [int][Math]::Floor($age / 60) } else { 0 }
+    # the last value that could be read stands when one read fails (the file is replaced every 15 s, read every 3 s);
+    # none ever read: the tray's own age counts
+    try { $beat = [IO.File]::ReadAllText($global:Paths.Heartbeat).Trim(); if ($beat -match '^\d+(\.\d+)?\z') { $global:LastBeat = [double]$beat } } catch { Write-Verbose 'heartbeat not read this time' }
+    Test-VeroGuardStale -HeartbeatEpoch $global:LastBeat -NowEpoch ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -TraySeconds ((Get-Date) - $global:TrayStarted).TotalSeconds
 }
 function Get-State {
     if ($global:PreviewFacts) { return ConvertTo-VeroTrayState $global:PreviewFacts }
@@ -421,7 +454,7 @@ function Show-Status {
     $bLog   = New-Button $body 'Open log' 234 358 99
     $bStats = New-Button $body 'Statistics' 341 358 99
     $bRedo.Add_Click(({ Request-Reconnect }).GetNewClosure())
-    $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }).GetNewClosure())
+    $bLog.Add_Click(({ if (Test-Path $global:Paths.Log) { Start-Process (Join-Path (Get-VeroSystemDir System) 'notepad.exe') $global:Paths.Log } }).GetNewClosure())
     $bStats.Add_Click(({ Show-Stats | Out-Null }).GetNewClosure())
     $cpy.Add_LinkClicked(({ $s = Get-VeroStatus -Config $global:Config; $txt = ($s.PSObject.Properties | ForEach-Object { '{0,-11} {1}' -f $_.Name, $_.Value }) -join "`r`n"; $xv = Get-ExitView (Get-State); $txt += "`r`n" + ('{0,-11} {1}' -f 'Exit', $(if ($xv.Has) { '{0} {1} {2}' -f $xv.Code, $xv.Place, $xv.Right } else { $xv.Text })); $sv = Get-StatusPageView; if ($sv) { $txt += "`r`n" + ('{0,-11} {1}' -f 'Service', $sv.Text) }; $txt += "`r`n`r`n--- last events`r`n" + ((Get-LastEvents 15) -join "`r`n"); [System.Windows.Forms.Clipboard]::SetText($txt); $cpy.Text = 'Copied'; }).GetNewClosure())
     $bOnOff.Add_Click(({ if ($bOnOff.Text -like '*off') { Invoke-GuardTask 'Off' } else { Request-TurnOn } }).GetNewClosure())
@@ -783,6 +816,7 @@ function New-VpnProfileForm($entry) {
     $bConf.Add_Click(({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = 'WireGuard config (*.conf)|*.conf|All files|*.*'
         if ($dlg.ShowDialog() -ne 'OK') { return }
+        if ((New-Object IO.FileInfo $dlg.FileName).Length -gt $global:ImportMaxBytes) { [VeroMsg]::Show('This file is too large for a WireGuard config (over 1 MB).', 'VeroScudo') | Out-Null; return }
         $r = Test-VeroWireGuardConf -Text ([IO.File]::ReadAllText($dlg.FileName))
         if ($r.Errors.Count -gt 0) { [VeroMsg]::Show(($r.Errors -join "`r`n"), 'VeroScudo - WireGuard config') | Out-Null; return }
         $tServer.Text = $r.Server; $tPort.Text = [string]$r.Port
@@ -801,8 +835,13 @@ function New-VpnProfileForm($entry) {
             if ($tFile.Text.Trim() -or -not $entry) {
                 $src = $tFile.Text.Trim()
                 if (-not $src -or -not (Test-Path -LiteralPath $src)) { [VeroMsg]::Show('Choose the .ovpn file to import.', 'VeroScudo') | Out-Null; return }
-                $r = Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($src)) -BaseDir (Split-Path -Parent $src)
-                if ($r.Errors.Count -gt 0) { [VeroMsg]::Show("This config cannot be used:`r`n`r`n" + ($r.Errors -join "`r`n"), 'VeroScudo - OpenVPN config') | Out-Null; return }
+                if ((New-Object IO.FileInfo $src).Length -gt $global:ImportMaxBytes) { [VeroMsg]::Show('This file is too large for an OpenVPN config (over 1 MB).', 'VeroScudo') | Out-Null; return }
+                $r = Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($src)) -BaseDir (Split-Path -Parent $src) -ReadFile $global:ImportReadFile
+                if ($r.Errors.Count -gt 0) {
+                    $shown = @($r.Errors | Select-Object -First 10 | ForEach-Object { if ($_.Length -gt 200) { $_.Substring(0, 200) + '...' } else { $_ } })
+                    if ($r.Errors.Count -gt 10) { $shown += "... and $($r.Errors.Count - 10) more" }
+                    [VeroMsg]::Show("This config cannot be used:`r`n`r`n" + ($shown -join "`r`n"), 'VeroScudo - OpenVPN config') | Out-Null; return
+                }
                 if (-not (Show-Check "OpenVPN config $([IO.Path]::GetFileName($src)):" $r.Warnings)) { return }
                 $import = $src; $importText = $r.Text; $auth = $r.Auth      # the complete text, inlined here as you - the elevated save gets text, never a path
             }
@@ -829,6 +868,27 @@ function Edit-VpnProfile($entry) {
     $x.Result.Value
 }
 
+# A config chosen for import names its key files itself (ca, cert, key ...): the tray reads them as you. Only local files of
+# a sane size - a path on another computer (\\host\share) would hand your Windows sign-in to that computer, and a file
+# of any size would be read whole on the window's own thread.
+$global:ImportMaxBytes = 1MB
+$global:ImportReadFile = {
+    param($f)
+    $full = [IO.Path]::GetFullPath([string]$f)
+    if ($full.StartsWith('\\')) { throw 'network and device paths are not read' }
+    if ((New-Object IO.FileInfo $full).Length -gt $global:ImportMaxBytes) { throw 'file too large' }
+    [IO.File]::ReadAllBytes($full)
+}
+function Remove-TrayLeftover {
+    <# The tray's own leftovers in its own folder, removed at start and once a minute - the guard only reads there and
+       never deletes (a folder the user controls is no place for an administrator's delete). Which files: Select-VeroTrayLeftover
+       (a Save payload, a one-time code, a switch request, older than 10 minutes). One by one, files of this folder only. #>
+    $dir = $global:Paths.UserDir
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return }
+    foreach ($f in @(Select-VeroTrayLeftover -Files @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue))) {
+        if ($f.DirectoryName -eq $dir) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+    }
+}
 function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     <# The tray runs without admin rights: config.json is written by an elevated PowerShell (UAC prompt) that validates it
        again. Everything it needs - the config text and the OpenVPN configs to import ({ Profile; Text }, inlined here as
@@ -845,11 +905,9 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
     try {
-        $mod = (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -replace "'", "''"
-        $arg = $file -replace "'", "''"
-        # the elevated child pins its module path first (a planted module in the user's Documents would otherwise run as admin)
-        $sysMods = "`$env:PSModulePath = `"`$PSHOME\Modules;`" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'); "
-        $script = $sysMods + "try { Import-Module '$mod' -Force; Import-VeroSavePayload -Path '$arg' -Sha256 '$hash'; exit 0 } catch { exit 1 }"
+        # the two paths go into the command as base64 data, never as quoted text: a folder name can hold characters that end
+        # a PowerShell string (typographic quotes among them), and this text is what runs as administrator
+        $script = New-VeroSaveCommand -Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Payload $file -Sha256 $hash
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
         # full path: -Verb RunAs goes through ShellExecute, which resolves a bare name via the user's (writable) App Paths key
         $psExe = Join-Path (Get-VeroSystemDir System) 'WindowsPowerShell\v1.0\powershell.exe'
@@ -857,10 +915,12 @@ function Save-ConfigElevated([string]$json, [object[]]$imports = @()) {
         # UAC prompt then showed as "Not saved: <a sentence in the system language>"
         $si = New-Object System.Diagnostics.ProcessStartInfo $psExe
         $si.Verb = 'runas'; $si.UseShellExecute = $true; $si.WindowStyle = 'Hidden'
-        $si.Arguments = "-NoProfile -NonInteractive -EncodedCommand $enc"
+        $si.WorkingDirectory = (Get-VeroSystemDir System)                    # never the folder the tray happened to be started in
+        $si.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc"
         try { $pr = [System.Diagnostics.Process]::Start($si) }
         catch { if (Test-VeroUacCancelled $_.Exception) { throw 'administrator approval was cancelled - nothing was changed' }; throw }
-        $pr.WaitForExit()
+        # bounded: this is the tray's own thread - a save that hangs must not leave the icon at its last state for good
+        if (-not $pr.WaitForExit(120000)) { throw 'the elevated save did not finish within 2 minutes - see the log' }
         if ($pr.ExitCode -ne 0) { throw "the elevated save failed (exit $($pr.ExitCode))" }
     } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }   # the tray's own payload file, nothing else
 }
@@ -1007,7 +1067,7 @@ function Show-Settings {
     New-Label $card3 'Atlassian Statuspage format (.../api/v2/status.json) - Anthropic''s by default.' 38 454 426 20 $FontSmall $global:Theme.Sub | Out-Null
     $saveSp = ({
         $u = $inSp.Text.Trim(); if (-not $u) { $u = $global:SvcDefaultUrl; $inSp.Text = $u }
-        if (-not (Test-StatusPageUrl $u)) { [VeroMsg]::Show('The status page must be an https:// address', 'VeroScudo') | Out-Null; $inSp.Text = (Get-StatusPageUrl); return }
+        if (-not (Test-VeroStatusPageUrl $u)) { [VeroMsg]::Show('The status page must be an https:// address', 'VeroScudo') | Out-Null; $inSp.Text = (Get-StatusPageUrl); return }
         if ($u -ne (Get-StatusPageUrl)) { Set-TrayPref 'statusPageUrl' $u; $global:SvcResult = $null; Start-StatusPageFetch -Now }
     }).GetNewClosure()
     $inSp.Add_Leave($saveSp)
@@ -1374,7 +1434,7 @@ function Update-ProfileMenu {
 }
 $null = Add-MenuSeparator
 $null = Add-MenuItem 'Status'       'info' { Show-Status | Out-Null }  
-$null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process notepad.exe $global:Paths.Log } }
+$null = Add-MenuItem 'Open log'     'log' { if (Test-Path $global:Paths.Log) { Start-Process (Join-Path (Get-VeroSystemDir System) 'notepad.exe') $global:Paths.Log } }
 $null = Add-MenuItem 'Statistics'   'chart' { Show-Stats | Out-Null }
 $null = Add-MenuItem 'Settings'     'gear' { Show-Settings | Out-Null }
 $mAwake = Add-MenuItem 'Keep awake' 'awake' {
@@ -1384,68 +1444,84 @@ $mAwake = Add-MenuItem 'Keep awake' 'awake' {
 }
 $mAwake.CheckOnClick = $true; $mAwake.Checked = [VeroKeepAwake]::Set((Test-KeepAwakeSaved))
 $null = Add-MenuSeparator
-$mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force; if ($global:Update -and (Test-VeroReleaseUrl $global:Update.Url)) { Start-Process $global:Update.Url } else { $notify.ShowBalloonTip(4000, 'VeroScudo', "You have the latest version ($(Get-VeroVersion)).", [System.Windows.Forms.ToolTipIcon]::Info) } }
+$mUpd  = Add-MenuItem 'Check for updates' 'sync' { Invoke-UpdateCheck -Force -Clicked }
 $null = Add-MenuItem 'About VeroScudo' 'help' { Show-About | Out-Null }
 $null = Add-MenuItem 'Exit tray (guard keeps running)' 'power' { [VeroKeepAwake]::Set($false) | Out-Null; $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() }
 # size every item from the widest label (ToolStrip ignores padding when measuring) : icon column 42 + text + 24
 $notify.ContextMenuStrip = $menu
 Update-ConfigCache | Out-Null; Update-ProfileMenu
+try { Remove-TrayLeftover } catch { Write-Verbose "leftovers: $($_.Exception.Message)" }
 $notify.Add_MouseClick({ param($src, $e) $null = $src; if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-Status | Out-Null } })
 
-function Invoke-UpdateCheck([switch]$Force) {
-    # once per tray start (2 min after launch), only while traffic is allowed (never while blocked), opt-out via config updateCheck=false
+$global:UpdJob = $null
+function Invoke-UpdateCheck([switch]$Force, [switch]$Clicked) {
+    <# Asks GitHub for the latest release - in the background, never on the window's own thread (the icon keeps following
+       the guard while the answer is on its way); Update-UpdateCheck takes the answer on the next timer pass.
+       Once per tray start (2 min after launch) and on the menu item; only while traffic is allowed (never while blocked);
+       opt-out via config updateCheck=false. -Clicked: the user asked - whatever the outcome, it is said. (= traymodel.py) #>
     if (-not $global:Config -or ($global:Config.UpdateCheck -eq $false -and -not $Force)) { return }
-    $st = Get-State; if ($st.State -eq 'blocked') { return }
+    $st = Get-State
+    if ($st.State -eq 'blocked' -or ($st.Armed -and -not $st.Connected)) {   # never while nothing can leave
+        if ($Clicked) { $notify.ShowBalloonTip(4000, 'VeroScudo', (Get-VeroUpdateClickText -Blocked), [System.Windows.Forms.ToolTipIcon]::Info) }
+        return
+    }
+    if ($global:UpdJob) { return }                                           # one at a time
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({ param($mod) Import-Module $mod -Force; Get-VeroLatestRelease }).AddArgument((Join-Path $PSScriptRoot 'VeroScudo.Core.psm1'))
+    $global:UpdJob = @{ PS = $ps; Handle = $ps.BeginInvoke(); Clicked = [bool]$Clicked; Started = (Get-Date) }
+}
+function Update-UpdateCheck {
+    <# Called by the timer: takes a finished update check (or gives up after 30 s). #>
+    $j = $global:UpdJob; if (-not $j) { return }
+    $rel = $null
+    if ($j.Handle.IsCompleted) {
+        try { $rel = @($j.PS.EndInvoke($j.Handle)) | Where-Object { $_ } | Select-Object -Last 1 } catch { Write-Verbose "update check: $($_.Exception.Message)" }
+        $j.PS.Dispose()
+    } elseif (((Get-Date) - $j.Started).TotalSeconds -gt 30) {
+        Stop-TrayJob $j
+    } else { return }
+    $global:UpdJob = $null
     $info = @{ checked = '1970-01-01'; notified = '' }
-    if (Test-Path $global:UpdateFile) { try { $j = Get-Content $global:UpdateFile -Raw | ConvertFrom-Json; $info.checked = $j.checked; $info.notified = $j.notified } catch { Write-Verbose 'update.json unreadable' } }
-    $r = Resolve-VeroUpdateNotice -Info $info -Release (Get-VeroLatestRelease)
+    if (Test-Path $global:UpdateFile) { try { $u = Get-Content $global:UpdateFile -Raw | ConvertFrom-Json; $info.checked = $u.checked; $info.notified = $u.notified } catch { Write-Verbose 'update.json unreadable' } }
+    $r = Resolve-VeroUpdateNotice -Info $info -Release $rel
     $global:Update = $r.Update; $mUpd.Text = $r.MenuText; $info = $r.Info
     if ($r.Balloon) { $notify.ShowBalloonTip(8000, "VeroScudo $($r.Update.Tag) is available", "You run $(Get-VeroVersion). Open the tray menu to see the release.", [System.Windows.Forms.ToolTipIcon]::Info) }
     try { New-Item -ItemType Directory -Path $global:Paths.UserDir -Force | Out-Null; $info | ConvertTo-Json | Set-Content $global:UpdateFile } catch { Write-Verbose 'update.json not writable' }
+    if (-not $j.Clicked) { return }
+    if ($global:Update -and (Test-VeroReleaseUrl $global:Update.Url)) { Start-Process ([Uri]$global:Update.Url).AbsoluteUri }
+    else { $notify.ShowBalloonTip(4000, 'VeroScudo', (Get-VeroUpdateClickText -NoAnswer:(-not $rel) -Version (Get-VeroVersion)), [System.Windows.Forms.ToolTipIcon]::Info) }
 }
 
+$global:RefreshCount = 0
 function Refresh {
+    if ((++$global:RefreshCount) % 20 -eq 0) { try { Remove-TrayLeftover } catch { Write-Verbose "leftovers: $($_.Exception.Message)" } }
     if (Update-ConfigCache) { Update-ProfileMenu }
+    try { Update-UpdateCheck } catch { Write-Verbose "update check: $($_.Exception.Message)" }
+    Clear-StoppedJob
     $st = Get-State
     if ($st.State -eq 'protected' -and $global:Last -ne 'protected') { $global:ProtectedSince = Get-Date; Start-ExitFetch; Start-StatusPageAfterConnect }   # each (re)connect: once (location and service status)
     elseif ($st.Connected -and -not $global:LastConnected) { $global:ProtectedSince = Get-Date }    # a tunnel came up with VeroScudo off: older lookups are not this tunnel's
     $global:LastConnected = [bool]$st.Connected
-    Update-ExitFetch
-    Update-StatusPageFetch
-    if ($st.State -eq 'blocked' -and $global:Last -eq 'off' -and -not (Get-TrayExpect)) { Set-TrayExpect 'connect'; $st = Get-State }   # turned on elsewhere (shortcut)
-    if ($global:Expect) {
-        $age = ((Get-Date) - $global:Expect.Since).TotalSeconds
-        if ($st.State -eq 'protected') { $global:Expect = $null }                          # done: the next drop is a real one
-        elseif (-not $st.Armed -and $age -gt 20) { $global:Expect = $null }                # cancelled, or turned off again
-        elseif ($st.State -eq 'blocked' -and -not (Get-TrayExpect)) {
-            # 2 minutes and still not connected: say so once, plainly - a start that fails must not hide behind "Connecting"
-            $global:Expect = $null; $st = Get-State
-            $notify.ShowBalloonTip(8000, 'VPN not connected yet - traffic blocked', "'$($global:Config.Profile)' did not connect within 2 minutes. VeroScudo keeps trying; nothing leaves this PC meanwhile.", [System.Windows.Forms.ToolTipIcon]::Warning)
-        }
+    try { Update-ExitFetch; Update-StatusPageFetch } catch { Write-Verbose "lookups: $($_.Exception.Message)" }   # never in the way of the icon and the menu
+    # the phase you asked for (Turn on, a switch, Reconnect): its life is decided in Resolve-VeroTrayExpect
+    $ex = Resolve-VeroTrayExpect -Expect $global:Expect -State ([string]$st.State) -Armed ([bool]$st.Armed) -Last ([string]$global:Last)
+    if (-not [object]::ReferenceEquals($ex.Expect, $global:Expect)) { $global:Expect = $ex.Expect; $st = Get-State }
+    if ($ex.Expired) {
+        $n = Get-VeroTransitionNotice -Expired -ProfileName $global:Config.Profile
+        $notify.ShowBalloonTip(8000, $n.Title, $n.Text, [System.Windows.Forms.ToolTipIcon]$n.Icon)
     }
     $notify.Icon = Get-StateIcon $st.State -Awake:([VeroKeepAwake]::Active)
     $cv = Get-ConnectionView $st
     $notify.Text = Get-VeroTrayTip -Title $st.Title -Word $cv.Word -Awake:([VeroKeepAwake]::Active)
     $mHead.Text = "VeroScudo - $($st.Title)$(if ($cv.Word) { " - $($cv.Word)" })"
-    $mOn.Enabled = ($st.State -ne 'protected'); $mOff.Enabled = $st.Armed -or ($st.Connected -and -not (Test-HiddifyProfile)); $mRedo.Enabled = $st.Armed -and -not (Test-HiddifyProfile)
+    $ms = Get-VeroMenuState -State ([string]$st.State) -Armed ([bool]$st.Armed) -Connected ([bool]$st.Connected) -Hiddify ([bool](Test-HiddifyProfile))
+    $mOn.Enabled = $ms.On; $mOff.Enabled = $ms.Off; $mRedo.Enabled = $ms.Reconnect
     $noticed = Show-SwitchNotice
     if (-not $noticed) { $noticed = Show-ForeignNotice }
     Request-Otp
-    if (-not $noticed -and $global:Last -and $global:Last -ne $st.State) {
-        $b = switch ($st.State) {
-            'blocked'   {
-                switch ([string](Get-TrayExpect)) {
-                    'connect'   { @('VeroScudo on - connecting', "Kill-switch on: traffic is blocked until '$($global:Config.Profile)' is connected.", 'Info') }
-                    'switch'    { $null }                                  # Request-ProfileSwitch already said "Switching to ..."
-                    'reconnect' { $null }                                  # Request-Reconnect already said it
-                    default     { @('VPN connection lost - traffic blocked', 'Reconnecting... nothing leaves this PC until the tunnel is back.', 'Warning') }
-                }
-            }
-            'protected' { @('VPN protected', 'Tunnel up, kill-switch on.', 'Info') }
-            'off'       { @('VPN turned off', 'Firewall back to normal - traffic is NOT protected.', 'Info') }
-            default     { @('VeroScudo needs attention', $st.Text, 'Warning') }
-        }
-        if ($b) { $notify.ShowBalloonTip(5000, $b[0], $b[1], [System.Windows.Forms.ToolTipIcon]$b[2]) }
+    if (-not $noticed) {
+        $n = Get-VeroTransitionNotice -State ([string]$st.State) -Last ([string]$global:Last) -ExpectKind ([string](Get-TrayExpect)) -ProfileName $global:Config.Profile -Text ([string]$st.Text)
+        if ($n) { $notify.ShowBalloonTip(5000, $n.Title, $n.Text, [System.Windows.Forms.ToolTipIcon]$n.Icon) }
     }
     $global:Last = $st.State
 }

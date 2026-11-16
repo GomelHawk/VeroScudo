@@ -30,8 +30,9 @@ fi
 
 # the program (and the pip copy of 1.3 and older)
 case "$(readlink /usr/local/bin/veroscudo 2>/dev/null)" in "$PREFIX"/*) rm -f /usr/local/bin/veroscudo ;; esac
-if python3 -m pip show veroscudo >/dev/null 2>&1; then
-  python3 -m pip uninstall -y -q --break-system-packages veroscudo 2>/dev/null || python3 -m pip uninstall -y -q veroscudo
+# by full path and -I: as root, nothing from the caller's PATH, site-packages or current folder
+if /usr/bin/python3 -I -m pip show veroscudo >/dev/null 2>&1; then
+  /usr/bin/python3 -I -m pip uninstall -y -q --break-system-packages veroscudo 2>/dev/null || /usr/bin/python3 -I -m pip uninstall -y -q veroscudo
 fi
 rm -rf -- /opt/veroscudo /usr/share/veroscudo
 if [ "$PURGE" -eq 1 ]; then

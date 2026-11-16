@@ -421,6 +421,10 @@ def hid(request, tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "_nmcli", lambda *a: calls["nmcli"].append(a) or "")
     monkeypatch.setattr(nm.subprocess, "run", lambda *a, **k: pytest.fail(f"ran {a}"))       # never nmcli up/down, never scutil
     state = {"running": True, "ifaces": {"tun0": ["172.19.0.1"], "wlp2s0": ["203.0.113.99"]}}
+    sysnet = tmp_path / "sysnet"                                # the interfaces as sysfs shows them: a tunnel and a card
+    (sysnet / "tun0").mkdir(parents=True)
+    (sysnet / "wlp2s0" / "device").mkdir(parents=True)
+    monkeypatch.setattr(nm, "SYS_NET", sysnet)
     monkeypatch.setattr(hiddify, "running", lambda platform=None: state["running"])
     monkeypatch.setattr(hiddify, "interfaces", lambda platform=None: dict(state["ifaces"]))
     monkeypatch.setattr(hiddify, "_is_tun", lambda i: i.startswith("tun"))
@@ -566,6 +570,7 @@ def test_tls_check_fails_when_the_connection_is_accepted_and_dropped():
 
 def test_the_guard_lets_hiddifys_service_out_and_falls_back_when_nft_refuses_it(hid, monkeypatch):
     g, calls, state, _vpn, _ = hid
+    g.store.set_armed(True)                                                            # rules are only ever applied while armed
     if daemon.firewall is pf:
         state["cgroup"] = (hiddify.SERVICE_CGROUP, 7)
         g.enable_killswitch(True)

@@ -78,15 +78,18 @@ function Get-VeroPath {
 }
 
 function Test-VeroCidr {
-    <# A single address or CIDR that is narrow enough to be a LAN, never "everything". Pure. #>
+    <# A single address or CIDR that is narrow enough to be a LAN, never "everything". Pure. The one place that says what a
+       plain address looks like: Test-VeroHost, ConvertTo-VeroRuleAddress and Test-VeroUsableServerIp all ask here. #>
     [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     $ip = $Value; $prefix = $null
-    if ($Value -match '^([^/]+)/(\d{1,3})$') { $ip = $Matches[1]; $prefix = [int]$Matches[2] }
+    if ($Value -match '^([^/]+)/(\d{1,3})\z') { $ip = $Matches[1]; $prefix = [int]$Matches[2] }
     $addr = $null
     if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$addr)) { return $false }
-    if ($ip -notmatch '^[0-9a-fA-F:.]+$') { return $false }                  # TryParse also accepts "1" or "0x1"
+    if ($ip -notmatch '^[0-9a-fA-F:.]+\z') { return $false }                  # TryParse also accepts "1" or "0x1"
+    if ($addr.IsIPv4MappedToIPv6) { return $false }                         # ::ffff:1.2.3.4 - an IPv4 address is written as one
     $v4 = $addr.AddressFamily -eq 'InterNetwork'
-    if ($v4 -and $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $false }
+    if ($v4 -and $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}\z') { return $false }
+    if ($v4 -and $ip -match '(^|\.)0\d') { return $false }                    # a leading zero: read as octal by Windows, refused elsewhere
     if ($null -eq $prefix) { $prefix = if ($v4) { 32 } else { 128 } }
     if ($v4) { return ($prefix -ge 8 -and $prefix -le 32) }
     return ($prefix -ge 16 -and $prefix -le 128)
@@ -94,8 +97,26 @@ function Test-VeroCidr {
 
 function Test-VeroHost([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 253) { return $false }
-    if ($Value -match '^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$') { return $true }
-    $a = $null; return [System.Net.IPAddress]::TryParse($Value, [ref]$a)
+    # digits and dots only is an address, and then a whole one: "10.1" or "1" would be read as a shorthand by some tools
+    # and not at all by the filters
+    if ($Value -match '^[0-9.]+\z') { return ($Value -match '^\d{1,3}(\.\d{1,3}){3}\z' -and (Test-VeroCidr $Value)) }
+    # nor any other spelling Windows reads as a number ("0x7f000001", "017.0.0.1"): what is an address is written as one
+    $n = $null
+    if ([System.Net.IPAddress]::TryParse($Value, [ref]$n)) { return ((Test-VeroCidr $Value) -and $Value -notmatch '/') }
+    if ($Value -match '^(?=.{1,253}\z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\z') { return $true }
+    return (Test-VeroCidr $Value) -and $Value -notmatch '/'                 # a plain address: no zone, no number forms, no range
+}
+
+function ConvertTo-VeroRuleAddress {
+    <# The last check before an address or range goes into a filter, whatever its source (config, a lookup, a cache file,
+       what a WireGuard tunnel reports): a plain address - or, with -Range, address/prefix - and nothing else. Throws
+       otherwise: a filter set with a wrong address is not built. Returns the text unchanged. Pure. #>
+    [CmdletBinding()] param([Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Value, [switch]$Range)
+    # the one shape check is Test-VeroCidr's (no zone, no number forms, no leading zero, no IPv4 in IPv6 clothes); a single
+    # address always passes its width rule, and the ranges that come here (lanAllow) were held to it when the config was read
+    $plain = (Test-VeroCidr $Value) -and ($Range -or $Value -notmatch '/')
+    if (-not $plain) { throw "refusing '$Value' in a filter: not a plain address" }
+    $Value
 }
 
 function Get-VeroProfileId {
@@ -103,7 +124,7 @@ function Get-VeroProfileId {
        A profile without one (configs before 1.4) gets one made from its name: the first 12 hex digits of the SHA-1 of the
        UTF-8 name - the same as profile_id() on Linux/macOS. Pure. #>
     [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Name, $Stored)
-    if ($Stored -is [string] -and $Stored -cmatch '^[0-9a-f]{12}$') { return $Stored }
+    if ($Stored -is [string] -and $Stored -cmatch '^[0-9a-f]{12}\z') { return $Stored }
     $sha = [Security.Cryptography.SHA1]::Create()
     try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Name)) } finally { $sha.Dispose() }
     (-join ($h | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
@@ -143,7 +164,7 @@ function Get-VeroConfig {
     $profiles = foreach ($p in $rawProfiles) {
         $name = [string](Get-Prop $p 'profile')
         if (-not $name) { throw 'config.json: vpn.profile is required' }
-        if ($name.Length -gt 256 -or $name -match '[\x00-\x1f"*?\[\]<>|&]') { throw "config.json: invalid VPN profile name '$name'" }
+        if ($name.Length -gt 255 -or $name -match '[\x00-\x1f"*?\[\]<>|&]' -or $name.StartsWith('-')) { throw "config.json: invalid VPN profile name '$name'" }
         $type = ([string](Get-Prop $p 'type')).ToLowerInvariant()
         if (-not $type) { $type = 'ras' }
         if ($script:Types -notcontains $type) { throw "config.json: type must be one of $(($script:Types | ForEach-Object { "'$_'" }) -join ', ') (profile '$name')" }
@@ -288,10 +309,20 @@ function Import-VeroSavePayload {
     $bytes = [IO.File]::ReadAllBytes($Path)
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
-    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}$' -or $hash -ne $Sha256.ToLowerInvariant()) { throw 'the save payload is not the one that was approved - nothing was changed' }
+    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}\z' -or $hash -ne $Sha256.ToLowerInvariant()) { throw 'the save payload is not the one that was approved - nothing was changed' }
     $payload = (New-Object Text.UTF8Encoding($false)).GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     if (-not $payload -or -not $payload.PSObject.Properties['Config']) { throw 'save payload without a config' }
     $imports = @(if ($payload.PSObject.Properties['Imports']) { $payload.Imports } else { @() }) | Where-Object { $_ }
+    # the config first: a payload whose config is refused changes nothing, and an OpenVPN text is stored only for an
+    # OpenVPN profile of that config (never a file for a name the config does not have)
+    $new = Get-VeroConfig -Raw ([string]$payload.Config)
+    $ovpn = @($new.Profiles | Where-Object Type -eq 'openvpn' | ForEach-Object Profile)
+    foreach ($i in $imports) { if ($ovpn -notcontains [string]$i.Profile) { throw "the save payload holds an OpenVPN config for '$([string]$i.Profile)', which is not an OpenVPN profile of the config - nothing was changed" } }
+    # every text is checked before the first one is stored: one refused config and nothing was changed
+    foreach ($i in $imports) {
+        $chk = Test-VeroOpenVpnConf -Text ([string]$i.Text) -ReadFile { param($x) throw "unexpected file reference $x" }
+        if ($chk.Errors.Count -gt 0) { throw ("OpenVPN config for '{0}' refused: {1} - nothing was changed" -f [string]$i.Profile, (@($chk.Errors | Select-Object -First 3) -join '; ')) }
+    }
     foreach ($i in $imports) { $null = Import-VeroOpenVpnText -ProfileName ([string]$i.Profile) -Text ([string]$i.Text) }
     Save-VeroConfig -Json ([string]$payload.Config) | Out-Null
     Remove-VeroStaleOpenVpnFile -Config (Get-VeroConfig -Raw ([string]$payload.Config)) -Action 'save'   # a deleted profile's keys go too
@@ -310,8 +341,6 @@ function Save-VeroConfig {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Json)
     $cfg = Get-VeroConfig -Raw $Json
     $p = Get-VeroPath
-    $tmp = "$($p.Config).new"
-    ConvertTo-VeroConfigJson $cfg | Set-Content -Path $tmp -Encoding UTF8
-    Move-Item $tmp $p.Config -Force
+    Write-VeroStateFile -Path $p.Config -Text ((ConvertTo-VeroConfigJson $cfg) -join "`r`n")
     $cfg
 }

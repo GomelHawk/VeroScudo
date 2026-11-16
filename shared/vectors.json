@@ -1,0 +1,697 @@
+{
+  "about": "Rules that must give the same answer on Windows (PowerShell) and on Linux/macOS (Python). Read by windows/tests/VeroScudo.Shared.Tests.ps1 and linux/tests/test_shared_vectors.py. A rule that is meant to differ per platform does not belong here.",
+  "version_newer": [
+    {
+      "tag": "v1.3.1",
+      "current": "1.3.0",
+      "newer": true
+    },
+    {
+      "tag": "V2.0",
+      "current": "1.9.9",
+      "newer": true
+    },
+    {
+      "tag": "1.10.0",
+      "current": "1.9.0",
+      "newer": true
+    },
+    {
+      "tag": "v1.3.0",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "v1.3.0.0",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "v1.3",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "v1.3.0.1",
+      "current": "1.3.0",
+      "newer": true
+    },
+    {
+      "tag": "v1.2.9",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "latest",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "v1.3.1-beta",
+      "current": "1.3.0",
+      "newer": false
+    },
+    {
+      "tag": "v1",
+      "current": "0.9",
+      "newer": false
+    }
+  ],
+  "release_url": [
+    {
+      "url": "https://github.com/GomelHawk/VeroScudo/releases/tag/v1.3.1",
+      "ok": true
+    },
+    {
+      "url": "https://github.com/GomelHawk/VeroScudo/releases/",
+      "ok": true
+    },
+    {
+      "url": "http://github.com/GomelHawk/VeroScudo/releases/tag/v1.3.1",
+      "ok": false
+    },
+    {
+      "url": "https://github.com/GomelHawk/VeroScudo/issues/1",
+      "ok": false
+    },
+    {
+      "url": "https://github.com/Someone/VeroScudo/releases/tag/v1",
+      "ok": false
+    },
+    {
+      "url": "https://github.com.example.com/GomelHawk/VeroScudo/releases/",
+      "ok": false
+    },
+    {
+      "url": "https://user@github.com/GomelHawk/VeroScudo/releases/",
+      "ok": false
+    },
+    {
+      "url": "https://example.com/?x=https://github.com/GomelHawk/VeroScudo/releases/",
+      "ok": false
+    },
+    {
+      "url": "file:///C:/Windows/System32/calc.exe",
+      "ok": false
+    },
+    {
+      "url": "",
+      "ok": false
+    }
+  ],
+  "profile_id": [
+    {
+      "name": "Work",
+      "id": "00040bab8a78"
+    },
+    {
+      "name": "CorporateVPN",
+      "id": "afc2932db143"
+    },
+    {
+      "name": "Büro VPN",
+      "id": "4ee7513e9c65"
+    }
+  ],
+  "lan_allow": [
+    {
+      "value": "192.168.1.0/24",
+      "ok": true
+    },
+    {
+      "value": "192.168.1.5/24",
+      "ok": true
+    },
+    {
+      "value": "10.0.0.0/8",
+      "ok": true
+    },
+    {
+      "value": "192.168.1.7",
+      "ok": true
+    },
+    {
+      "value": "fd00::/16",
+      "ok": true
+    },
+    {
+      "value": "2001:db8::1",
+      "ok": true
+    },
+    {
+      "value": "10.0.0.0/7",
+      "ok": false
+    },
+    {
+      "value": "0.0.0.0/0",
+      "ok": false
+    },
+    {
+      "value": "::/0",
+      "ok": false
+    },
+    {
+      "value": "fc00::/15",
+      "ok": false
+    },
+    {
+      "value": "10.0.0.0/255.0.0.0",
+      "ok": false
+    },
+    {
+      "value": "10.0.0.0/33",
+      "ok": false
+    },
+    {
+      "value": "fe80::1%eth0",
+      "ok": false
+    },
+    {
+      "value": "fe80::/64%5",
+      "ok": false
+    },
+    {
+      "value": "1",
+      "ok": false
+    },
+    {
+      "value": "0x0a000001",
+      "ok": false
+    },
+    {
+      "value": "Any",
+      "ok": false
+    },
+    {
+      "value": "",
+      "ok": false
+    },
+    {
+      "value": "192.168.1.0/24 accept",
+      "ok": false
+    },
+    {
+      "value": "10.0.0.0/8\n",
+      "ok": false
+    },
+    {
+      "value": "192.168.1.7\n",
+      "ok": false
+    },
+    {
+      "value": "010.0.0.0/8",
+      "ok": false
+    },
+    {
+      "value": "::ffff:10.0.0.0/104",
+      "ok": false
+    }
+  ],
+  "server_ips": [
+    {
+      "value": "203.0.113.5",
+      "ok": true
+    },
+    {
+      "value": "2001:db8::1",
+      "ok": true
+    },
+    {
+      "value": "999.1.1.1",
+      "ok": false
+    },
+    {
+      "value": "1",
+      "ok": false
+    },
+    {
+      "value": "0x1",
+      "ok": false
+    },
+    {
+      "value": "203.0.113.5/32",
+      "ok": false
+    },
+    {
+      "value": "fe80::1%5",
+      "ok": false
+    },
+    {
+      "value": "fe80::1%eth0",
+      "ok": false
+    },
+    {
+      "value": "vpn.example.com",
+      "ok": false
+    },
+    {
+      "value": "203.0.113.5 ",
+      "ok": false
+    },
+    {
+      "value": "203.0.113.5\n",
+      "ok": false
+    },
+    {
+      "value": "017.0.0.1",
+      "ok": false
+    },
+    {
+      "value": "10.0.0.01",
+      "ok": false
+    },
+    {
+      "value": "::ffff:1.2.3.4",
+      "ok": false
+    }
+  ],
+  "config": [
+    {
+      "what": "the smallest config",
+      "top": {},
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "retrySeconds at its lower limit",
+      "top": {
+        "retrySeconds": 3
+      },
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "retrySeconds at its upper limit",
+      "top": {
+        "retrySeconds": 3600
+      },
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "retrySeconds below the limit",
+      "top": {
+        "retrySeconds": 2
+      },
+      "profile": {},
+      "ok": false
+    },
+    {
+      "what": "retrySeconds above the limit",
+      "top": {
+        "retrySeconds": 3601
+      },
+      "profile": {},
+      "ok": false
+    },
+    {
+      "what": "vm true",
+      "top": {
+        "vm": true
+      },
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "vm false",
+      "top": {
+        "vm": false
+      },
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "vm auto (before 1.4)",
+      "top": {
+        "vm": "auto"
+      },
+      "profile": {},
+      "ok": true
+    },
+    {
+      "what": "vm as a word",
+      "top": {
+        "vm": "yes"
+      },
+      "profile": {},
+      "ok": false
+    },
+    {
+      "what": "port 1",
+      "top": {},
+      "profile": {
+        "port": 1
+      },
+      "ok": true
+    },
+    {
+      "what": "port 65535",
+      "top": {},
+      "profile": {
+        "port": 65535
+      },
+      "ok": true
+    },
+    {
+      "what": "port 0",
+      "top": {},
+      "profile": {
+        "port": 0
+      },
+      "ok": false
+    },
+    {
+      "what": "port 65536",
+      "top": {},
+      "profile": {
+        "port": 65536
+      },
+      "ok": false
+    },
+    {
+      "what": "a server name with a space",
+      "top": {},
+      "profile": {
+        "server": "vpn example.com"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server name with a semicolon",
+      "top": {},
+      "profile": {
+        "server": "vpn.example.com;x"
+      },
+      "ok": false
+    },
+    {
+      "what": "a profile name with a quote",
+      "top": {},
+      "profile": {
+        "profile": "a\"b"
+      },
+      "ok": false
+    },
+    {
+      "what": "a profile name with a line break",
+      "top": {},
+      "profile": {
+        "profile": "a\nb"
+      },
+      "ok": false
+    },
+    {
+      "what": "a profile name with spaces and letters outside ASCII",
+      "top": {},
+      "profile": {
+        "profile": "Büro VPN 2"
+      },
+      "ok": true
+    },
+    {
+      "what": "an activeProfile that is not in the list",
+      "top": {
+        "activeProfile": "Nope"
+      },
+      "profile": {},
+      "ok": false
+    },
+    {
+      "what": "no profile name",
+      "top": {},
+      "profile": {
+        "profile": ""
+      },
+      "ok": false
+    },
+    {
+      "what": "a server name that ends with a line break",
+      "top": {},
+      "profile": {
+        "server": "vpn.example.com\n"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server name of 254 characters",
+      "top": {},
+      "profile": {
+        "server": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaa"
+      },
+      "ok": false
+    },
+    {
+      "what": "a profile name that starts with a dash",
+      "top": {},
+      "profile": {
+        "profile": "-x"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server address with a zone",
+      "top": {},
+      "profile": {
+        "server": "fe80::1%eth0"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server given as an address",
+      "top": {},
+      "profile": {
+        "server": "203.0.113.5"
+      },
+      "ok": true
+    },
+    {
+      "what": "a server written as a number shorthand (10.1)",
+      "top": {},
+      "profile": {
+        "server": "10.1"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server written as one number",
+      "top": {},
+      "profile": {
+        "server": "1"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server address with a part over 255",
+      "top": {},
+      "profile": {
+        "server": "999.1.1.1"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server written as a hexadecimal number",
+      "top": {},
+      "profile": {
+        "server": "0x7f000001"
+      },
+      "ok": false
+    },
+    {
+      "what": "a server address with a leading zero (read as octal by some)",
+      "top": {},
+      "profile": {
+        "server": "017.0.0.1"
+      },
+      "ok": false
+    },
+    {
+      "what": "a host name that starts with a digit",
+      "top": {},
+      "profile": {
+        "server": "1host.example.com"
+      },
+      "ok": true
+    },
+    {
+      "what": "a server given as an IPv4 address in IPv6 form",
+      "top": {},
+      "profile": {
+        "server": "::ffff:1.2.3.4"
+      },
+      "ok": false
+    }
+  ],
+  "status_url": [
+    {
+      "url": "https://status.claude.com/api/v2/status.json",
+      "ok": true
+    },
+    {
+      "url": "https://status.example.com",
+      "ok": true
+    },
+    {
+      "url": "HTTPS://status.example.com/x",
+      "ok": true
+    },
+    {
+      "url": "http://status.example.com/api/v2/status.json",
+      "ok": false
+    },
+    {
+      "url": "https://",
+      "ok": false
+    },
+    {
+      "url": "https:///path",
+      "ok": false
+    },
+    {
+      "url": "https://status.example.com/a b",
+      "ok": false
+    },
+    {
+      "url": "https://status.example.com/x\n",
+      "ok": false
+    },
+    {
+      "url": "file:///etc/passwd",
+      "ok": false
+    },
+    {
+      "url": "",
+      "ok": false
+    },
+    {
+      "url": "https://a.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "ok": false
+    },
+    {
+      "url": "https://:443/x",
+      "ok": false
+    },
+    {
+      "url": "https://user@status.example.com/x",
+      "ok": true
+    }
+  ],
+  "usable_server_ip": [
+    {
+      "value": "203.0.113.5",
+      "ok": true
+    },
+    {
+      "value": "10.1.2.3",
+      "ok": true
+    },
+    {
+      "value": "192.168.1.1",
+      "ok": true
+    },
+    {
+      "value": "2001:db8::1",
+      "ok": true
+    },
+    {
+      "value": "fd12:3456::1",
+      "ok": true
+    },
+    {
+      "value": "127.0.0.1",
+      "ok": false
+    },
+    {
+      "value": "0.0.0.0",
+      "ok": false
+    },
+    {
+      "value": "0.1.2.3",
+      "ok": false
+    },
+    {
+      "value": "169.254.1.1",
+      "ok": false
+    },
+    {
+      "value": "224.0.0.1",
+      "ok": false
+    },
+    {
+      "value": "240.0.0.1",
+      "ok": false
+    },
+    {
+      "value": "255.255.255.255",
+      "ok": false
+    },
+    {
+      "value": "198.18.0.1",
+      "ok": false
+    },
+    {
+      "value": "198.19.255.254",
+      "ok": false
+    },
+    {
+      "value": "198.20.0.1",
+      "ok": true
+    },
+    {
+      "value": "::1",
+      "ok": false
+    },
+    {
+      "value": "::",
+      "ok": false
+    },
+    {
+      "value": "fe80::1",
+      "ok": false
+    },
+    {
+      "value": "ff02::1",
+      "ok": false
+    },
+    {
+      "value": "fc00::1",
+      "ok": false
+    },
+    {
+      "value": "fc00:4000::1",
+      "ok": true
+    },
+    {
+      "value": "fe80::1%eth0",
+      "ok": false
+    },
+    {
+      "value": "203.0.113.5%1",
+      "ok": false
+    },
+    {
+      "value": "vpn.example.com",
+      "ok": false
+    },
+    {
+      "value": "",
+      "ok": false
+    },
+    {
+      "value": "017.0.0.1",
+      "ok": false
+    },
+    {
+      "value": "::ffff:203.0.113.5",
+      "ok": false
+    },
+    {
+      "value": "::ffff:127.0.0.1",
+      "ok": false
+    }
+  ]
+}

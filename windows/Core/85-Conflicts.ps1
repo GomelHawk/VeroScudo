@@ -27,7 +27,7 @@ function Get-VeroConflict {
                 # the folder and its direct subfolders only, never through junctions/links: these folders belong to the user,
                 # and a junction to C:\ must not turn this admin-run check into a disk scan every minute
                 $where = @($d) + @(Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 20 | ForEach-Object FullName)
-                $files = @(foreach ($w in $where) { Get-ChildItem -LiteralPath $w -Filter '*.ovpn' -File -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } })
+                $files = @(foreach ($w in $where) { Get-ChildItem -LiteralPath $w -Filter '*.ovpn' -File -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $_.Length -le 1MB } })   # the user's folders: no links, no file of any size
                 foreach ($f in @($files | Select-Object -First 50)) {
                     $theirs = @((Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($f.FullName)) -ReadFile { param($x) $null = $x; [byte[]]@() }).Remotes | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object
                     if ($theirs.Count -gt 0 -and (@($theirs | Where-Object { $mine -contains $_ }).Count -gt 0)) {
@@ -145,7 +145,7 @@ function Update-VeroConflict {
     if (($old -join "`n") -ne ($items -join "`n")) {
         if ($items.Count -gt 0) { Write-VeroLog ("ATTENTION: {0}" -f ($items -join ' | ')) $Action } else { Write-VeroLog 'no other VPN or kill-switch next to VeroScudo any more' $Action }
     }
-    @{ Time = (Get-Date).ToString('o'); Items = $items } | ConvertTo-Json -Depth 3 | Set-Content $p.Conflicts
+    Write-VeroStateFile -Path $p.Conflicts -Text (@{ Time = (Get-Date).ToString('o'); Items = $items } | ConvertTo-Json -Depth 3)
 }
 
 function Get-VeroConflictList {

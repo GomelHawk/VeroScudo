@@ -12,28 +12,26 @@ import json
 import logging
 import logging.handlers
 import os
+import stat
 import sys
 from pathlib import Path
 
 from . import __version__, importer, keepawake, quality
 from .backend import firewall, nm
 from .config import Config, config_path
-from .daemon import Guard
-from .state import StateStore, kind_label, switch_notice
-
-LOG = "/var/log/veroscudo.log"
-# who may read the log besides root: the administrators' group (Debian/Ubuntu 'adm' also reads the journal, where the
-# daemon's output goes anyway; macOS 'admin'). The tray's Status and Open log read it as the signed-in user.
-LOG_GROUP = "admin" if sys.platform == "darwin" else "adm"
+from .daemon import Guard, force_off, lockdown
+from .state import LOG, LOG_GROUP, StateStore, is_up, kind_label, switch_notice
 
 
-def share_log(path: str) -> None:
-    """root:<admins> 0640 - best effort (the group may not exist; a user's own run cannot chown)."""
+def share_log(stream) -> None:
+    """root:<admins> 0640 on the open file itself, never by its path - best effort (the group may not exist; a user's
+    own run cannot chown). /var/log can be writable by a system group: a path could be swapped for a link there."""
     try:
+        fd = stream.fileno()
         if os.geteuid() == 0:
-            os.chown(path, 0, grp.getgrnam(LOG_GROUP).gr_gid)
-        os.chmod(path, 0o640)
-    except (KeyError, OSError):
+            os.fchown(fd, 0, grp.getgrnam(LOG_GROUP).gr_gid)
+        os.fchmod(fd, 0o640)
+    except (KeyError, OSError, ValueError):
         pass
 
 
@@ -42,8 +40,14 @@ class SharedLog(logging.handlers.RotatingFileHandler):
     log's owner and mode, not root's umask."""
 
     def _open(self):
-        stream = super()._open()
-        share_log(self.baseFilename)
+        # O_NOFOLLOW: a link in the log's place is not written through (the open fails, and the log goes without a file)
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o640)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (os.geteuid() == 0 and st.st_uid != 0):
+            os.close(fd)                                 # a pipe, a second name for another file, a file of somebody else's
+            raise OSError(f"{self.baseFilename} is not the log file VeroScudo made")
+        stream = os.fdopen(fd, self.mode if "b" in self.mode else "a", encoding=self.encoding, errors=self.errors)
+        share_log(stream)
         return stream
 
 
@@ -75,24 +79,16 @@ def _setup_logging() -> None:
         handlers.append(logging.StreamHandler(sys.stdout))
     try:
         path = os.environ.get("VEROSCUDO_LOG", LOG)
-        if not os.path.exists(path):                     # never world-readable: profile names, servers, decisions
-            os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o640))
+        # never world-readable (profile names, servers, decisions): SharedLog creates it 0640
         handlers.append(SharedLog(path, maxBytes=2 * 1024 * 1024, backupCount=1))
     except OSError:
         pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
 
 
-def is_up(cfg: Config, store: StateStore) -> bool:
-    """Connected - and, while armed, let through by the kill-switch as the guard last applied it. A dead WireGuard link stays
-    'activated' and only root can read its handshakes; the guard's own verdict (applied.json) is what counts."""
-    if not nm.is_connected(cfg.profile):
-        return False
-    return not store.armed or store.allowed_tunnel(cfg.profile) is not None
-
-
 def status(cfg: Config, store: StateStore) -> int:
-    armed, up = store.armed, is_up(cfg, store)
+    armed = store.armed
+    up = is_up(nm, store, cfg.profile, armed)
     state = "off" if not armed else ("protected" if up else "blocked")
     kind = nm.kind(cfg.profile)
     print(f"profile    : {cfg.profile} ({kind_label(kind)})")
@@ -136,7 +132,7 @@ def do_import(names: list[str]) -> int:
     if os.geteuid() != 0:
         print("veroscudo: import writes /etc/veroscudo/config.json - run it with sudo", file=sys.stderr)
         return 2
-    p = Path(os.environ.get("VEROSCUDO_CONFIG", "/etc/veroscudo/config.json"))
+    p = config_path()
     try:
         text, msgs = importer.add_profiles(p.read_text() if p.exists() else "", found, names)
     except ValueError as e:
@@ -303,10 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         # Off is the one way out and must not need a config that loads: the flag and the rules go; the VPN connection
         # itself is left as it is (its name is in the file that cannot be read)
         if a.action in ("off", "disarm") and os.geteuid() == 0:
-            with store.firewall_lock():
-                store.set_armed(False)
-                firewall.clear()
-                store.set_applied(None, None)
+            force_off(store)
             logging.getLogger("veroscudo").warning("config.json unusable (%s) - turned off: kill-switch removed; the VPN "
                                                    "connection itself was not touched", e)
             return 0
@@ -314,8 +307,7 @@ def main(argv: list[str] | None = None) -> int:
         # (launchd/systemd restart it), so the lockdown stays until the file is fixed and `veroscudo on` is run again.
         if a.action in ("boot", "daemon") and store.armed:
             with store.firewall_lock():
-                firewall.apply(firewall.render_lockdown())
-                store.set_applied(None, None)
+                lockdown(store)
             logging.getLogger("veroscudo").error("config.json unusable (%s) - armed: everything but DHCP is blocked until it is fixed", e)
             return 2
         print(f"veroscudo: {e}", file=sys.stderr)

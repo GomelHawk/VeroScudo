@@ -448,3 +448,25 @@ def test_wg_show_endpoints_parsing():
     text = "W31EZNwNi1bhP+Y1L+8QU6Q5snHFJWg+neN7J7934wQ=\t203.0.113.30:3389\nAbc=\t(none)\nDef=\t[2001:db8::7]:51820\n"
     assert realnm.parse_wg_endpoints(text) == ["203.0.113.30", "2001:db8::7"]
     assert realnm.parse_wg_endpoints("") == []
+
+
+def test_record_minute_passes_up_and_down_to_the_statistics_and_logs_a_write_error(env, caplog):
+    g, _, _ = env
+    ticks = []
+
+    class Recorder:
+        fail = False
+
+        def tick(self, up, pid, name, down=False):
+            if self.fail:
+                raise OSError("disk full")
+            ticks.append((up, pid, name, down))
+    g.stats = Recorder()
+    g.record_minute(True)
+    g.record_minute(False, down=True)
+    pid = g.cfg.current.id
+    assert ticks == [(True, pid, "Work", False), (False, pid, "Work", True)]
+    g.stats.fail = True
+    with caplog.at_level("ERROR", logger="veroscudo"):
+        g.record_minute(True)                                      # logged, not raised: the guard's pass goes on
+    assert [(r.message, r.exc_info[0]) for r in caplog.records] == [("statistics", OSError)]

@@ -34,6 +34,7 @@ namespace VeroScudo
         public static readonly Guid RemotePort = new Guid("c35a604d-d22b-4e1a-91b4-68f674ee674b");
         public static readonly Guid LocalPort = new Guid("0c1ba1af-5765-453f-af22-a8f791ac775b");  // = ICMP type for ICMP
         public static readonly Guid AppId = new Guid("d78e1e87-8644-4ea5-9437-d809ecefc971");
+        public static readonly Guid UserId = new Guid("af043a0a-b34d-4f86-979c-c90371af6e66");     // FWPM_CONDITION_ALE_USER_ID
     }
 
     /// <summary>One WFP filter, described in managed terms. Conditions on the same field are OR-ed, different fields AND-ed.</summary>
@@ -54,6 +55,10 @@ namespace VeroScudo
         public FilterSpec LocalPort(ushort p) { Conds.Add(Cond.U16(Field.LocalPort, p)); return this; }
         public FilterSpec IcmpType(ushort t) { return LocalPort(t); }
         public FilterSpec App(string path) { Conds.Add(Cond.AppId(path)); return this; }
+        /// <summary>Only traffic sent as Local System or by an elevated administrator: Windows' own services and drivers
+        /// (IKE, L2TP, PPTP) and what an administrator's elevated process has them send - never an ordinary program of
+        /// the signed-in user, whose token does not carry the Administrators group.</summary>
+        public FilterSpec Privileged() { Conds.Add(Cond.Privileged()); return this; }
         /// <summary>"203.0.113.5", "192.168.1.0/24", "fe80::/10"</summary>
         public FilterSpec Remote(string cidr) { Conds.Add(Cond.Addr(cidr)); return this; }
 
@@ -73,6 +78,7 @@ namespace VeroScudo
         public static Cond U32(Guid f, uint match, uint v) { return new Cond { Field = f, Match = match, Type = Native.FWP_UINT32, Inline = v, Text = "0x" + v.ToString("x") }; }
         public static Cond U64(Guid f, ulong v) { return new Cond { Field = f, Type = Native.FWP_UINT64, Inline = v, Text = "luid:" + v }; }
         public static Cond AppId(string path) { return new Cond { Field = VeroScudo.Field.AppId, Type = Native.FWP_BYTE_BLOB_TYPE, Text = path }; }
+        public static Cond Privileged() { return new Cond { Field = VeroScudo.Field.UserId, Type = Native.FWP_SECURITY_DESCRIPTOR_TYPE, Text = "SYSTEM+ADMINS" }; }
         public static Cond Addr(string cidr)
         {
             string ip = cidr; int prefix = -1;
@@ -119,6 +125,23 @@ namespace VeroScudo
                     e.Commit();
                 }
                 catch { e.Abort(); throw; }
+            }
+        }
+
+        /// <summary>Asks WFP whether it accepts these filters, and changes nothing: they are added inside a transaction that is
+        /// always rolled back (under keys of their own, so filters in force are not touched even there). Throws what WFP
+        /// answers when it refuses one. The installer's self-test and the unit tests use it before anything is applied.</summary>
+        public static void Validate(FilterSpec[] specs)
+        {
+            using (var e = new Engine())
+            {
+                e.Begin();
+                try
+                {
+                    e.EnsureProviderAndSubLayer();
+                    for (int i = 0; i < specs.Length; i++) e.AddFilter(Guid.NewGuid(), specs[i]);
+                }
+                finally { e.Abort(); }
             }
         }
 
@@ -308,6 +331,19 @@ namespace VeroScudo
                     // FWP_V6_ADDR_AND_MASK { UINT8 addr[16]; UINT8 prefixLength; }
                     IntPtr p = Alloc(17); Marshal.Copy(c.Bytes, 0, p, 16); Marshal.WriteByte(p, 16, (byte)c.Inline);
                     return (ulong)p.ToInt64();
+                }
+                case Native.FWP_SECURITY_DESCRIPTOR_TYPE:
+                {
+                    // FWP_BYTE_BLOB { UINT32 size; UINT8* data; } holding a self-relative security descriptor that grants
+                    // "match" (FWP_ACTRL_MATCH_FILTER = 0x1, "CC" in SDDL) to Local System and to the Administrators group
+                    // (a group a non-elevated program's token holds only as deny-only, so it does not match)
+                    var sd = new System.Security.AccessControl.RawSecurityDescriptor("O:SYG:SYD:(A;;CC;;;SY)(A;;CC;;;BA)");
+                    byte[] raw = new byte[sd.BinaryLength];
+                    sd.GetBinaryForm(raw, 0);
+                    IntPtr data = Alloc(raw.Length); Marshal.Copy(raw, 0, data, raw.Length);
+                    IntPtr blob = Alloc(IntPtr.Size * 2);
+                    Marshal.WriteInt32(blob, 0, raw.Length); Marshal.WriteIntPtr(blob, IntPtr.Size, data);
+                    return (ulong)blob.ToInt64();
                 }
                 case Native.FWP_BYTE_BLOB_TYPE:
                 {
@@ -588,6 +624,7 @@ namespace VeroScudo
     {
         internal const uint RPC_C_AUTHN_WINNT = 10;
         internal const uint FWP_UINT8 = 1, FWP_UINT16 = 2, FWP_UINT32 = 3, FWP_UINT64 = 4, FWP_BYTE_BLOB_TYPE = 12;
+        internal const uint FWP_SECURITY_DESCRIPTOR_TYPE = 14;
         internal const uint FWP_V4_ADDR_MASK = 0x100, FWP_V6_ADDR_MASK = 0x101;
         internal const uint FWP_MATCH_EQUAL = 0, FWP_MATCH_FLAGS_ALL_SET = 6;
         internal const uint FWP_ACTION_BLOCK = 0x1001, FWP_ACTION_PERMIT = 0x1002;

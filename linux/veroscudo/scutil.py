@@ -15,12 +15,16 @@ from .netutil import IFNAME as _IFNAME
 from .netutil import nameservers, resolve  # noqa: F401  (part of this backend's contract)
 
 
-def _status(profile: str) -> str:
+def _scutil(*args: str) -> str:
+    """One question to scutil, never longer than 20 s: one that hangs must not hang the guard or the menu-bar app."""
     try:
-        return subprocess.run(["scutil", "--nc", "status", profile], check=False, capture_output=True, text=True,
-                              timeout=20).stdout
+        return subprocess.run(["scutil", *args], check=False, capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.SubprocessError):
-        return ""               # no answer = not connected: the guard stays blocked
+        return ""               # no answer = not connected / nothing found: the guard stays blocked
+
+
+def _status(profile: str) -> str:
+    return _scutil("--nc", "status", profile)
 
 
 def is_connected(profile: str) -> bool:
@@ -34,7 +38,7 @@ def parse_iface(text: str) -> str | None:
     """The tunnel interface (ipsec0, ppp0, utunN) in `scutil --nc status` output; only virtual interfaces are accepted
     (a physical one is never "the tunnel"). Pure."""
     m = re.search(r"InterfaceName\s*:\s*(\S+)", text)
-    if m and _IFNAME.match(m.group(1)) and re.match(r"^(ipsec|ppp|utun|tun)\d+$", m.group(1)):
+    if m and _IFNAME.match(m.group(1)) and re.match(r"^(ipsec|ppp|utun|tun)\d+\Z", m.group(1)):
         return m.group(1)
     return None
 
@@ -142,17 +146,17 @@ def down_argv(name: str) -> list[str]:
     return ["scutil", "--nc", "stop", name]
 
 
-_VMIF = re.compile(r"^(bridge\d+|vmnet\d+|vnic\d+)$")
-_PHYS = re.compile(r"^(en|vlan|bond|fw)\d+$")       # a card, or a VLAN / bond / FireWire link on one
+_VMIF = re.compile(r"^(bridge\d+|vmnet\d+|vnic\d+)\Z")
+_VMPORT = re.compile(r"^(vmenet|vmnet|vnic|vnet|tap)\d+\Z")     # a VM's side of a bridge - the only members a host-only bridge has
 
 
 def parse_bridges(text: str) -> list[str]:
     """`ifconfig` -> the host-side interfaces of VMs on NAT or host-only networks. Pure.
 
-    bridgeN: the vmnet framework (Parallels, VMware Fusion, UTM, Lima, Docker Desktop's VM) - qualifies only while none of
-    its members is a physical port (enN, or a vlanN / bondN on one): a bridged-mode VM (bridge + en0) or the Thunderbolt Bridge (bridge0 + en1, en2)
-    puts frames straight onto the wire, past pf - allowing it would open the kill-switch to the LAN, the same rule as
-    nm.vm_bridges on Linux. vmnetN (older VMware Fusion) and vnicN (older Parallels) are host-side interfaces, always NAT
+    bridgeN: the vmnet framework (Parallels, VMware Fusion, UTM, Lima, Docker Desktop's VM) - qualifies only while every
+    member is a VM's own port (vmenetN ...). With any other member - a card (enN), a VLAN, a bond, Wi-Fi sharing - it may
+    put frames straight onto the wire, past pf: a bridged-mode VM (bridge + en0), the Thunderbolt Bridge (bridge0 + en1,
+    en2). Allowing that would open the kill-switch to the LAN, the same rule as nm.vm_bridges on Linux. vmnetN (older VMware Fusion) and vnicN (older Parallels) are host-side interfaces, always NAT
     or host-only."""
     out, name, phys = [], None, False
     for line in text.splitlines() + [""]:
@@ -163,8 +167,8 @@ def parse_bridges(text: str) -> list[str]:
             name, phys = (m.group(1), False) if m else (None, False)
             continue
         mm = re.match(r"^\s+member:\s+(\S+)", line)
-        if mm and _PHYS.match(mm.group(1)):
-            phys = True
+        if mm and not _VMPORT.match(mm.group(1)):
+            phys = True                                 # anything else (a card, a VLAN, Wi-Fi sharing ...) may reach the wire
     return out
 
 
@@ -219,14 +223,14 @@ def parse_server(text: str) -> str:
 
 def discover() -> list[dict]:
     out = hiddify.discover()
-    for s in parse_list(subprocess.run(["scutil", "--nc", "list"], check=False, capture_output=True, text=True).stdout):
+    for s in parse_list(_scutil("--nc", "list")):
         if out and "hiddify" in s["name"].lower():
             continue                           # Hiddify's own network extension: imported from its config file instead
         d = {"name": s["name"], "vpn_type": s["kind"], "server": "", "port": 4500, "protocol": "udp", "username": "", "note": ""}
         if not s["kind"]:
             d["note"] = "VPN type not supported by VeroScudo (an app's own VPN)"
         else:
-            d["server"] = parse_server(subprocess.run(["scutil", "--nc", "show", s["id"]], check=False, capture_output=True, text=True).stdout)
+            d["server"] = parse_server(_scutil("--nc", "show", s["id"]))
             if s["kind"] == "pptp":
                 d.update(port=1723, protocol="tcp")
             if not d["server"]:

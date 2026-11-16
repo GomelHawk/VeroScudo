@@ -1,7 +1,9 @@
 """What the Linux and macOS trays took over from the Windows tray: exit location, other-VPN notices and the Turn-on
 question, the status window's details, the keep-awake badge and Remove - all decided in shared modules."""
+import ast
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -322,3 +324,40 @@ def test_turned_on_elsewhere_reads_as_connecting():
     assert not tm.turned_on_elsewhere("protected", blocked, None)            # a real drop
     assert not tm.turned_on_elsewhere("off", blocked, "connect")             # the tray started it itself
     assert not tm.turned_on_elsewhere(None, blocked, None)                   # the first look
+
+
+# user-visible sentences both trays show word for word (the Windows tray keeps its own copy of each)
+SHARED_SENTENCES = (
+    "VPN connection lost - traffic blocked",
+    "VPN not connected yet - traffic blocked",
+    "VPN turned off",
+    "Firewall back to normal - traffic is NOT protected.",
+    "Tunnel up, kill-switch on.",
+    "VeroScudo needs attention",
+    "Blocked - reconnecting",
+    "Blocked - waiting for Hiddify",
+    "VeroScudo on - connecting",
+    "Guard not running",
+    "The VPN is off - use Turn VPN on.",
+    "The VPN is turned off: normal network, not protected.",
+    "Traffic is blocked right now - check again once the VPN is connected.",
+    "The update check got no answer - try again later.",
+    "Disconnect all and turn on",
+    "Disconnect what it can and turn on",
+    "Asks GitHub for the latest version, never while blocked. Nothing is installed automatically.",
+    "Shows the country and IP your traffic leaves from (asks ipinfo.io after each connect).",
+    "One bar = 10 minutes. Hover a bar for its time and numbers.",
+)
+
+
+def test_shared_sentences_are_the_same_in_the_windows_tray():
+    """Reads the Windows tray's sources when they are next to this folder (a full checkout) - skipped otherwise."""
+    root = Path(__file__).resolve().parent.parent
+    files = [root.parent / "windows" / n for n in ("VeroScudo.Tray.psm1", "VeroScudoTray.ps1")]
+    if not all(f.is_file() for f in files):
+        pytest.skip("the Windows sources are not here")
+    windows = "".join(f.read_text(encoding="utf-8-sig") for f in files)
+    tree = ast.parse((root / "veroscudo" / "traymodel.py").read_text(encoding="utf-8"))
+    python = "\n".join(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert [s for s in SHARED_SENTENCES if s not in python] == []     # the strings as Python joins them
+    assert [s for s in SHARED_SENTENCES if s not in windows] == []

@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 <#
-  VeroScudo tray - the part that decides, without a window. VeroScudoTray.ps1 (WinForms) collects the facts, calls these
-  functions and draws the result; everything here takes explicit inputs and is unit-tested (tests/VeroScudo.Tray.Tests.ps1).
+  VeroScudo tray - the part that decides, without a window: the tray state and its texts, the notices, the menu, what
+  the update check and the Save command say and do. VeroScudoTray.ps1 (WinForms) collects the facts, calls these
+  functions and draws the result; the windows themselves, the background lookups and the foreign-VPN prompt are in that
+  script. Everything here takes explicit inputs and is unit-tested (tests/VeroScudo.Tray.Tests.ps1).
   Needs VeroScudo.Core in the session (Get-VeroTypeLabel, Test-VeroNewerVersion).
 #>
 Set-StrictMode -Version Latest
@@ -49,7 +51,9 @@ function ConvertTo-VeroExitView {
     [CmdletBinding()] param($Info, [string]$State, [string]$ProfileName, [datetime]$ProtectedSince = [datetime]::MinValue, [switch]$Checking,
                             [string]$Failure = '', [switch]$Preview, [switch]$Connected, [switch]$Hiddify)
     $c = $Info
-    if (-not $c -or -not $c.Ip) {
+    # an entry of another shape (tray.json is the user's own file) is "no location", not an error under strict mode
+    $hasIp = $c -and $(if ($c -is [Collections.IDictionary]) { $c.Contains('Ip') } else { [bool]$c.PSObject.Properties['Ip'] })
+    if (-not $hasIp -or -not $c.Ip) {
         $msg = if ($Checking) { 'Checking where your traffic leaves...' } elseif ($Failure) { "Location not available - $Failure" } else { 'Location: shown once the VPN is connected' }
         return @{ Has = $false; Text = $msg; Fresh = $false }
     }
@@ -82,11 +86,12 @@ function ConvertTo-VeroStatusPageView {
         $why = if ($Failure) { $Failure } else { 'not a status page answer' }
         return [pscustomobject]@{ Text = "${hostName}: not reachable"; Tone = 'normal'; Tip = "$tip`r`n$why"; Badge = '?'; Name = $hostName; Right = ('not reachable {0} {1:HH:mm}' -f $dot, $Time) }
     }
-    $name = if ($j.PSObject.Properties['page'] -and $j.page -and [string]$j.page.name) { [string]$j.page.name } else { $hostName }
-    $ind = [string]$j.status.indicator
+    # the page's own words, cut to one line of a sane length: they go into a label, a tooltip and the copied report
+    $name = if ($j.PSObject.Properties['page'] -and $j.page -and $j.page.PSObject.Properties['name'] -and [string]$j.page.name) { ConvertTo-VeroPlainText ([string]$j.page.name) 60 } else { $hostName }
+    $ind = if ($j.status.PSObject.Properties['indicator']) { [string]$j.status.indicator } else { '' }
     $tone = switch ($ind) { 'none' { 'good' } 'minor' { 'warn' } 'major' { 'bad' } 'critical' { 'bad' } default { 'normal' } }
     $badge = switch ($ind) { 'none' { 'OK' } 'minor' { '!' } 'major' { '!!' } 'critical' { '!!' } default { '?' } }
-    $desc = [string]$j.status.description
+    $desc = ConvertTo-VeroPlainText ([string]$j.status.description) 120
     [pscustomobject]@{ Text = "${name}: $desc"; Tone = $tone; Tip = $tip; Badge = $badge; Name = $name; Right = ('{0} {1} {2:HH:mm}' -f $desc, $dot, $Time) }
 }
 
@@ -165,9 +170,90 @@ function Resolve-VeroUpdateNotice {
     if ($Release -and (Test-VeroNewerVersion -Tag $Release.Tag)) {
         $balloon = $Info.notified -ne $Release.Tag
         if ($balloon) { $Info.notified = $Release.Tag }
-        return @{ Update = $Release; MenuText = "Update available: $($Release.Tag)"; Balloon = $balloon; Info = $Info }
+        return @{ Update = $Release; MenuText = "Update available: $($Release.Tag)$([char]0x2026)"; Balloon = $balloon; Info = $Info }
     }
     @{ Update = $null; MenuText = 'Check for updates'; Balloon = $false; Info = $Info }
+}
+
+function Resolve-VeroTrayExpect {
+    <# The "you asked for it" phase after Turn on, a profile switch or Reconnect: for up to 2 minutes a blocked state is
+       called by that phase's name instead of "connection lost". One timer pass of its life, pure:
+       $Expect = @{ Kind; Since; Until } or $null; $State / $Armed: the tray state now; $Last: the state of the pass before.
+       Returns @{ Expect (the phase after this pass, or $null); Kind (its kind while it runs, else $null);
+       Expired ($true once: 2 minutes passed and still blocked - said plainly, a start that fails must not hide behind
+       "Connecting") }. Rules: blocked right after off, with no phase running = turned on elsewhere (a shortcut): a
+       'connect' phase starts; protected = done; no longer armed after 20 s = cancelled or turned off again.
+       (= Expect.update / turned_on_elsewhere in traymodel.py) #>
+    [CmdletBinding()] param($Expect, [Parameter(Mandatory)][AllowEmptyString()][string]$State, [bool]$Armed, [AllowEmptyString()][string]$Last = '', [datetime]$Now = (Get-Date))
+    $running = { param($e) if ($e -and $Now -lt $e.Until) { [string]$e.Kind } else { $null } }
+    $expired = $false
+    if ($State -eq 'blocked' -and $Last -eq 'off' -and -not (& $running $Expect)) { $Expect = @{ Kind = 'connect'; Since = $Now; Until = $Now.AddMinutes(2) } }
+    if ($Expect) {
+        if ($State -eq 'protected') { $Expect = $null }
+        elseif (-not $Armed -and ($Now - $Expect.Since).TotalSeconds -gt 20) { $Expect = $null }
+        elseif ($State -eq 'blocked' -and -not (& $running $Expect)) { $Expect = $null; $expired = $true }
+    }
+    @{ Expect = $Expect; Kind = (& $running $Expect); Expired = $expired }
+}
+
+function Get-VeroTransitionNotice {
+    <# The notification for a change of the tray state, or $null when nothing is to be said: @{ Title; Text; Icon }
+       (Icon: Info | Warning). A blocked state reached on purpose is named after what you asked for - and after a switch or
+       a Reconnect not at all (they said so themselves). -Expired: the 2-minute notice of Resolve-VeroTrayExpect. Pure
+       (= transition_notice / expired_notice in traymodel.py). #>
+    [CmdletBinding()] param([AllowEmptyString()][string]$State = '', [AllowEmptyString()][string]$Last = '', [AllowEmptyString()][string]$ExpectKind = '', [string]$ProfileName = '', [string]$Text = '', [switch]$Expired)
+    if ($Expired) {
+        return @{ Title = 'VPN not connected yet - traffic blocked'; Icon = 'Warning'
+                  Text = "'$ProfileName' did not connect within 2 minutes. VeroScudo keeps trying; nothing leaves this PC meanwhile." }
+    }
+    if (-not $Last -or $Last -eq $State) { return $null }
+    switch ($State) {
+        'blocked' {
+            switch ($ExpectKind) {
+                'connect'   { return @{ Title = 'VeroScudo on - connecting'; Text = "Kill-switch on: traffic is blocked until '$ProfileName' is connected."; Icon = 'Info' } }
+                'switch'    { return $null }
+                'reconnect' { return $null }
+                default     { return @{ Title = 'VPN connection lost - traffic blocked'; Text = 'Reconnecting... nothing leaves this PC until the tunnel is back.'; Icon = 'Warning' } }
+            }
+        }
+        'protected' { return @{ Title = 'VPN protected'; Text = 'Tunnel up, kill-switch on.'; Icon = 'Info' } }
+        'off'       { return @{ Title = 'VPN turned off'; Text = 'Firewall back to normal - traffic is NOT protected.'; Icon = 'Info' } }
+        default     { return @{ Title = 'VeroScudo needs attention'; Text = $Text; Icon = 'Warning' } }
+    }
+}
+
+function Get-VeroMenuState {
+    <# Which of Turn on / Turn off / Reconnect the menu offers. A Hiddify profile is connected, disconnected and
+       reconnected in Hiddify: no Reconnect, and Turn off only while VeroScudo is on. Pure (= menu_state in traymodel.py). #>
+    [CmdletBinding()] param([AllowEmptyString()][string]$State = '', [bool]$Armed, [bool]$Connected, [bool]$Hiddify)
+    @{ On = ($State -ne 'protected'); Off = ($Armed -or ($Connected -and -not $Hiddify)); Reconnect = ($Armed -and -not $Hiddify) }
+}
+
+function Select-VeroTrayLeftover {
+    <# Which files in the tray's own folder are its leftovers to remove: a Save payload (save-<32 hex>.json - it holds a
+       whole OpenVPN config with its keys), a one-time code (otp-<name>.txt), a switch request (switch.request) - older
+       than 10 minutes. Nothing else in that folder (credentials, tray.json, update.json), never a folder. Pure:
+       $Files are FileInfo-like objects (Name, LastWriteTimeUtc). #>
+    [CmdletBinding()] param([object[]]$Files = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    @($Files | Where-Object { $_ -and [string]$_.Name -cmatch '^(save-[0-9a-f]{32}\.json|otp-[A-Za-z0-9_.-]+\.txt|switch\.request)\z' -and $_.LastWriteTimeUtc -lt $NowUtc.AddMinutes(-10) })
+}
+
+function Test-VeroGuardStale {
+    <# Minutes since the guard's watchdog last reported in, when that is more than 3 (it reports every 15 s); 0 = fine.
+       $HeartbeatEpoch: the number in its heartbeat file, or $null when there is none or it cannot be read - then the
+       tray's own age counts: fine for its first 3 minutes, a missing guard after that. Pure. #>
+    [CmdletBinding()] param($HeartbeatEpoch, [Parameter(Mandatory)][double]$NowEpoch, [double]$TraySeconds = 0)
+    $age = if ($null -ne $HeartbeatEpoch) { $NowEpoch - [double]$HeartbeatEpoch } else { $TraySeconds }
+    if ($age -gt 180) { [int][Math]::Floor($age / 60) } else { 0 }
+}
+
+function Get-VeroUpdateClickText {
+    <# What "Check for updates" says when there is no newer release to open: traffic is blocked (nothing was asked), no
+       answer came, or this is the latest version. Pure (the same texts as traymodel.py). #>
+    [CmdletBinding()] param([switch]$Blocked, [switch]$NoAnswer, [string]$Version = '')
+    if ($Blocked) { return 'Traffic is blocked right now - check again once the VPN is connected.' }
+    if ($NoAnswer) { return 'The update check got no answer - try again later.' }
+    "You have the latest version ($Version)."
 }
 
 function Test-VeroUacCancelled {
@@ -182,4 +268,32 @@ function Test-VeroUacCancelled {
     $false
 }
 
-Export-ModuleMember -Function ConvertTo-VeroStatusPageView, ConvertTo-VeroConnectionView, Get-VeroTrayTip, ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled
+function ConvertTo-VeroPlainText {
+    <# Text from the network (a status page's name, a city, a provider) before it is stored or shown: one line, no control
+       characters, a sane length. Pure. #>
+    [CmdletBinding()] param([Parameter(Position = 0)][AllowEmptyString()][AllowNull()][string]$Value, [Parameter(Position = 1)][int]$Max = 80)
+    $s = ([string]$Value -replace '[\x00-\x1f\x7f]', ' ').Trim()
+    if ($s.Length -gt $Max) { $s.Substring(0, $Max) } else { $s }
+}
+function Test-VeroStatusPageUrl {
+    <# The address of a service status page: https, no white space, at most 300 characters. Checked when it is typed and
+       every time it is read back (tray.json is a file any program of the user can write). Pure. #>
+    [CmdletBinding()] param([Parameter(Position = 0)][AllowEmptyString()][AllowNull()][string]$Url)
+    if (-not $Url -or $Url.Length -gt 300 -or $Url -match '\s' -or $Url -notmatch '^https://') { return $false }
+    $u = $null
+    [bool]([Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u) -and $u.Scheme -eq 'https' -and $u.Host)
+}
+function New-VeroSaveCommand {
+    <# The text the elevated half of Save runs - what the administrator approves. Pure.
+       The two paths go in as base64 DATA, never as quoted text: a folder name can hold characters that end a PowerShell
+       string (the typographic quotes U+2018..U+201B among them), and whatever follows would run as administrator. The
+       hash is hex or the command is refused. The child pins its module path before anything else, without a cmdlet (a
+       module planted in the user's Documents would otherwise load as administrator). #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Module, [Parameter(Mandatory)][string]$Payload, [Parameter(Mandatory)][string]$Sha256)
+    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}\z') { throw 'not a SHA-256' }
+    $asData = { param([string]$s) "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($s)) + "'))" }
+    "`$env:PSModulePath = `"`$PSHOME\Modules;`" + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'); " +
+    "try { Import-Module -Name ($(& $asData $Module)) -Force; Import-VeroSavePayload -Path ($(& $asData $Payload)) -Sha256 '$Sha256'; exit 0 } catch { exit 1 }"
+}
+
+Export-ModuleMember -Function Resolve-VeroTrayExpect, Get-VeroTransitionNotice, Get-VeroMenuState, Select-VeroTrayLeftover, Test-VeroGuardStale, Get-VeroUpdateClickText, New-VeroSaveCommand, ConvertTo-VeroPlainText, Test-VeroStatusPageUrl, ConvertTo-VeroStatusPageView, ConvertTo-VeroConnectionView, Get-VeroTrayTip, ConvertTo-VeroTrayState, ConvertTo-VeroExitView, Test-VeroTrayFileChanged, Get-VeroTrayPref, Set-VeroTrayPref, Resolve-VeroUpdateNotice, Test-VeroUacCancelled

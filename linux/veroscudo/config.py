@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -15,9 +16,9 @@ from .hiddify import valid_config_path
 from .netutil import plain_ip, plain_net
 
 DEFAULT_CONFIG = Path("/etc/veroscudo/config.json")
-_HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+_HOST = re.compile(r"^(?=.{1,253}\Z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
 _BAD_NAME = re.compile(r'[\x00-\x1f"\\]')
-_ID = re.compile(r"^[0-9a-f]{12}$")
+_ID = re.compile(r"^[0-9a-f]{12}\Z")
 
 
 def profile_id(name: str, stored: object = None) -> str:
@@ -34,16 +35,30 @@ def config_path() -> Path:
 
 def is_lan_range(value: str) -> bool:
     """A single address or a network narrow enough to be a LAN - never 'everything' (IPv4 /8+, IPv6 /16+)."""
+    text = str(value)
+    if "/" in text and not text.rsplit("/", 1)[1].isdigit():
+        return False                                    # a prefix length, never a netmask (the same rule as on Windows)
     try:
-        net = ipaddress.ip_network(plain_net(value))
+        net = ipaddress.ip_network(plain_net(text))
     except ValueError:
         return False
     return net.prefixlen >= (8 if net.version == 4 else 16)
 
 
 def _is_host(value: str) -> bool:
+    if value and all(c.isdigit() or c == "." for c in value):
+        # digits and dots only is an address, and then a whole one: "10.1" or "1" is a shorthand to some tools (10.0.0.1)
+        try:
+            return str(ipaddress.IPv4Address(value)) == value
+        except ValueError:
+            return False
     if _HOST.match(value):
-        return True
+        # ... nor any other spelling the system reads as a number ("0x7f000001", "017.0.0.1"): an address is written as one
+        try:
+            socket.inet_aton(value)
+            return False
+        except OSError:
+            return True
     try:
         plain_ip(value)
         return True
@@ -160,7 +175,7 @@ class Config:
         name = str(p.get("profile") or "")
         if not name:
             raise ValueError("config.json: vpn.profile is required")
-        if len(name) > 255 or _BAD_NAME.search(name):
+        if len(name) > 255 or _BAD_NAME.search(name) or name.startswith("-"):   # a leading dash would read as an option to nmcli / scutil
             raise ValueError(f"config.json: invalid VPN profile name {name!r}")
         vtype = str(p.get("vpnType", "")).lower()
         if vtype not in VPN_TYPES:

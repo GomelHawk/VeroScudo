@@ -37,9 +37,10 @@ function Get-VeroWgTransition {
        'disarm' - the active profile's service was REMOVED (deactivated in the WireGuard app) while armed and VeroScudo was
                   not reconnecting it itself: the user's Off;
        'none'   - anything else (a crash or a stop leaves the service installed: that is a failure, the redial handles it). #>
-    [CmdletBinding()] param([string]$Previous, [string]$Current, [bool]$Armed, [bool]$Active, [bool]$LockAlive)
+    [CmdletBinding()] param([string]$Previous, [string]$Current, [bool]$Armed, [bool]$Active, [bool]$LockAlive, [bool]$RecentOff = $false)
     if (-not $Previous -or $Previous -eq $Current -or $LockAlive) { return 'none' }
-    if ($Current -eq 'running' -and -not ($Armed -and $Active)) { return 'arm' }
+    # right after your Off nothing arms by itself (a tunnel VeroScudo was still starting may come up now) - like the other types
+    if ($Current -eq 'running' -and -not ($Armed -and $Active)) { return $(if ($RecentOff) { 'none' } else { 'arm' }) }
     if ($Previous -eq 'running' -and $Current -eq 'missing' -and $Armed -and $Active) { return 'disarm' }
     'none'
 }
@@ -60,12 +61,11 @@ function Update-VeroWgWatch {
     })
     $started = @($seen | Where-Object { $_.Cur -eq 'running' -and $_.Prev -and $_.Prev -ne 'running' })
     foreach ($x in $started) {
-        $d = Get-VeroWgTransition -Previous $x.Prev -Current $x.Cur -Armed (Test-VeroArmed) -Active ($x.Name -eq (Get-VeroConfig).Profile) -LockAlive (Test-VeroLockAlive)
+        $d = Get-VeroWgTransition -Previous $x.Prev -Current $x.Cur -Armed (Test-VeroArmed) -Active ($x.Name -eq (Get-VeroConfig).Profile) -LockAlive (Test-VeroLockAlive) -RecentOff (Test-VeroRecentOff)
         if ($d -ne 'arm') { continue }
         Write-VeroLog "WireGuard tunnel '$($x.Name)' was activated outside VeroScudo - it becomes the active profile, kill-switch on (decision source: WireGuard service started)" $Action
         Set-VeroActiveProfile -Name $x.Name -Action $Action
-        Set-VeroArmed $true $Action
-        Sync-VeroKillSwitch -Config (Get-VeroConfig) -Action $Action
+        Enter-VeroArmed -Config (Get-VeroConfig) -Action $Action
         $changed = $true
     }
     foreach ($x in @($seen | Where-Object { $started -notcontains $_ })) {
@@ -73,8 +73,7 @@ function Update-VeroWgWatch {
         $d = Get-VeroWgTransition -Previous $x.Prev -Current $x.Cur -Armed (Test-VeroArmed) -Active ($x.Name -eq $active) -LockAlive (Test-VeroLockAlive)
         if ($d -eq 'disarm') {
             Write-VeroLog "WireGuard tunnel '$($x.Name)' was deactivated in the WireGuard app - treated as your Off (decision source: WireGuard service removed, not by VeroScudo)" $Action
-            Set-VeroArmed $false $Action
-            Disable-VeroKillSwitch -Action $Action
+            Exit-VeroArmed -Action $Action
             $changed = $true
         } elseif ($x.Prev -eq 'running' -and $x.Cur -eq 'stopped' -and $x.Name -eq $active -and (Test-VeroArmed)) {
             Write-VeroLog "WireGuard service of '$($x.Name)' stopped but is still installed (crash or services.msc) - a failure: stays blocked, redials" $Action
@@ -99,11 +98,15 @@ function Get-VeroWgHealthNow {
     $state = Get-VeroWgState $ProfileName
     if ($state -ne 'running') { return 'down' }
     if (-not (Test-VeroElevated)) {
+        # the guard's own verdict, written on every pass (15 s). None yet (the file is not there): the service runs, 'up'.
+        # One that is old or unreadable means the guard is not looking - then the tray must not call the link healthy.
+        if (-not (Test-Path -LiteralPath $p.TunnelCache)) { return 'up' }
         try {
             $c = Get-Content $p.TunnelCache -Raw -ErrorAction Stop | ConvertFrom-Json
-            if (((Get-Date) - [datetime]::Parse([string]$c.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds -lt 60) { return [string]$c.Health }
+            if (((Get-Date) - [datetime]::Parse([string]$c.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds -lt 90) { return [string]$c.Health }
         } catch { Write-Verbose 'no recent WireGuard health' }
-        return 'up'
+        if (-not (Test-VeroArmed)) { return 'up' }                          # off: nobody judges the link, the service runs
+        return 'stale'
     }
     $wg = Join-Path (Get-VeroWgDir) 'wg.exe'
     $hs = @()
@@ -116,7 +119,7 @@ function Get-VeroWgHealthNow {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $h = Get-VeroWgHealth -ServiceState $state -Handshakes $hs -Now $now -ServiceAgeSeconds 0                  # 0: 'up' or not, cheaply
     if ($h -ne 'up') { $h = Get-VeroWgHealth -ServiceState $state -Handshakes $hs -Now $now -ServiceAgeSeconds (Get-VeroWgServiceAge $ProfileName) }
-    try { @{ Health = $h; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.TunnelCache } catch { Write-Verbose 'tunnel cache not writable' }
+    try { Write-VeroStateFile -Path $p.TunnelCache -Text (@{ Health = $h; Time = (Get-Date).ToString('o') } | ConvertTo-Json) } catch { Write-Verbose 'tunnel cache not writable' }
     $h
 }
 
@@ -126,7 +129,7 @@ function Add-VeroServerIpCache([string]$ProfileName, [string[]]$Ips) {
     # [string]: Get-Content tags each line with its file path, and ConvertTo-Json would write those tags into wfp.json
     $cached = @(if (Test-Path $p.ServerIp) { Get-Content $p.ServerIp | Where-Object { $_ } | ForEach-Object { [string]$_ } })
     $all = @(@($Ips) + $cached | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
-    if (($all -join ',') -ne ($cached -join ',')) { Set-Content -Path $p.ServerIp -Value $all }
+    if (($all -join ',') -ne ($cached -join ',')) { Write-VeroStateFile -Path $p.ServerIp -Text ($all -join "`r`n") }
 }
 
 function Invoke-VeroWgDial {

@@ -1,10 +1,11 @@
 #Requires -Version 5.1
-<# VeroScudo entry point. Usage: VeroScudo.ps1 -Action arm|disarm|on|off|on-event|netdown|reconnect|watchdog|check|switch|status|openvpn [-VpnProfile <name>]
+<# VeroScudo entry point. Usage: VeroScudo.ps1 -Action arm|disarm|on|off|on-event|netdown|reconnect|redial|watchdog|check|switch|status|openvpn [-VpnProfile <name>]
    on refuses while another VPN is connected: add -DisconnectOthers (end it first) or -Force (turn on anyway).
-   reconnect = your Reconnect: block, hang up, redial, traffic again once the tunnel is back. openvpn = the OpenVPN runner task. #>
+   reconnect = your Reconnect: block, hang up, redial, traffic again once the tunnel is back. redial = the redial loop (the Redial
+   task, started by the guard when the tunnel is down). openvpn = the OpenVPN runner task. #>
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'netdown', 'reconnect', 'watchdog', 'check', 'switch', 'status', 'openvpn')]
+    [ValidateSet('arm', 'disarm', 'on', 'on-disconnect', 'on-force', 'off', 'on-event', 'netdown', 'reconnect', 'redial', 'watchdog', 'check', 'switch', 'status', 'openvpn')]
     [string]$Action,
     [string]$VpnProfile,
     [switch]$DisconnectOthers,       # with -Action on: end every other connected VPN first (your choice)
@@ -13,7 +14,7 @@ param(
 # Modules auto-load from $env:PSModulePath, whose first entry is the user's writable Documents\WindowsPowerShell\Modules: a
 # module planted there (VpnClient, ScheduledTasks ...) would run with this process's rights - and the guard tasks run elevated.
 # System folders only, before anything else is loaded (-NoProfile does not cover this).
-$env:PSModulePath = "$PSHOME\Modules;" + (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules')
+$env:PSModulePath = "$PSHOME\Modules;" + [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules')   # no cmdlet before the pin is in force
 if ($Action -eq 'on' -and $DisconnectOthers) { $Action = 'on-disconnect' } elseif ($Action -eq 'on' -and $Force) { $Action = 'on-force' }
 Import-Module (Join-Path $PSScriptRoot 'VeroScudo.Core.psm1') -Force
 try {

@@ -54,7 +54,7 @@ SYSTEM_DIRS = {
     "darwin": (),
 }
 
-_HOST = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+_HOST = re.compile(r"^(?=.{1,253}\Z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 _GROUPS = {"direct", "block", "dns", "selector", "urltest", "balancer", "loadbalance"}   # outbounds without a server of their own
 # direct DNS server type -> (protocols, default port)
@@ -136,7 +136,8 @@ def tun_settings(conf: dict) -> tuple[list[str], str | None]:
     """The tun inbound's IPv4 addresses and its interface_name (None when not set). Handles the current sing-box format
     ("address": [...]) and the older one ("inet4_address"). Pure."""
     addrs, name = [], None
-    for ib in conf.get("inbounds") or []:
+    inbounds = conf.get("inbounds")
+    for ib in inbounds if isinstance(inbounds, list) else []:
         if not isinstance(ib, dict) or ib.get("type") != "tun":
             continue
         raw = ib.get("address") or ib.get("inet4_address") or []
@@ -159,7 +160,7 @@ def _dns_address(value: str) -> tuple[str, str, int | None]:
     """Legacy sing-box DNS "address" -> (type, host, port): 'udp://1.1.1.1', 'tls://dns.example.com:853',
     'https://dns.example.com/dns-query', '1.1.1.1' (= udp), 'local', 'fakeip'. Pure."""
     v = value.strip()
-    m = re.match(r"^([a-z0-9]+)://(.*)$", v)
+    m = re.match(r"^([a-z0-9]+)://(.*)\Z", v)
     if m:
         scheme, rest = m.group(1), m.group(2)
     elif not v or v in ("local", "fakeip"):
@@ -167,7 +168,7 @@ def _dns_address(value: str) -> tuple[str, str, int | None]:
     else:
         scheme, rest = "udp", v
     rest = rest.split("/")[0]
-    mm = re.match(r"^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$", rest)
+    mm = re.match(r"^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?\Z", rest)
     if mm:
         return scheme, mm.group(1), _port(mm.group(2)) if mm.group(2) else None
     host, _, port = rest.partition(":") if rest.count(":") == 1 else (rest, "", "")
@@ -246,6 +247,10 @@ def resolve_endpoints(eps: list[Endpoint], resolve, hosts: dict, now: float | No
                 good = [a for a in ips if not forbidden(a)]
                 if good:
                     hosts[n] = (good, now)
+                else:
+                    # no answer: the last good addresses stay, and the name is asked again in a minute - not on every
+                    # pass (with DNS unreachable every name would be looked up again each time the rules are built)
+                    hosts[n] = (hosts.get(n, ((), 0))[0], now - ttl + min(ttl, 60))
     out: dict[tuple[str, int], set] = {}
     for h, p, pr in eps:
         for a in [h] if _is_ip(h) else hosts.get(h, ((), 0))[0]:
@@ -308,7 +313,7 @@ def pick_iface(addrs: dict[str, list[str]], tun_v4: list[str], name: str | None,
         if not IFNAME.match(ifc):
             return False
         if platform == "darwin":
-            return re.match(r"^utun\d+$", ifc) is not None
+            return re.match(r"^utun\d+\Z", ifc) is not None
         return is_tun(ifc) if is_tun else True
     for ifc in sorted(addrs):
         if any(a in tun_v4 for a in addrs[ifc]) and ok(ifc):
@@ -352,7 +357,10 @@ def read_config(path: str) -> dict:
         os.close(fd)
     if len(data) > MAX_BYTES:
         raise ValueError("file grew while reading")
-    j = json.loads(data.decode("utf-8"))
+    try:
+        j = json.loads(data.decode("utf-8"))
+    except RecursionError:
+        raise ValueError("nested too deep") from None
     if not isinstance(j, dict):
         raise ValueError("not a JSON object")  # noqa: TRY004  (callers treat every bad file alike)
     return j
@@ -426,7 +434,7 @@ def tun_of(path: str) -> tuple[list[str], str | None]:
         val = tun_settings(read_config(path))
     except PermissionError:
         return shared_tun(path)
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - a broken file of any kind (wrong shapes, nested too deep) is "no tunnel settings"
         val = ([], None)
     _tun_cache[path] = (key, val)
     return val

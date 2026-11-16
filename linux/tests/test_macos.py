@@ -1,4 +1,6 @@
 """macOS backend (alpha): the pf ruleset and the scutil parsing are pure and tested here; pfctl/scutil are not run."""
+import subprocess
+
 import pytest
 
 from veroscudo import pf, scutil
@@ -109,8 +111,8 @@ def test_pf_lockdown_is_loopback_dhcp_and_neighbour_discovery_only():
 class _Pfctl:
     """A fake pfctl: remembers the anchor's rules, whether pf is enabled and the tokens handed out."""
 
-    def __init__(self, enabled=True, rules=""):
-        self.enabled, self.rules, self.tokens, self.calls = enabled, rules, 0, []
+    def __init__(self, enabled=True, rules="", main='scrub-anchor "com.apple/*" all\nanchor "com.apple/*" all\n'):
+        self.enabled, self.rules, self.tokens, self.calls, self.main = enabled, rules, 0, [], main
 
     def __call__(self, args, **kw):
         import subprocess
@@ -121,6 +123,8 @@ class _Pfctl:
         elif args[1:] == ["-E"]:
             self.enabled, self.tokens = True, self.tokens + 1
             out = f"pf enabled\nToken : {1000 + self.tokens}\n"
+        elif args[1:] == ["-s", "rules"]:
+            out = self.main                                     # the main ruleset: does it still lead to the anchors?
         elif args[1:4] == ["-a", pf.ANCHOR, "-s"]:
             out = self.rules
         elif args[1:4] == ["-a", pf.ANCHOR, "-f"]:
@@ -180,3 +184,23 @@ def test_guard_runs_on_the_pf_backend(monkeypatch, tmp_path):
     assert len(applied) == 2 and "ipsec0" not in applied[1]
     assert records[-1].endswith("tunnel=DOWN)"), records
     assert isinstance(logging.getLogger("veroscudo"), logging.Logger)
+
+
+def test_pf_rules_the_main_ruleset_never_reaches_are_not_active(monkeypatch, tmp_path):
+    """Another tool loaded a main ruleset of its own: the anchor is still listed, and nothing evaluates it."""
+    fake = _Pfctl(enabled=True, rules=pf.render_lockdown(), main="pass all\n")
+    monkeypatch.setattr(pf.subprocess, "run", fake)
+    monkeypatch.setattr(pf, "TOKEN", tmp_path / "run" / "pf.token")
+    assert not pf.is_active()
+    with pytest.raises(subprocess.CalledProcessError):
+        pf.apply(pf.render_lockdown())
+    fake.main = 'anchor "com.apple/*" all\n'
+    pf.apply(pf.render_lockdown())
+    assert pf.is_active() and (tmp_path / "run" / "pf.token").exists()
+
+
+def test_a_bridge_with_any_member_that_is_not_a_vm_port_is_not_host_only():
+    text = ("bridge100: flags=8a63<UP> mtu 1500\n\tmember: vmenet0 flags=3<LEARNING>\n"
+            "bridge101: flags=8a63<UP> mtu 1500\n\tmember: ap1 flags=3<LEARNING>\n"
+            "bridge102: flags=8a63<UP> mtu 1500\n\tmember: vmenet1 flags=3<LEARNING>\n\tmember: awdl0 flags=3<LEARNING>\n")
+    assert scutil.parse_bridges(text) == ["bridge100"]

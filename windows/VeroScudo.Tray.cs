@@ -288,11 +288,11 @@ public class VeroMenuRenderer : ToolStripProfessionalRenderer {
                 case "log":  g.DrawLines(pen, new[] { new PointF(4, 2), new PointF(10, 2), new PointF(13, 5), new PointF(13, 14), new PointF(4, 14), new PointF(4, 2) });
                              g.DrawLine(pen, 6.5f, 7.5f, 10.5f, 7.5f); g.DrawLine(pen, 6.5f, 10.5f, 10.5f, 10.5f); break;
                 case "gear": {
-                    var path = new GraphicsPath(); int teeth = 8; float ro = 7f, ri = 5.4f;
+                    using (var path = new GraphicsPath()) { int teeth = 8; float ro = 7f, ri = 5.4f;
                     for (int i = 0; i < teeth * 2; i++) { double a = Math.PI * 2 * i / (teeth * 2) - Math.PI / 2; float r = (i % 2 == 0) ? ro : ri;
                         var pt = new PointF(8 + (float)(r * Math.Cos(a)), 8 + (float)(r * Math.Sin(a))); if (i == 0) path.StartFigure(); path.AddLine(pt, pt); }
                     path.CloseFigure(); g.FillPath(br, path);
-                    using (var hole = new SolidBrush(t.Card)) g.FillEllipse(hole, 5.6f, 5.6f, 4.8f, 4.8f); break; }
+                    using (var hole = new SolidBrush(t.Card)) g.FillEllipse(hole, 5.6f, 5.6f, 4.8f, 4.8f); } break; }
                 case "chart": g.DrawLine(pen, 2, 14, 14, 14); g.FillRectangle(br, 3, 9, 2.4f, 4); g.FillRectangle(br, 6.8f, 5, 2.4f, 8); g.FillRectangle(br, 10.6f, 2, 2.4f, 11); break;
                 case "redo": g.DrawArc(pen, 2.5f, 3, 11, 11, 30, 300); g.FillPolygon(br, new[] { new PointF(14.6f, 6.4f), new PointF(13.6f, 1.4f), new PointF(9.8f, 4.6f) }); break;
                 case "sync": g.DrawArc(pen, 2.5f, 2.5f, 11, 11, 200, 230); g.FillPolygon(br, new[] { new PointF(13.8f, 2.2f), new PointF(14.2f, 7.2f), new PointF(9.6f, 5.4f) }); break;

@@ -135,3 +135,27 @@ without `--purge`). Not run on a real machine: L2TP, PPTP, IKEv2, OpenConnect.
 - Disabling the Wi-Fi adapter to simulate a failure took 40 s to come back; don't.
 - Never run a live test before the offline test passes: in the first attempt the whole laptop
   stayed blocked because the redial could not succeed under the kill-switch.
+
+## Rules both implementations must share
+
+The guard is written twice - PowerShell for Windows, Python for Linux/macOS. The rules that must give the same answer on
+both (config limits, `lanAllow` and `serverIps` shapes, which server address is usable, profile ids, version
+comparison, which update links may be opened, the status page address)
+are listed once, in `shared/vectors.json`, and both unit-test suites read that file
+(`windows/tests/VeroScudo.Shared.Tests.ps1`, `linux/tests/test_shared_vectors.py`). A new shared rule gets its cases
+there; a rule changed on one platform only then fails on the other. In CI the file must be there (the tests fail
+without it; a packaged copy of one platform alone skips them).
+
+## Where the unit tests live
+
+Windows (`windows/tests/`, Pester): one file per topic, each starting from a fresh copy of the module and a temp home of
+its own through the shared `Core.TestSetup.ps1` - `VeroScudo.Core.Tests.ps1` (arming, events, redial, Off, locks, state
+files, what runs elevated), `...Core.Config.Tests.ps1`, `...Core.KillSwitch.Tests.ps1`, `...Core.Types.Tests.ps1`
+(OpenVPN, WireGuard, Hiddify), `...Core.Quality.Tests.ps1` (connection check, statistics), `VeroScudo.Tray.Tests.ps1`
+(the tray's decisions; pure functions, its own temp folder) and `VeroScudo.Shared.Tests.ps1` (the shared rules; pure
+functions, nothing read or written). Every `VeroScudo.Core*` file refuses to run unless the module's state folder and
+user folder both point into its temp folder.
+
+Linux/macOS (`linux/tests/`, pytest): by module; `test_hardening.py` holds the inputs that must never reach a ruleset
+and the failures that must never leave an armed machine open, `test_tray_controller.py` the trays' shared controller
+with a fake UI.

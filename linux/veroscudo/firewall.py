@@ -11,11 +11,11 @@ import subprocess
 from dataclasses import dataclass, field
 
 from .config import Config, server_rules
-from .netutil import IFNAME, plain_ip, plain_net, rule_token  # IFNAME: also re-exported for the pf backend
+from .netutil import IFNAME, plain_ip, plain_net, rule_token
 
 log = logging.getLogger("veroscudo")
 
-_CGROUP = re.compile(r"^[A-Za-z0-9_.@-]+(/[A-Za-z0-9_.@-]+){0,7}$")   # a cgroup path: nothing that could end a rule
+_CGROUP = re.compile(r"^[A-Za-z0-9_.@-]+(/[A-Za-z0-9_.@-]+){0,7}\Z")   # a cgroup path: nothing that could end a rule
 
 TABLE = "inet veroscudo"
 
@@ -40,6 +40,10 @@ def split_families(addrs) -> tuple[list[str], list[str]]:
 
 
 MARK = "0x5653"          # conntrack mark of flows VeroScudo allowed outside the tunnel ("VS")
+# DNS while blocked has a mark of its own, and flows with it are accepted only in the rulesets without a tunnel: a
+# connection to the network's resolver that was opened while blocked ends when the tunnel comes up, instead of going
+# on outside it for as long as it lives
+MARK_DNS = "0x5654"
 
 
 def group_endpoints(endpoints) -> list[tuple[int, int, tuple[str, ...], list[str]]]:
@@ -85,6 +89,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     srv4, srv6 = split_families(server_ips)
     lan4, lan6 = split_families(cfg.lan_allow)
     keep = f"ct mark set {MARK} accept"
+    keep_dns = f"ct mark set {MARK_DNS} accept"
     brset = "{ " + ", ".join(f'"{b}"' for b in bridges) + " }" if bridges else None
     lines = [
         f"table {TABLE}",
@@ -101,6 +106,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         lines.append(f"    oifname {brset} accept")                      # host -> containers/VMs (stays on this machine)
     lines += [
         f"    ct state established,related ct mark {MARK} accept",      # only flows VeroScudo allowed itself
+        *([] if tun_iface else [f"    ct state established,related ct mark {MARK_DNS} accept"]),   # DNS: only while down
         f"    udp sport 68 udp dport 67 {keep}",                         # DHCP
         f"    udp sport 546 udp dport 547 {keep}",                       # DHCPv6
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, mld-listener-report } accept",
@@ -109,13 +115,13 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         # DNS only while down (to find the VPN server): the system resolver's user, else only the known resolvers -
         # with neither known there is NO DNS permit (never "port 53 to anywhere"); the redial then uses cached addresses
         if dns.uid is not None:
-            lines += [f"    meta skuid {dns.uid} udp dport 53 {keep}", f"    meta skuid {dns.uid} tcp dport 53 {keep}"]
+            lines += [f"    meta skuid {dns.uid} udp dport 53 {keep_dns}", f"    meta skuid {dns.uid} tcp dport 53 {keep_dns}"]
         elif dns.servers:
             d4, d6 = split_families(dns.servers)
             for fam, lst in (("ip", d4), ("ip6", d6)):
                 if lst:
-                    lines += [f"    {fam} daddr {{ {', '.join(lst)} }} udp dport 53 {keep}",
-                              f"    {fam} daddr {{ {', '.join(lst)} }} tcp dport 53 {keep}"]
+                    lines += [f"    {fam} daddr {{ {', '.join(lst)} }} udp dport 53 {keep_dns}",
+                              f"    {fam} daddr {{ {', '.join(lst)} }} tcp dport 53 {keep_dns}"]
     # WireGuard (NetworkManager): its packets carry fwmark 0xcafd, which NetworkManager saves into the conntrack mark
     # (mangle OUTPUT, before this chain) and restores on the server's replies so they are routed outside the tunnel.
     # Setting VeroScudo's ct mark here would overwrite it: the replies would be routed wrongly and dropped. So the
@@ -160,6 +166,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         lines.append(f"    iifname {brset} accept")                      # containers/VMs -> host (DHCP/DNS from dnsmasq, services)
     lines += [
         f"    ct state established,related ct mark {MARK} accept",      # replies to the flows allowed above
+        *([] if tun_iface else [f"    ct state established,related ct mark {MARK_DNS} accept"]),   # DNS answers: only while down
         "    udp sport 67 udp dport 68 accept",                           # DHCP replies (often broadcast, not tracked)
         "    udp sport 547 udp dport 546 accept",                         # DHCPv6 replies
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, nd-redirect } accept",

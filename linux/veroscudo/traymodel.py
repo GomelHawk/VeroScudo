@@ -2,9 +2,14 @@
 
 Same idea as windows/VeroScudo.Tray.psm1: the front ends collect facts and draw; what the icon, the title, the menu and
 the notifications say is decided here, from explicit inputs, and unit-tested (tests/test_traymodel.py). The few impure
-helpers at the bottom (running a command, reading the log, finding the guard) take no decisions."""
+helpers below them (running a command, reading the log, finding the guard) take no decisions.
+
+TrayController (at the end) is what both trays do with those decisions: it reads the facts, follows the state
+from look to look, sends the notices and runs the commands. It draws nothing - the front end gives it the hooks
+listed in its docstring. Nothing here imports GTK or AppKit."""
 from __future__ import annotations
 
+import json
 import os
 import queue
 import shutil
@@ -16,15 +21,18 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import __version__, exitinfo, hiddify, keepawake, quality, stats, statuspage, update
+from .config import Config, config_path, is_host
 from .quality import CheckConfig, Quality, describe
-from .state import kind_label
+from .state import LOG as _LOG
+from .state import LOG_GROUP, StateStore, is_up, kind_label
+from .state import switch_notice as profile_switch_text
 
 # where install.sh puts the program on both platforms: root-owned, named in the sudoers rule
 PREFIX = Path("/opt/veroscudo")
 BIN = PREFIX / "bin" / "veroscudo"
 UNINSTALL = PREFIX / "uninstall.sh"
-LOG = Path("/var/log/veroscudo.log")
-LOG_GROUP = "admin" if sys.platform == "darwin" else "adm"
+LOG = Path(_LOG)                 # the guard's log; readable by root and LOG_GROUP
 
 # Settings > Behaviour descriptions - the same wording as the Windows tray, with this platform's examples
 VM_ABOUT = (("Parallels, VMware Fusion and UTM VMs" if sys.platform == "darwin" else "Docker, libvirt and other VMs")
@@ -208,7 +216,7 @@ class MenuState:
     reconnect: bool
 
 
-RECONNECT_HIDDIFY = "Connect and reconnect in Hiddify"     # = hiddify.RECONNECT_HINT; the tooltip of the disabled Reconnect
+RECONNECT_HIDDIFY = hiddify.RECONNECT_HINT     # the tooltip of the disabled Reconnect
 
 
 def offers_off(v: View, kind: str | None = None) -> bool:
@@ -345,7 +353,7 @@ def clear_stamp(now: float | None = None) -> str:
 
 
 # ---------------------------------------------------------------- other VPNs (Windows: Get-VeroForeignVpn and its notices)
-HIDDIFY_OWNER = "Hiddify (VPN mode)"      # = hiddify.LABEL (nm.tunnel_owners names Hiddify's tunnel so)
+HIDDIFY_OWNER = hiddify.LABEL      # nm.tunnel_owners names Hiddify's tunnel so
 
 
 @dataclass(frozen=True)
@@ -476,7 +484,7 @@ def admin_argv(args: list[str], platform: str = sys.platform, bin_path: Path = B
     else:
         if not args or args[0] not in ADMIN_ACTIONS:
             raise ValueError(f"not an administrator action: {args[:1]}")
-        cmd = [str(bin_path), *args]
+        cmd = [str(bin_path), args[0], "--", *args[1:]]         # a name that starts with a dash stays a name
     if platform == "darwin":
         script = ['on run argv', 'set cmd to ""',
                   'repeat with a in argv', 'set cmd to cmd & quoted form of (a as text) & " "', 'end repeat',
@@ -514,7 +522,9 @@ class Runner:
         def run() -> None:
             for cmd in (argv, *more):
                 try:
-                    r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=600)
+                    # errors="replace": output that is not valid text must not end this thread without a result
+                    r = subprocess.run(cmd, check=False, capture_output=True, text=True, errors="replace",
+                                       timeout=600)
                     res = (tag, cmd, r.returncode, r.stdout, r.stderr)
                 except (OSError, subprocess.SubprocessError) as e:
                     res = (tag, cmd, 127, "", str(e))
@@ -647,3 +657,413 @@ def awake_rings(size: float) -> list[tuple[tuple[int, int, int], float, float, f
     c = size - d / 2
     border, hole = 1.4 * u, 1.4 * u + 1.6 * u
     return [(DARK, c, c, d / 2), (GREEN, c, c, d / 2 - border), (DARK, c, c, d / 2 - hole)]
+
+
+# ---------------------------------------------------------------- the controller both trays share
+class TrayController:
+    """What the Linux and the macOS tray do, without drawing anything: reads the facts, follows the state from
+    look to look (the notices), turns the VPN on and off, takes the results of the commands, checks for updates.
+
+    `nm` is the platform's VPN backend (backend.nm). `ui` is the front end; it has these hooks, all called on the
+    GUI thread (a front end that subclasses the controller is its own `ui`):
+
+      notice(title, body, urgency="normal", state="attention")
+                                  a desktop notification; `state` names the icon
+      message(title, text, error=False)
+                                  a modal message box
+      choose_foreign(prompt)      the Prompt as a dialog; returns 'disconnect' | 'anyway' | 'cancel'
+      config_reloaded()           config.json was read again (self.cfg is new) - in the 3 s pass or right after
+                                  an administrator's change; the only signal that it was
+      show_state()                icon, tooltip and menu from self.facts / self.view
+      show_windows()              after the notices: the open windows
+      update_status()             redraw the status window
+      update_settings()           fill the settings window from self.cfg again (an administrator's change that
+                                  was cancelled or failed: the form shows config.json as it is)
+      refresh_soon()              call refresh() once more in about 1.5 s
+      show_update(text)           the text of the menu's update item
+      open_url(url)               open a web page in the browser
+      set_clipboard(text)         put text on the clipboard
+
+    The two platforms differ in a few places; each is a hook above or one of these arguments:
+    `menu_name` - what the update notice calls the menu; `refresh_after_admin` - one more pass right after an
+    administrator's change was made (else the 3 s timer shows it)."""
+
+    @staticmethod
+    def spawn(work) -> None:
+        """Runs `work` off the UI thread (the update check asks GitHub: up to 10 s). Tests replace it with a direct call."""
+        threading.Thread(target=work, daemon=True, name="veroscudo-tray-work").start()
+
+    def __init__(self, nm, ui=None, store: StateStore | None = None, menu_name: str = "tray menu",
+                 refresh_after_admin: bool = False) -> None:
+        self.nm = nm
+        self.ui = self if ui is None else ui
+        self.menu_name = menu_name
+        self.refresh_after_admin = refresh_after_admin
+        self._update_answers: queue.Queue = queue.Queue()      # (release or None, asked by a click) from the worker
+        self._update_busy = False
+        self.store = store or StateStore()
+        self.cfg: Config | None = None
+        self.cfg_error = ""
+        self._cfg_mtime = -1.0
+        self._kinds: dict[str, str | None] = {}
+        self.runner = Runner()
+        self.expect = Expect()
+        self.awake = keepawake.KeepAwake()
+        self.last: str | None = None
+        self.facts = Facts(configured=False)
+        self.view = tray_state(self.facts)
+        self.tunnel: str | None = None
+        self.update_tag: str | None = None
+        self.update_url = ""
+        self.exit = exitinfo.ExitFetch()
+        self.protected_since = 0.0
+        self._was_up = False
+        self.status_page = statuspage.StatusFetch()
+        self.foreign: list[Foreign] = []
+        self._foreign_at = 0.0
+        self._foreign_shown: set = set()
+        self.last_drop = "-"
+
+    # ---- facts
+    def kind(self, name: str) -> str | None:
+        if name not in self._kinds:
+            self._kinds[name] = self.nm.kind(name)
+        return self._kinds[name]
+
+    def discover(self) -> list[dict]:
+        return self.nm.discover()
+
+    @property
+    def awake_on(self) -> bool:
+        return self.awake.active
+
+    def events(self, view: bool = False) -> list[str] | None:
+        """The newest log lines; view=True: as the status window shows them (after Clear, without dates)."""
+        ev = read_events()
+        if view and ev is not None:
+            return filter_events(ev, str(keepawake.get_pref("eventsClearedAt", "") or ""))
+        return ev
+
+    def clear_events(self) -> None:
+        keepawake.set_pref("eventsClearedAt", clear_stamp())
+        self.ui.update_status()
+
+    def stats_week(self, pid: str) -> list:
+        return stats.week(self.store.state, pid)
+
+    def stats_choices(self) -> list[tuple[str, str]]:
+        cfg = self.cfg
+        return stats.choices(stats.profiles_seen(self.store.state), [(p.id, p.name) for p in cfg.profiles] if cfg else [],
+                             cfg.current.id if cfg else None)
+
+    def reload_config(self) -> bool:
+        """Reads config.json again when its time stamp changed; True when it did."""
+        m = config_mtime(config_path())
+        if m == self._cfg_mtime:
+            return False
+        self._cfg_mtime = m
+        try:
+            self.cfg, self.cfg_error = Config.load(active=self.store.active), ""
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self.cfg, self.cfg_error = None, str(e)
+        self._kinds = {}
+        self.ui.config_reloaded()
+        return True
+
+    def find_foreign(self, force: bool = False) -> list[Foreign]:
+        """Other VPNs next to the active profile; asked at most every 10 s (the window refreshes every 3 s)."""
+        if force or time.time() - self._foreign_at >= 10:
+            self._foreign_at = time.time()
+            cfg = self.cfg
+            own = self.tunnel
+            tunnels = self.nm.other_tunnels(own)
+            try:
+                owners = self.nm.tunnel_owners()
+            except (OSError, subprocess.SubprocessError):
+                owners = {}
+            self.foreign = foreign_list(tunnels, owners, own, cfg.profile if cfg else "", cfg.names if cfg else ())
+        return self.foreign
+
+    def collect(self) -> Facts:
+        cfg = self.cfg
+        if cfg is None:
+            self.tunnel = None                              # nothing of an earlier config is shown as if it still held
+            return Facts(configured=False, config_error=self.cfg_error, guard_running=guard_running())
+        active = self.store.active
+        if active in cfg.names and active != cfg.profile:
+            self.cfg = cfg = cfg.with_active(active)
+        armed = self.store.armed
+        up = is_up(self.nm, self.store, cfg.profile, armed)
+        self.tunnel = (self.store.allowed_tunnel(cfg.profile) or self.nm.iface(cfg.profile)) if up else None
+        foreign = self.find_foreign()
+        self.last_drop = last_drop_text(self.store.last_drop(), cfg.profile)
+        return Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up, guard_running=guard_running(),
+                     others=tuple(x.name for x in foreign) if armed else (), expect=self.expect.kind,
+                     check_enabled=cfg.check.enabled,
+                     quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None,
+                     auth=self.store.auth_failed(cfg.profile))
+
+    # ---- the state, look by look
+    def _look(self) -> View:
+        self.facts = self.collect()
+        self.view = tray_state(self.facts)
+        return self.view
+
+    def refresh(self) -> None:
+        """One pass of the 3 s timer: the facts, the state, what follows from a change of it, the picture."""
+        self.reload_config()
+        v = self._look()
+        if turned_on_elsewhere(self.last, v, self.expect.kind):
+            self.expect.start("connect")
+            v = self._look()
+        if self.expect.update(v):
+            self.ui.notice(*expired_notice(self.facts.name), state="blocked")
+            v = self._look()
+        if self.facts.up and not self._was_up:                         # a tunnel came up: older lookups are not fresh
+            self.protected_since, self.exit.refused = time.time(), ""
+        self._was_up = self.facts.up
+        if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
+            self.protected_since = time.time()
+            self.exit.start(self.facts.name)
+            self.status_page.on_connected()                            # the service status too - the same rule
+        self.exit.poll()
+        self.status_page.tick()
+        self.ui.show_state()
+        noticed = self.switch_notice() or self.foreign_notice(v)
+        n = None if noticed else transition_notice(self.last, v, self.facts.expect, self.facts.name)
+        if n:
+            self.ui.notice(*n, state=v.state)
+        self.last = v.state
+        self.ui.show_windows()
+
+    def switch_notice(self) -> bool:
+        name = self.facts.name
+        if self.facts.configured and keepawake.get_pref("lastProfile") != name:       # every switch, once
+            keepawake.set_pref("lastProfile", name)
+            n = profile_switch_text(self.facts.kind, name)
+            if n:
+                self.ui.notice("VeroScudo - WireGuard profile", n, state="blocked")
+                return True
+        return False
+
+    def foreign_notice(self, v: View) -> bool:
+        """Another VPN connected while VeroScudo is on: once per detection (it is blocked - say so, and what to do)."""
+        if not v.armed:
+            self._foreign_shown = set()
+            return False
+        new, self._foreign_shown = new_foreign(self._foreign_shown, self.foreign)
+        if new:
+            self.ui.notice(*foreign_notice(new[0]), "critical", state="attention")
+            return True
+        return False
+
+    # ---- exit location (exitinfo.py)
+    def exit_enabled(self) -> bool:
+        return self.exit.enabled()
+
+    def set_exit_enabled(self, on: bool) -> None:
+        """Your own setting (tray.json): saved at once, no administrator's password."""
+        keepawake.set_pref("showExit", bool(on))
+        self.ui.update_status()
+
+    def exit_view(self) -> exitinfo.ExitView:
+        return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
+                                  self.exit.checking, self.exit.failure, refused=self.exit.refused,
+                                  tunnel_up=self.facts.up, kind=self.facts.kind)
+
+    def refresh_exit(self) -> None:
+        """The Refresh link: asked whenever a VPN tunnel is up - otherwise the answer would show your real address."""
+        self.exit.refresh(self.facts.name, self.facts.up)
+        self.ui.update_status()
+
+    # ---- service status page (statuspage.py)
+    def service_view(self) -> statuspage.ServiceView | None:
+        return self.status_page.view()
+
+    def status_page_enabled(self) -> bool:
+        return self.status_page.enabled()
+
+    def status_page_url(self) -> str:
+        return self.status_page.url()
+
+    def set_status_page(self, on: bool) -> None:
+        """Your own setting (tray.json): saved at once, no administrator's password."""
+        self.status_page.set_enabled(on)
+        self.ui.update_status()
+
+    def save_status_url(self, text: str) -> str | None:
+        """The status page's address field was left: None when it holds the saved address, '' when the new one
+        was saved, else why it was not (nothing saved - the front end puts the saved address back, says why)."""
+        text = text.strip()
+        if text == self.status_page.url():
+            return None
+        return self.status_page.set_url(text)
+
+    def refresh_status_page(self) -> None:
+        """The service card's Refresh link: a fetch now; "checking..." until it ends."""
+        self.status_page.refresh()
+        self.ui.update_status()
+
+    # ---- actions
+    def request_on(self) -> None:
+        """Turn VPN on: first asks when another VPN is connected (it would be blocked silently otherwise)."""
+        if not self.cfg:
+            self.act("on")
+            return
+        foreign = self.find_foreign(force=True)
+        if not foreign:
+            self.act("on")
+            return
+        answer = self.ui.choose_foreign(foreign_prompt(foreign, self.cfg.profile))
+        self._foreign_shown = {x.iface for x in foreign}            # just seen in the question: no notice for them again
+        if answer == "disconnect":
+            self.act("on", before=[self.nm.down_argv(x.connection) for x in foreign if x.connection])
+        elif answer == "anyway":
+            self.act("on")
+
+    def act(self, action: str, arg: str | None = None, before: list[list[str]] | None = None) -> None:
+        if action == "on":
+            self.expect.start("connect")
+        elif action == "reconnect":
+            if self.facts.kind == "hiddify":
+                self.ui.notice("VeroScudo", RECONNECT_HIDDIFY, state="blocked" if self.store.armed else "off")
+                return
+            if not self.store.armed:
+                self.ui.notice("VeroScudo", "The VPN is off - use Turn VPN on.", state="off")
+                return
+            self.expect.start("reconnect")
+            self.ui.notice("VeroScudo - reconnecting", f"Traffic is blocked while '{self.facts.name}' reconnects; "
+                           "it flows again once the tunnel is back.", state="blocked")
+        elif action == "use":
+            self.expect.start("switch")
+            armed = self.store.armed
+            self.ui.notice("VeroScudo", f"Switching to '{arg}'"
+                           + (" - traffic stays blocked until it is connected" if armed else ""),
+                           state="blocked" if armed else "off")
+        # `before`: other VPNs to disconnect first (as you, through the system's VPN service); a failure stops
+        # before the turn on
+        self.runner.start(action, *(before or []), action_argv(action, arg))
+        self.ui.refresh_soon()
+
+    def toggle_on_off(self) -> None:
+        if offers_off(self.view, self.facts.kind):
+            self.act("off")
+        else:
+            self.request_on()
+
+    def admin(self, args: list[str]) -> None:
+        self.runner.start("admin:" + args[0], admin_argv(args))
+
+    def save_check(self, enabled: bool, every: int, over: int, rows) -> str:
+        """Settings > Connection, Save: '' when the form is valid (the change then asks for an administrator's
+        password), else what is wrong with it. rows: (address, method, port) per line."""
+        try:
+            chk = quality.from_form(enabled, every, over, rows, is_host)
+        except ValueError as e:
+            return str(e)
+        self.admin(["set", "connectionCheck", json.dumps(chk.to_json())])
+        return ""
+
+    def drain(self) -> None:
+        """The 0.5 s timer: what the commands that ended since the last look came to."""
+        for tag, argv, rc, _out, err in self.runner.results():
+            is_admin = tag.startswith("admin:")
+            if rc == 0:
+                if is_admin:
+                    self.reload_config()                   # config_reloaded(): the settings show the change
+                    if self.refresh_after_admin:
+                        self.refresh()
+                continue
+            if is_admin and cancelled(rc, err):
+                self.ui.update_settings()                  # put the option back the way config.json has it
+                continue
+            what = explain_failure(argv, rc, err)
+            if is_admin:
+                self.ui.update_settings()
+                self.ui.message("The change was not made", what, error=True)
+            else:
+                self.expect.kind = None
+                self.ui.notice(f"VeroScudo - {tag} failed", what, "critical")
+        self._take_update_answers()
+
+    # ---- the report and the update check
+    def report_text(self) -> str:
+        """What the status window's Copy link puts on the clipboard: the state, the table, the last events."""
+        f, v = self.facts, self.view
+        xl = exitinfo.report_line(self.exit_view()) if self.exit_enabled() else None
+        sv = self.service_view()
+        rows = status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
+                           foreign=self.find_foreign(), exit_line=xl, service=sv.text if sv else None)
+        lines = [f"{k:<12} {val}" for k, val in rows]
+        ev = read_events(n=15)
+        return "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events",
+                          *(ev or [log_hint()])])
+
+    def copy_report(self) -> str:
+        text = self.report_text()
+        self.ui.set_clipboard(text)
+        return text
+
+    def check_updates(self, force: bool = False, clicked: bool = False) -> None:
+        """Asks GitHub for the latest release - on a worker, never on the UI thread: the icon keeps following the guard
+        while the answer is on its way. The answer is taken on the next drain (0.5 s timer)."""
+        if not force and (not self.cfg or not self.cfg.update_check):
+            return
+        if self.store.armed and not self.facts.up:          # blocked: nothing may leave the machine
+            if clicked:
+                self.ui.notice("VeroScudo", "Traffic is blocked right now - check again once the VPN is "
+                               "connected.", state="blocked")
+            return
+        if self._update_busy:
+            return
+        self._update_busy = True
+
+        def work() -> None:
+            try:
+                rel = update.fetch_latest()
+            except Exception:  # noqa: BLE001 - whatever went wrong: no answer
+                rel = None
+            self._update_answers.put((rel, clicked))
+        self.spawn(work)
+        self._take_update_answers()                            # already there when the work ran at once (tests)
+
+    def _take_update_answers(self) -> None:
+        while True:
+            try:
+                rel, clicked = self._update_answers.get_nowait()
+            except queue.Empty:
+                return
+            self._update_busy = False
+            self._update_answer(rel, clicked)
+
+    def _update_answer(self, rel, clicked: bool) -> None:
+        f = keepawake.pref_file().parent / "update.json"       # the user's own folder
+        info = UpdateInfo()
+        try:
+            info.notified = str(json.loads(f.read_text()).get("notified", ""))
+        except (OSError, ValueError, AttributeError):
+            pass
+        text, show = update_notice(info, rel.tag if rel else None, bool(rel and update.is_newer(rel.tag)))
+        self.update_tag, self.update_url = (rel.tag, rel.url) if rel and text != "Check for updates" else (None, "")
+        self.ui.show_update(text)
+        if show:
+            self.ui.notice(f"VeroScudo {self.update_tag} is available",
+                           f"You run {__version__}. Open the {self.menu_name} to see the release.",
+                           state="protected")
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"checked": info.checked, "notified": info.notified}))
+        except OSError:
+            pass
+        if not clicked:
+            return
+        if self.update_url and update.is_release_url(self.update_url):
+            self.ui.open_url(self.update_url)
+        elif rel is None:
+            self.ui.notice("VeroScudo", "The update check got no answer - try again later.", state=self.view.state)
+        else:
+            self.ui.notice("VeroScudo", f"You have the latest version ({__version__}).", state=self.view.state)
+
+    def update_clicked(self) -> None:
+        """The menu's update item: checks now; opens the release page when there is a newer version."""
+        self.check_updates(force=True, clicked=True)

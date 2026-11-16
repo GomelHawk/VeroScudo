@@ -8,32 +8,40 @@ writes (`sudo -n`, by full path); a change to config.json or the uninstall asks 
 from __future__ import annotations
 
 import fcntl
-import json
+import html
 import logging
 import os
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, badge, exitinfo, importer, keepawake, quality, stats, statuspage, traymodel, update
+from . import __version__, badge, exitinfo, importer, keepawake, quality, stats, statuspage, traymodel
 from .backend import nm
-from .config import Config, config_path, is_host
-from .state import StateStore, kind_label, switch_notice
+from .config import Config
+from .state import kind_label
 
 ICONS = traymodel.env_icons(Path("/usr/share/veroscudo/icons"))
 
 
 def _runtime_base() -> Path:
     # the user's own runtime folder (Linux XDG_RUNTIME_DIR, macOS TMPDIR): never a shared /tmp another user could hold
-    base = Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or f"/tmp/veroscudo-{os.getuid()}")
-    base.mkdir(mode=0o700, exist_ok=True)
-    st = os.lstat(base)                             # in /tmp another user could have made it first (or a link with its name)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        raise OSError(f"{base} is not this user's own folder")
-    return base
+    # A folder that is shared (TMPDIR=/tmp) or that another user made first gets a folder of this user's own inside the
+    # temp folder instead, with a name nobody else can have prepared.
+    uid = os.getuid()
+    for base in (Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or f"/tmp/veroscudo-{uid}"),
+                 Path(tempfile.gettempdir()) / f"veroscudo-{uid}"):
+        try:
+            base.mkdir(mode=0o700, exist_ok=True)
+            st = os.lstat(base)                     # never through a link with its name
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == uid and not st.st_mode & 0o022:
+            return base
+    return Path(tempfile.mkdtemp(prefix=f"veroscudo-{uid}-"))     # made 0700 for this user, name not predictable
 
 
 def _single_instance():
@@ -89,7 +97,10 @@ def _popen(argv: list[str]) -> None:
 
 def notify(title: str, body: str, urgency: str = "normal", state: str = "attention") -> None:
     icon = icon_path(state)
-    _popen(["notify-send", "-a", "VeroScudo", "-u", urgency] + (["-i", str(icon)] if icon.exists() else []) + [title, body])
+    # the body is markup for most notification daemons, and it can hold a connection's name or a command's last line: as
+    # plain text. "--": a title or body that starts with a dash is text, not an option
+    _popen(["notify-send", "-a", "VeroScudo", "-u", urgency] + (["-i", str(icon)] if icon.exists() else [])
+           + ["--", title, html.escape(body, quote=False)])
 
 
 # ---------------------------------------------------------------- windows (GTK; used by the tray and by --preview)
@@ -488,10 +499,10 @@ class Windows:
         se = self._se
         if se["busy"]:
             return False
-        text = se["sp_url"].get_text().strip()
-        if text == self.app.status_page_url():
+        err = self.app.save_status_url(se["sp_url"].get_text())
+        if err is None:
             return False
-        err = self.app.set_status_page_url(text)
+        self.update_status()
         if err:
             se["busy"] = True
             se["sp_url"].set_text(self.app.status_page_url())       # not saved: the saved address again
@@ -502,13 +513,10 @@ class Windows:
     def _save_check(self) -> None:
         se = self._se
         rows = [(e.get_text(), m.get_active_id() or "tcp", p.get_value_as_int()) for e, m, p in se["rows"]]
-        try:
-            chk = quality.from_form(se["en"].get_active(), se["every"].get_value_as_int(), se["over"].get_value_as_int(),
-                                    rows, is_host)
-        except ValueError as e:
-            self.message("Not saved", str(e), error=True)
-            return
-        self.app.admin(["set", "connectionCheck", json.dumps(chk.to_json())])
+        err = self.app.save_check(se["en"].get_active(), se["every"].get_value_as_int(),
+                                  se["over"].get_value_as_int(), rows)
+        if err:
+            self.message("Not saved", err, error=True)
 
     def update_settings(self) -> None:
         if not self.settings:
@@ -683,7 +691,14 @@ class Windows:
             fill()
 
         self._buttons(box, ("Refresh", again, False), ("Close", lambda: w.destroy(), True))
-        timer = self.GLib.timeout_add_seconds(60, lambda: (again(), True)[1])     # the picture moves on while open
+        def tick() -> bool:                                               # the picture moves on while open
+            try:
+                again()
+            except Exception:
+                logging.getLogger("veroscudo.tray").exception("statistics")
+            return True
+
+        timer = self.GLib.timeout_add_seconds(60, tick)
         self.stats = w
         w.connect("destroy", lambda *_: (self.GLib.source_remove(timer), setattr(self, "stats", None)))
         w.show_all()
@@ -801,34 +816,16 @@ class Windows:
 
 
 # ---------------------------------------------------------------- the tray
-class TrayApp:
+class TrayApp(traymodel.TrayController):
+    """The indicator and its menu. What happens is decided in traymodel.TrayController; here are its widgets and
+    the hooks the controller calls (this object is its own `ui`)."""
+
     def __init__(self) -> None:
         import gi  # type: ignore
         gi.require_version("AyatanaAppIndicator3", "0.1")
         from gi.repository import AyatanaAppIndicator3 as AppIndicator  # type: ignore
         self.Gdk, _, self.GLib, self.Gtk, _ = _gtk()
-        self.store = StateStore()
-        self.cfg: Config | None = None
-        self.cfg_error = ""
-        self._cfg_mtime = -1.0
-        self._kinds: dict[str, str | None] = {}
-        self.runner = traymodel.Runner()
-        self.expect = traymodel.Expect()
-        self.awake = keepawake.KeepAwake()
-        self.last: str | None = None
-        self.facts = traymodel.Facts(configured=False)
-        self.view = traymodel.tray_state(self.facts)
-        self.tunnel: str | None = None
-        self.update_tag: str | None = None
-        self.update_url = ""
-        self.exit = exitinfo.ExitFetch()
-        self.protected_since = 0.0
-        self._was_up = False
-        self.status_page = statuspage.StatusFetch()
-        self.foreign: list[traymodel.Foreign] = []
-        self._foreign_at = 0.0
-        self._foreign_shown: set = set()
-        self.last_drop = "-"
+        super().__init__(nm)
         self._badged: dict[str, str] = {}
         self.win = Windows(self)
         self.reload_config()
@@ -857,7 +854,7 @@ class TrayApp:
         self.awake_item.set_active(self.awake.set(keepawake.load_pref()))
         self.awake_handler = self.awake_item.connect("toggled", self.on_awake)
         m.append(Gtk.SeparatorMenuItem())
-        self.upd_item = self._item("Check for updates", self.on_update_click)
+        self.upd_item = self._item("Check for updates", self.update_clicked)
         self._item("About VeroScudo", self.win.show_about)
         self._item("Exit tray (guard keeps running)", self.quit)
         m.show_all()
@@ -865,7 +862,7 @@ class TrayApp:
         self.ind.set_secondary_activate_target(self.status_item)      # middle click: status, like the Windows left click
         self.refresh()
         self.GLib.timeout_add_seconds(3, self._tick)
-        self.GLib.timeout_add(500, self.drain)
+        self.GLib.timeout_add(500, self._drain_tick)
         self.GLib.timeout_add_seconds(120, lambda: (self.check_updates(), False)[1])
 
     def _item(self, label: str, cb):
@@ -875,92 +872,8 @@ class TrayApp:
         self.menu.append(it)
         return it
 
-    # facts
-    def kind(self, name: str) -> str | None:
-        if name not in self._kinds:
-            self._kinds[name] = nm.kind(name)
-        return self._kinds[name]
-
-    def discover(self) -> list[dict]:
-        return nm.discover()
-
-    def events(self, view: bool = False) -> list[str] | None:
-        """The newest log lines; view=True: as the status window shows them (after Clear, without dates)."""
-        ev = traymodel.read_events()
-        if view and ev is not None:
-            return traymodel.filter_events(ev, str(keepawake.get_pref("eventsClearedAt", "") or ""))
-        return ev
-
-    def clear_events(self) -> None:
-        keepawake.set_pref("eventsClearedAt", traymodel.clear_stamp())
-        self.win.update_status()
-
-    # exit location (exitinfo.py)
-    def stats_week(self, pid: str) -> list:
-        return stats.week(self.store.state, pid)
-
-    def stats_choices(self) -> list[tuple[str, str]]:
-        cfg = self.cfg
-        return stats.choices(stats.profiles_seen(self.store.state), [(p.id, p.name) for p in cfg.profiles] if cfg else [],
-                             cfg.current.id if cfg else None)
-
-    def exit_enabled(self) -> bool:
-        return self.exit.enabled()
-
-    def set_exit_enabled(self, on: bool) -> None:
-        keepawake.set_pref("showExit", bool(on))
-        self.win.update_status()
-
-    def exit_view(self) -> exitinfo.ExitView:
-        return exitinfo.exit_view(self.exit.info(), self.view.state, self.facts.name, self.protected_since,
-                                  self.exit.checking, self.exit.failure, refused=self.exit.refused, tunnel_up=self.facts.up,
-                                  kind=self.facts.kind)
-
-    def refresh_exit(self) -> None:
-        """The Refresh link: asked whenever a VPN tunnel is up - otherwise the answer would show your real address."""
-        self.exit.refresh(self.facts.name, self.facts.up)
-        self.win.update_status()
-
-    # service status page (statuspage.py)
-    def service_view(self) -> statuspage.ServiceView | None:
-        return self.status_page.view()
-
-    def status_page_enabled(self) -> bool:
-        return self.status_page.enabled()
-
-    def status_page_url(self) -> str:
-        return self.status_page.url()
-
-    def set_status_page(self, on: bool) -> None:
-        self.status_page.set_enabled(on)
-        self.win.update_status()
-
-    def set_status_page_url(self, url: str) -> str:
-        err = self.status_page.set_url(url)
-        self.win.update_status()
-        return err
-
     def status_page_opened(self) -> None:
         """The status window opened: nothing to fetch - the status page is looked at after each connect and on Refresh."""
-
-    def refresh_status_page(self) -> None:
-        """The service card's Refresh link: a fetch now; "checking..." until it ends."""
-        self.status_page.refresh()
-        self.win.update_status()
-
-    def find_foreign(self, force: bool = False) -> list[traymodel.Foreign]:
-        """Other VPNs next to the active profile; asked at most every 10 s (the window refreshes every 3 s)."""
-        if force or time.time() - self._foreign_at >= 10:
-            self._foreign_at = time.time()
-            cfg = self.cfg
-            own = self.tunnel
-            tunnels = nm.other_tunnels(own)
-            try:
-                owners = nm.tunnel_owners()
-            except (OSError, subprocess.SubprocessError):
-                owners = {}
-            self.foreign = traymodel.foreign_list(tunnels, owners, own, cfg.profile if cfg else "", cfg.names if cfg else ())
-        return self.foreign
 
     def icon_file(self, state: str, awake: bool) -> str:
         """The state icon, with the keep-awake badge while Keep awake is on (drawn once per state, kept in the user's
@@ -973,40 +886,7 @@ class TrayApp:
             self._badged[state] = str(out) if awake_icon(state, out) else plain
         return self._badged[state]
 
-    @property
-    def awake_on(self) -> bool:
-        return self.awake.active
-
-    def reload_config(self) -> bool:
-        m = traymodel.config_mtime(config_path())
-        if m == self._cfg_mtime:
-            return False
-        self._cfg_mtime = m
-        try:
-            self.cfg, self.cfg_error = Config.load(active=self.store.active), ""
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            self.cfg, self.cfg_error = None, str(e)
-        self._kinds.clear()
-        return True
-
-    def collect(self) -> traymodel.Facts:
-        cfg = self.cfg
-        if cfg is None:
-            return traymodel.Facts(configured=False, config_error=self.cfg_error, guard_running=traymodel.guard_running())
-        active = self.store.active
-        if active in cfg.names and active != cfg.profile:
-            self.cfg = cfg = cfg.with_active(active)
-        armed = self.store.armed
-        up = nm.is_connected(cfg.profile) and (not armed or self.store.allowed_tunnel(cfg.profile) is not None)
-        self.tunnel = (self.store.allowed_tunnel(cfg.profile) or nm.iface(cfg.profile)) if up else None
-        foreign = self.find_foreign()
-        self.last_drop = traymodel.last_drop_text(self.store.last_drop(), cfg.profile)
-        return traymodel.Facts(name=cfg.profile, kind=self.kind(cfg.profile), armed=armed, up=up,
-                               guard_running=traymodel.guard_running(), others=tuple(x.name for x in foreign) if armed else (),
-                               expect=self.expect.kind, check_enabled=cfg.check.enabled,
-                               quality=quality.read(self.store.home / "quality.json", cfg.profile) if cfg.check.enabled else None,
-                               auth=self.store.auth_failed(cfg.profile))
-
+    # timers
     def _tick(self) -> bool:
         """The 3 s timer. An error in one pass is logged and the timer goes on: an icon that stopped following the guard
         would keep showing its last state."""
@@ -1016,27 +896,30 @@ class TrayApp:
             logging.getLogger("veroscudo.tray").exception("refresh")
         return True
 
-    def refresh(self) -> bool:
-        changed = self.reload_config()
-        self.facts = self.collect()
-        self.view = v = traymodel.tray_state(self.facts)
-        if traymodel.turned_on_elsewhere(self.last, v, self.expect.kind):
-            self.expect.start("connect")
-            self.facts = self.collect()
-            self.view = v = traymodel.tray_state(self.facts)
-        if self.expect.update(v):
-            notify(*traymodel.expired_notice(self.facts.name), state="blocked")
-            self.facts = self.collect()
-            self.view = v = traymodel.tray_state(self.facts)
-        if self.facts.up and not self._was_up:                         # a tunnel came up: older lookups are not fresh
-            self.protected_since, self.exit.refused = time.time(), ""
-        self._was_up = self.facts.up
-        if v.state == "protected" and self.last != "protected":        # each (re)connect: once, through the new tunnel
-            self.protected_since = time.time()
-            self.exit.start(self.facts.name)
-            self.status_page.on_connected()                            # the service status too - the same rule
-        self.exit.poll()
-        self.status_page.tick()
+    def _drain_tick(self) -> bool:
+        """The 0.5 s timer. An error is logged and the timer goes on: GLib drops a timer whose callback raised,
+        and the results of later commands would never be shown."""
+        try:
+            self.drain()
+        except Exception:
+            logging.getLogger("veroscudo.tray").exception("drain")
+        return True
+
+    # the controller's hooks (traymodel.TrayController)
+    def notice(self, title: str, body: str, urgency: str = "normal", state: str = "attention") -> None:
+        notify(title, body, urgency, state)
+
+    def message(self, title: str, text: str, error: bool = False) -> None:
+        self.win.message(title, text, error=error)
+
+    def choose_foreign(self, prompt: traymodel.Prompt) -> str:
+        return self.win.choose_foreign(prompt)
+
+    def config_reloaded(self) -> None:
+        self.win.update_settings()
+
+    def show_state(self) -> None:
+        v = self.view
         self.ind.set_icon_full(self.icon_file(v.state, self.awake.active), v.title)
         self.ind.set_title(traymodel.tooltip(v, self.awake.active, self.facts))
         self.head.set_label(traymodel.menu_head(v, self.facts))
@@ -1046,20 +929,35 @@ class TrayApp:
         self.redo_item.set_sensitive(ms.reconnect)
         self.redo_item.set_tooltip_text(traymodel.RECONNECT_HIDDIFY if self.facts.kind == "hiddify" else None)
         self.fill_profiles()
-        noticed = self.switch_notice() or self.foreign_notice(v)
-        n = None if noticed else traymodel.transition_notice(self.last, v, self.facts.expect, self.facts.name)
-        if n:
-            notify(*n, state=v.state)
-        self.last = v.state
+
+    def show_windows(self) -> None:
         if self.awake_item.get_active() != self.awake.active:          # the inhibitor died on its own
             self.awake_item.handler_block(self.awake_handler)
             self.awake_item.set_active(self.awake.active)
             self.awake_item.handler_unblock(self.awake_handler)
         self.win.update_status()
-        if changed:
-            self.win.update_settings()
-        return True
 
+    def update_status(self) -> None:
+        self.win.update_status()
+
+    def update_settings(self) -> None:
+        self.win.update_settings()
+
+    def refresh_soon(self) -> None:
+        self.GLib.timeout_add(1500, lambda: (self._tick(), False)[1])         # guarded like the 3 s timer, once
+
+    def show_update(self, text: str) -> None:
+        self.upd_item.set_label(text)
+
+    def open_url(self, url: str) -> None:
+        _popen(["xdg-open", url])
+
+    def set_clipboard(self, text: str) -> None:
+        cb = self.Gtk.Clipboard.get(self.Gdk.SELECTION_CLIPBOARD)
+        cb.set_text(text, -1)
+        cb.store()
+
+    # the menu
     def fill_profiles(self) -> None:
         cfg = self.cfg
         key = (tuple(cfg.names), cfg.profile) if cfg else ()
@@ -1083,108 +981,8 @@ class TrayApp:
         self.prof_item.set_label(f"VPN profile: {cfg.profile} ({kind_label(self.kind(cfg.profile))})")
         self.prof_menu.show_all()
 
-    def switch_notice(self) -> bool:
-        name = self.facts.name
-        if self.facts.configured and keepawake.get_pref("lastProfile") != name:       # every switch, once
-            keepawake.set_pref("lastProfile", name)
-            n = switch_notice(self.facts.kind, name)
-            if n:
-                notify("VeroScudo - WireGuard profile", n, state="blocked")
-                return True
-        return False
-
-    def foreign_notice(self, v: traymodel.View) -> bool:
-        """Another VPN connected while VeroScudo is on: once per detection (it is blocked - say so, and what to do)."""
-        if not v.armed:
-            self._foreign_shown = set()
-            return False
-        new, self._foreign_shown = traymodel.new_foreign(self._foreign_shown, self.foreign)
-        if new:
-            notify(*traymodel.foreign_notice(new[0]), "critical", state="attention")
-            return True
-        return False
-
-    # actions
-    def request_on(self) -> None:
-        """Turn VPN on: first asks when another VPN is connected (it would be blocked silently otherwise)."""
-        if not self.cfg:
-            self.act("on")
-            return
-        foreign = self.find_foreign(force=True)
-        if not foreign:
-            self.act("on")
-            return
-        answer = self.win.choose_foreign(traymodel.foreign_prompt(foreign, self.cfg.profile))
-        self._foreign_shown = {x.iface for x in foreign}            # just seen in the question: no notice for them again
-        if answer == "disconnect":
-            self.act("on", before=[nm.down_argv(x.connection) for x in foreign if x.connection])
-        elif answer == "anyway":
-            self.act("on")
-
-    def act(self, action: str, arg: str | None = None, before: list[list[str]] | None = None) -> None:
-        if action == "on":
-            self.expect.start("connect")
-        elif action == "reconnect":
-            if self.facts.kind == "hiddify":
-                notify("VeroScudo", traymodel.RECONNECT_HIDDIFY, state="blocked" if self.store.armed else "off")
-                return
-            if not self.store.armed:
-                notify("VeroScudo", "The VPN is off - use Turn VPN on.", state="off")
-                return
-            self.expect.start("reconnect")
-            notify("VeroScudo - reconnecting", f"Traffic is blocked while '{self.facts.name}' reconnects; it flows again once "
-                   "the tunnel is back.", state="blocked")
-        elif action == "use":
-            self.expect.start("switch")
-            notify("VeroScudo", f"Switching to '{arg}'" + (" - traffic stays blocked until it is connected" if self.store.armed else ""),
-                   state="blocked" if self.store.armed else "off")
-        # `before`: other VPNs to disconnect first (as you, through NetworkManager); a failure stops before the turn on
-        self.runner.start(action, *(before or []), traymodel.action_argv(action, arg))
-        self.GLib.timeout_add(1500, lambda: (self.refresh(), False)[1])
-
     def switch(self, name: str) -> None:
         self.act("use", name)
-
-    def toggle_on_off(self) -> None:
-        if traymodel.offers_off(self.view, self.facts.kind):
-            self.act("off")
-        else:
-            self.request_on()
-
-    def admin(self, args: list[str]) -> None:
-        self.runner.start("admin:" + args[0], traymodel.admin_argv(args))
-
-    def drain(self) -> bool:
-        for tag, argv, rc, _out, err in self.runner.results():
-            if rc == 0:
-                if tag.startswith("admin:"):
-                    self.reload_config()
-                    self.win.update_settings()
-                continue
-            if tag.startswith("admin:") and traymodel.cancelled(rc, err):
-                self.win.update_settings()                 # put the option back the way config.json has it
-                continue
-            what = traymodel.explain_failure(argv, rc, err)
-            if tag.startswith("admin:"):
-                self.win.update_settings()
-                self.win.message("The change was not made", what, error=True)
-            else:
-                self.expect.kind = None
-                notify(f"VeroScudo - {tag} failed", what, "critical")
-        return True
-
-    def copy_report(self) -> None:
-        f, v = self.facts, self.view
-        xl = exitinfo.report_line(self.exit_view()) if self.exit_enabled() else None
-        sv = self.service_view()
-        lines = [f"{k:<12} {val}" for k, val in traymodel.status_rows(f, v, self.awake.active, self.tunnel, last_drop=self.last_drop,
-                                                                     foreign=self.find_foreign(), exit_line=xl,
-                                                                     service=sv.text if sv else None)]
-        ev = traymodel.read_events(n=15)
-        text = "\n".join([f"VeroScudo {__version__} - {v.title}", *lines, "", "--- last events", *(ev or [traymodel.log_hint()])])
-        cb = self.Gtk.Clipboard.get(self.Gdk.SELECTION_CLIPBOARD)
-        cb.set_text(text, -1)
-        cb.store()
 
     def open_log(self) -> None:
         if traymodel.read_events(n=1) is None:
@@ -1202,39 +1000,6 @@ class TrayApp:
             item.handler_unblock(self.awake_handler)
             notify("Keep awake is not available", "No sleep inhibitor found (systemd-inhibit).")
         self.refresh()
-
-    def check_updates(self, force: bool = False) -> None:
-        if not force and (not self.cfg or not self.cfg.update_check):
-            return
-        if self.store.armed and not self.facts.up:          # blocked: nothing may leave the machine
-            return
-        f = keepawake.pref_file().parent / "update.json"       # the user's own folder
-        info = traymodel.UpdateInfo()
-        try:
-            info.notified = str(json.loads(f.read_text()).get("notified", ""))
-        except (OSError, ValueError, AttributeError):
-            pass
-        rel = update.fetch_latest()
-        text, show = traymodel.update_notice(info, rel.tag if rel else None, bool(rel and update.is_newer(rel.tag)))
-        self.update_tag, self.update_url = (rel.tag, rel.url) if rel and text != "Check for updates" else (None, "")
-        self.upd_item.set_label(text)
-        if show:
-            notify(f"VeroScudo {self.update_tag} is available", f"You run {__version__}. Open the tray menu to see the release.",
-                   state="protected")
-        try:
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps({"checked": info.checked, "notified": info.notified}))
-        except OSError:
-            pass
-
-    def on_update_click(self) -> None:
-        self.check_updates(force=True)
-        if self.update_url and update.is_release_url(self.update_url):
-            _popen(["xdg-open", self.update_url])
-        elif self.store.armed and not self.facts.up:
-            notify("VeroScudo", "Traffic is blocked right now - check again once the VPN is connected.", state="blocked")
-        else:
-            notify("VeroScudo", f"You have the latest version ({__version__}).", state=self.view.state)
 
     def quit(self) -> None:
         self.awake.release()
@@ -1319,7 +1084,7 @@ class _PreviewApp:
 
     act = admin = copy_report = open_log = refresh_exit = clear_events = set_exit_enabled = lambda *a, **k: None
     set_status_page = status_page_opened = refresh_status_page = lambda *a, **k: None
-    set_status_page_url = lambda *a, **k: ""
+    save_check = save_status_url = lambda *a, **k: None
 
 
 def preview(outdir: Path) -> int:

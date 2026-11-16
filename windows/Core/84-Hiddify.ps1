@@ -12,6 +12,7 @@
 $script:HiddifyExes = @('Hiddify.exe', 'HiddifyCli.exe')
 $script:HiddifyTunPattern = '^sing-tun'                                  # the Wintun adapter's description in VPN mode
 $script:HiddifyWaitLogged = $false
+$script:HiddifyAppsMissingLogged = $false                               # the 'not in an administrators-only folder' warning: once
 
 function Get-VeroHiddifyDir {
     <# Where Hiddify is installed: its uninstall entry (HKLM - written by its installer as administrator), else the default

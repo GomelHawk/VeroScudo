@@ -53,10 +53,10 @@ def test_a_server_with_a_zone_is_refused():
 
 
 def test_lan_allow_is_stored_in_canonical_form():
-    cfg = Config.from_text(ONE % ("", ', "lanAllow": ["10.0.0.0/255.0.0.0", "192.168.1.5/24", "2001:db8::/32"]'))
-    assert cfg.lan_allow == ("10.0.0.0/8", "192.168.1.0/24", "2001:db8::/32")
-    for render in (firewall.render_ruleset, pf.render_ruleset):
-        assert "255.0.0.0" not in render(cfg, ["203.0.113.5"], None, vm_allowed=False)
+    cfg = Config.from_text(ONE % ("", ', "lanAllow": ["192.168.1.5/24", "2001:DB8::/32", "10.1.2.3"]'))
+    assert cfg.lan_allow == ("192.168.1.0/24", "2001:db8::/32", "10.1.2.3/32")
+    with pytest.raises(ValueError):                              # a netmask is not a prefix length (nft would refuse it)
+        Config.from_text(ONE % ("", ', "lanAllow": ["10.0.0.0/255.0.0.0"]'))
 
 
 @pytest.mark.parametrize("render", [firewall.render_ruleset, pf.render_ruleset])
@@ -243,8 +243,9 @@ def test_root_takes_nothing_from_the_callers_environment():
 
 def test_the_firewall_lock_is_for_its_owner_only(tmp_path):
     store = StateStore(tmp_path / "run", tmp_path / "lib")
-    store.fw_lock_file.write_text("")
-    os.chmod(store.fw_lock_file, 0o644)                          # as an earlier version made it
+    with store.firewall_lock():
+        assert stat.S_IMODE(os.stat(store.fw_lock_file).st_mode) == 0o600
+    os.chmod(store.fw_lock_file, 0o644)                          # loosened by somebody: tightened again at the next use
     with store.firewall_lock():
         assert stat.S_IMODE(os.stat(store.fw_lock_file).st_mode) == 0o600
 
@@ -254,3 +255,88 @@ def test_a_refused_ruleset_is_an_error_with_nfts_words_in_the_log(monkeypatch, c
     with pytest.raises(subprocess.CalledProcessError):
         firewall.apply("table x")
     assert "syntax error, line 3" in caplog.text
+
+
+# ---- the redial lock names one process, not just a number
+def test_a_lock_whose_process_id_went_to_another_process_is_stale(tmp_path, monkeypatch):
+    from veroscudo import state
+    store = StateStore(tmp_path / "run", tmp_path / "lib")
+    assert store.take_lock() and store.lock_alive()
+    pid, started = store.lock.read_text().split()
+    assert int(pid) == os.getpid() and started == state.proc_started(os.getpid())
+    store.lock.write_text(f"{pid} 1")                             # the same id, started at another time
+    assert not store.lock_alive() and not store.lock.exists()
+    store.lock.write_text(pid)                                    # a lock from an earlier version: the id alone
+    assert store.lock_alive()
+    store.lock.write_text("")                                     # just made, its owner has not written its id yet
+    assert store.lock_alive()
+    old = time.time() - 60
+    os.utime(store.lock, (old, old))                              # empty for a minute: nobody is going to
+    assert not store.lock_alive()
+
+
+def test_proc_started_reads_past_a_command_name_with_spaces(tmp_path):
+    from veroscudo import state
+    (tmp_path / "42").mkdir()
+    (tmp_path / "42" / "stat").write_text("42 (a b) c) S " + " ".join(str(i) for i in range(4, 30)))
+    assert state.proc_started(42, tmp_path) == "22"
+    assert state.proc_started(43, tmp_path) is None
+
+
+def test_nothing_is_applied_once_the_machine_is_off(guard):
+    g, st, _fw = guard
+    st["fail"] = False
+    g.enable_killswitch(False)                                   # never armed: no rules
+    assert st["applied"] == []
+    g.arm()
+    assert len(st["applied"]) == 1
+    g.store.set_armed(False)                                     # Off landed between a caller's look and its apply
+    g.enable_killswitch(False, force=True)
+    assert len(st["applied"]) == 1
+
+
+def test_rules_are_worked_out_before_the_lock_is_taken(guard, monkeypatch):
+    g, st, _fw = guard
+    st["fail"] = False
+    g.store.set_armed(True)
+    depth = []
+    real = g.desired_ruleset
+    monkeypatch.setattr(g, "desired_ruleset", lambda up: (depth.append(g.store._fw_depth), real(up))[1])
+    g.enable_killswitch(False)
+    assert depth and depth[0] == 0
+
+
+def test_a_lock_somebody_holds_on_the_old_lock_file_does_not_stop_the_guard(tmp_path):
+    store = StateStore(tmp_path / "run", tmp_path / "lib")
+    legacy = store.home / "firewall.lock"                        # up to 1.3: readable by everyone
+    legacy.write_text("")
+    os.chmod(legacy, 0o644)
+    held = os.open(legacy, os.O_RDONLY)                          # somebody who opened it then and holds a lock on it
+    import fcntl
+    fcntl.flock(held, fcntl.LOCK_EX)
+    try:
+        assert store.fw_lock_file.name != legacy.name
+        with store.firewall_lock():                              # another file: nobody else has it open
+            assert stat.S_IMODE(os.stat(store.fw_lock_file).st_mode) == 0o600
+    finally:
+        os.close(held)
+
+
+def test_state_files_are_replaced_whole(tmp_path):
+    from veroscudo import state
+    f = tmp_path / "active-profile"
+    state.write_atomic(f, "Work")
+    state.write_atomic(f, "Backup")
+    assert f.read_text() == "Backup" and [p.name for p in tmp_path.iterdir()] == ["active-profile"]
+
+
+def test_a_hiddify_config_of_the_wrong_shape_is_no_tunnel_not_an_error():
+    assert hiddify.tun_settings({"inbounds": 5}) == ([], None)
+    assert hiddify.tun_settings({"inbounds": {"type": "tun"}}) == ([], None)
+
+
+def test_a_server_written_as_a_number_shorthand_is_refused():
+    for bad in ("10.1", "1", "1.2.3", "999.1.1.1", "1.2.3.4.5"):
+        with pytest.raises(ValueError):
+            Config.from_text(f'{{"profiles":[{{"profile":"W","server":"{bad}"}}]}}')
+    assert Config.from_text('{"profiles":[{"profile":"W","server":"203.0.113.5"}]}').server == "203.0.113.5"

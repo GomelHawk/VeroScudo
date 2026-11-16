@@ -31,7 +31,7 @@ APP=/Applications/VeroScudo.app
 AGENT=/Library/LaunchAgents/com.gomelhawk.veroscudo.tray.plist
 # Apple's python3 only (root-owned). `command -v python3` could find Homebrew's, which the user owns on Intel Macs.
 PYTHON=/usr/bin/python3
-if ! "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+if ! "$PYTHON" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
   echo "missing: Apple's python3 (3.9 or newer) - run: xcode-select --install   then this installer again"; exit 1
 fi
 
@@ -61,7 +61,7 @@ install -m 755 "$HERE/uninstall.sh" "$PREFIX/uninstall.sh"
 # the menu-bar app's only dependency: PyObjC (AppKit), pinned, wheels only, in its own folder - the root daemon never loads it
 TRAY_OK=1
 [ -d "$PREFIX/tray-lib.new" ] && rm -rf -- "$PREFIX/tray-lib.new"
-if "$PYTHON" -m pip install --quiet --disable-pip-version-check --no-cache-dir --only-binary=:all: \
+if "$PYTHON" -I -m pip --isolated install --quiet --disable-pip-version-check --no-cache-dir --only-binary=:all: \
      --target "$PREFIX/tray-lib.new" "pyobjc-core==10.3.1" "pyobjc-framework-Cocoa==10.3.1"; then
   [ -d "$PREFIX/tray-lib" ] && mv "$PREFIX/tray-lib" "$PREFIX/tray-lib.old"
   mv "$PREFIX/tray-lib.new" "$PREFIX/tray-lib"

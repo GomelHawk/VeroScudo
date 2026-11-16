@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -52,6 +53,48 @@ def safe_name(name: str) -> str:
 RUN_DIR = "/var/run/veroscudo" if sys.platform == "darwin" else "/run/veroscudo"     # macOS has no /run
 
 
+LOG = "/var/log/veroscudo.log"       # the guard's log (written by the root command, read by the trays and `status`)
+# who may read the log besides root: the administrators' group (Debian/Ubuntu 'adm' also reads the journal, where the
+# daemon's output goes anyway; macOS 'admin'). The tray's Status and Open log read it as the signed-in user.
+LOG_GROUP = "admin" if sys.platform == "darwin" else "adm"
+
+
+def is_up(nm, store: StateStore, profile: str, armed: bool | None = None) -> bool:
+    """Connected - and, while armed, let through by the kill-switch as the guard last applied it. A dead WireGuard link
+    stays 'activated' and only root can read its handshakes; the guard's own verdict (applied.json) is what counts.
+    The one rule for `veroscudo status` and both trays. `nm`: the platform's VPN backend; `armed`: store.armed when the
+    caller has read it already."""
+    if not nm.is_connected(profile):
+        return False
+    armed = store.armed if armed is None else armed
+    return not armed or store.allowed_tunnel(profile) is not None
+
+
+def proc_started(pid: int, proc: Path = Path("/proc")) -> str | None:
+    """When the process started, as the kernel counts it (Linux: field 22 of /proc/<pid>/stat) - with the process id it
+    names one process for good. None where that cannot be read (macOS, a process of another user in a hardened /proc):
+    the caller then goes by the process id alone. Pure apart from the read."""
+    try:
+        stat = (proc / str(pid) / "stat").read_text()
+    except OSError:
+        return None
+    fields = stat.rpartition(")")[2].split()                # the command name (in brackets) may hold spaces
+    return fields[19] if len(fields) > 19 else None
+
+
+def write_atomic(path: Path, text: str, mode: int | None = None) -> None:
+    """A state file other processes read: written whole or not at all - to a temporary file of this process beside it,
+    then renamed over the old one. A reader never meets an empty or half-written file."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.new")   # one per writer: the daemon has threads
+    try:
+        tmp.write_text(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)                          # only when the replace did not happen
+
+
 class StateStore:
     """The armed flag, the active profile and the cached server IPs must survive a reboot (strict from boot, like
     Windows), so they live in $VEROSCUDO_STATE (default /var/lib/veroscudo). The reconnect lock must not: it lives in
@@ -69,7 +112,9 @@ class StateStore:
         self.active_file = self.state / "active-profile"
         self.lock = self.home / "reconnect.lock"
         self.server_ip = self.state / "server.ip"           # 1.0 single-profile cache, read as a fallback
-        self.fw_lock_file = self.home / "firewall.lock"     # see firewall_lock()
+        # see firewall_lock(). Not "firewall.lock": up to 1.3 that file was readable by everyone, and whoever opened it then
+        # could still hold a lock on it - a name of its own has no such past
+        self.fw_lock_file = self.home / "fw.lock"
         self.applied_file = self.home / "applied.json"     # what the kill-switch allows right now (read by tray and status)
         self.down_file = self.home / "last-down"            # when the kill-switch last went to "blocked" (connection check)
         self.drop_file = self.home / "last-drop.json"       # the newest tunnel drop and why (the tray's "Last drop")
@@ -90,10 +135,12 @@ class StateStore:
                 self._fw_fd = os.open(self.fw_lock_file, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
                 try:
                     if os.fstat(self._fw_fd).st_mode & 0o077:
-                        os.fchmod(self._fw_fd, 0o600)            # one made by an earlier version
-                except OSError:
-                    pass
-                fcntl.flock(self._fw_fd, fcntl.LOCK_EX)
+                        os.fchmod(self._fw_fd, 0o600)
+                    fcntl.flock(self._fw_fd, fcntl.LOCK_EX)
+                except BaseException:                            # not locked: the file is closed again, nothing is left open
+                    os.close(self._fw_fd)
+                    self._fw_fd = None
+                    raise
             self._fw_depth += 1
             try:
                 yield
@@ -104,15 +151,19 @@ class StateStore:
                     os.close(self._fw_fd)
                     self._fw_fd = None
 
+    @staticmethod
+    def _note(path: Path, what: dict, mode: int | None = None) -> None:
+        """One of the small notes the tray and `status` read (mode 0644: the signed-in user reads it). A note that cannot
+        be written is said in the log and nothing more: the guard's own decisions never wait on it."""
+        try:
+            write_atomic(path, json.dumps(what), mode)
+        except OSError as e:
+            logging.getLogger("veroscudo").warning("could not write %s: %s", path.name, e)
+
     def set_applied(self, profile: str | None, tunnel: str | None) -> None:
         """Written by the guard each time it applies or removes the kill-switch: the profile and the tunnel interface the
         rules let through (None: everything blocked). Atomic replace; readable by the signed-in user."""
-        try:
-            tmp = self.applied_file.with_suffix(".new")
-            tmp.write_text(json.dumps({"profile": profile, "tunnel": tunnel}))
-            os.replace(tmp, self.applied_file)
-        except OSError:
-            pass
+        self._note(self.applied_file, {"profile": profile, "tunnel": tunnel})
 
     def mark_down(self, now: float | None = None) -> None:
         """The kill-switch was just applied without a tunnel (a drop, a Reconnect, a switch): the connection check starts
@@ -131,25 +182,13 @@ class StateStore:
     def record_drop(self, profile: str, why: str, now: float | None = None) -> None:
         """The tunnel of `profile` went down (a drop, your disconnect, a Reconnect) - the status window's "Last drop", like
         the Windows tray's RAS event. Only the newest one is kept; it is gone after a reboot (it lives in /run)."""
-        try:
-            tmp = self.drop_file.with_suffix(".new")
-            tmp.write_text(json.dumps({"profile": profile, "why": why, "time": time.time() if now is None else now}))
-            os.chmod(tmp, 0o644)                                 # the tray (the user) reads it
-            os.replace(tmp, self.drop_file)
-        except OSError:
-            pass
+        self._note(self.drop_file, {"profile": profile, "why": why, "time": time.time() if now is None else now}, 0o644)
 
     def set_auth_failed(self, profile: str, which: str) -> bool:
         """The VPN refused `profile` for its password: which = 'missing' (none stored) or 'rejected'. The guard stops
         redialing it so the account is not locked on the server (Windows: Set-VeroAuthFailed). True = newly set."""
         first = self.auth_failed(profile) is None
-        try:
-            tmp = self.auth_file.with_suffix(".new")
-            tmp.write_text(json.dumps({"profile": profile, "which": which, "time": time.time()}))
-            os.chmod(tmp, 0o644)                                 # the tray (the user) reads it
-            os.replace(tmp, self.auth_file)
-        except OSError:
-            pass
+        self._note(self.auth_file, {"profile": profile, "which": which, "time": time.time()}, 0o644)
         return first
 
     def auth_failed(self, profile: str) -> str | None:
@@ -214,22 +253,38 @@ class StateStore:
     def set_active(self, name: str) -> bool:
         if self.active == name:
             return False
-        self.active_file.write_text(name)
+        write_atomic(self.active_file, name)                     # read on every look at the config, by every process
         return True
 
     def lock_alive(self) -> bool:
+        """A redial loop holds the lock: its process exists and is the one that took it - the lock names the process id
+        and when that process started, so an id the system has given to another process since does not count."""
         if not self.lock.exists():
             return False
+        parts: list[str] | None = None
         try:
-            pid = int(self.lock.read_text().strip() or 0)
+            parts = self.lock.read_text().split()
+            if not parts and time.time() - self.lock.stat().st_mtime < 5:
+                return True                                      # just created, its owner is about to write its id
+            pid = int(parts[0]) if parts else 0
+            if pid <= 0:
+                raise ValueError("no process id")
+            started = parts[1] if len(parts) > 1 else None
+            now = proc_started(pid)
+            if started is not None and now is not None and started != now:
+                raise ProcessLookupError                         # the id belongs to another process now
             os.kill(pid, 0)
             return True
         except PermissionError:
             return True             # the process exists but belongs to root: a non-root `status` may not signal it (nor unlink)
+        except FileNotFoundError:
+            return False                                         # released between the looks
         except (ValueError, ProcessLookupError):
             try:
-                self.lock.unlink(missing_ok=True)
-            except OSError:
+                # only the lock that was just judged: another process may have removed it and taken a fresh one meanwhile
+                if self.lock.read_text().split() == parts:
+                    self.lock.unlink(missing_ok=True)
+            except (OSError, ValueError):
                 pass                # read-only caller (tray, status): the daemon cleans it up
             return False
 
@@ -243,7 +298,7 @@ class StateStore:
                     return False
                 continue                         # stale lock was removed: retry once
             with os.fdopen(fd, "w") as f:
-                f.write(str(os.getpid()))
+                f.write(f"{os.getpid()} {proc_started(os.getpid()) or ''}".strip())
             return True
         return False
 

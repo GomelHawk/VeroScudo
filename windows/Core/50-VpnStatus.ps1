@@ -121,23 +121,33 @@ function Save-VeroRasCoId {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     Start-Sleep -Milliseconds 500                                             # RAS writes the connect record right after it connects
     $rec = Get-VeroRasConnectedRecord -ProfileName $ProfileName -AllowApplicationLog
-    if ($rec) { @{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).RasCoId }
+    if ($rec) { Write-VeroStateFile -Path (Get-VeroPath).RasCoId -Text (@{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json) }
 }
 
 function Invoke-VeroArmConnected {
     <# A Windows VPN profile connected by hand (any protocol): arm for it - the same steps from the Connected task and from the
        watchdog's own check, so the outcome never depends on which events a protocol logs. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'arm')
+    # the type's notes (a connection id, a revocation window) help later decisions; arming never waits on them
+    try { & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).OnArmConnected $Config $Action } catch { Write-VeroLog "ERROR: notes at arm: $($_.Exception.Message)" $Action }
+    Enter-VeroArmed -Config $Config -Action $Action
+}
+
+function Save-VeroRasArm {
+    <# The built-in client's part of arming a tunnel that connected by hand (its handler's OnArmConnected). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'arm')
     $p = Get-VeroPath
-    # an SSTP tunnel may still be checking its server certificate's revocation when the filters arrive
-    if ((Get-VeroConfigType $Config) -eq 'ras' -and (Get-VeroTunnelType $Config.Profile) -in 'Sstp', 'Automatic') {
-        Open-VeroCrlWindow -Action $Action -Reason 'SSTP tunnel just connected (revocation check may still run)'
+    # an SSTP tunnel may still be checking its server certificate's revocation when the filters arrive. Only for a connect
+    # the System log shows in the last minute (RasMan 20267: users cannot write that log) - the Connected task also starts
+    # on a record of the Application log, which any program can write, and each such start would open the window again
+    $fresh = Get-VeroRasConnectedRecord -ProfileName $Config.Profile
+    if ($fresh -and $fresh.PSObject.Properties['Time'] -and ((Get-Date) - [datetime]$fresh.Time).TotalSeconds -lt 60 -and -not (Test-VeroCrlWindow) -and
+        (Get-VeroTunnelType $Config.Profile) -in 'Sstp', 'Automatic') {
+        Open-VeroCrlWindow -Action $Action -Reason 'SSTP tunnel just connected (revocation check may still run)' -AtArm
     }
     # remember WHICH connection this is: a later "you hung up" must name the same connection id (anti-forgery)
     $rec = Get-VeroRasConnectedRecord -ProfileName $Config.Profile -AllowApplicationLog
-    if ($rec) { @{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p.RasCoId }
-    Update-VeroServerIpBeforeArm -Config $Config -Action $Action
-    Set-VeroArmed $true $Action; Sync-VeroKillSwitch -Config $Config -Action $Action
+    if ($rec) { Write-VeroStateFile -Path $p.RasCoId -Text (@{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json) }
 }
 
 function Update-VeroServerIpBeforeArm {
@@ -146,9 +156,11 @@ function Update-VeroServerIpBeforeArm {
        tunnel would be cut 5 s after arming and every redial refused) is picked up before it can bite. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
     if ((Test-VeroArmed) -or @($Config.ServerIps).Count -gt 0) { return }
+    $h = Get-VeroTypeHandler (Get-VeroConfigType $Config)
     $before = @(Resolve-VeroServerIp -Config $Config -CacheOnly)
-    $now = @(& (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ResolveIps $Config)
-    if (($now -join ',') -ne ($before -join ',')) { Write-VeroLog ("server '{0}' resolves to {1} now (cached: {2})" -f $Config.Server, ($now -join ','), $(if ($before) { $before -join ',' } else { 'none' })) $Action }
+    $now = @(& $h.ResolveIps $Config)
+    # said only for the types whose addresses that cache holds (an OpenVPN profile keeps its own, per remote)
+    if ($h.RelookupOnFail -and ($now -join ',') -ne ($before -join ',')) { Write-VeroLog ("server '{0}' resolves to {1} now (cached: {2})" -f $Config.Server, ($now -join ','), $(if ($before) { $before -join ',' } else { 'none' })) $Action }
 }
 
 $script:RasSeen = @{}

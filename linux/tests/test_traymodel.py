@@ -74,7 +74,7 @@ def test_tray_actions_go_through_sudo_n_by_full_path():
 
 def test_admin_actions_ask_for_a_password_and_pass_arguments_as_data():
     assert tm.admin_argv(["import", "Office; rm -rf /"], platform="linux") == \
-        ["pkexec", "/opt/veroscudo/bin/veroscudo", "import", "Office; rm -rf /"]
+        ["pkexec", "/opt/veroscudo/bin/veroscudo", "import", "--", "Office; rm -rf /"]
     assert tm.admin_argv(["uninstall"], platform="linux") == ["pkexec", "/opt/veroscudo/uninstall.sh"]
     mac = tm.admin_argv(["remove", 'x" & do shell script "evil'], platform="darwin")
     assert mac[0] == "osascript" and mac[-1] == 'x" & do shell script "evil'           # an argv item, quoted by AppleScript

@@ -2,13 +2,37 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
 # ---------------------------------------------------------------- dialing
+function Read-VeroStoredCredential {
+    <# A credential the tray (or Set-VpnCredential.ps1) stored with Export-Clixml in the user's own folder, read by the
+       elevated guard. The file is the user's to write, so it is not handed to the general deserializer: the two values
+       are picked out of the XML - the user name and the DPAPI-protected password - and anything else in the file makes
+       it "no credential". At most 64 KB, no DTD, no link in place of the file. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    try {
+        $fi = New-Object IO.FileInfo $Path
+        if (-not $fi.Exists -or $fi.Length -gt 65536 -or ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $null }
+        $set = New-Object System.Xml.XmlReaderSettings; $set.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit; $set.XmlResolver = $null
+        $doc = New-Object System.Xml.XmlDocument; $doc.XmlResolver = $null
+        $r = [System.Xml.XmlReader]::Create($Path, $set)
+        try { $doc.Load($r) } finally { $r.Dispose() }
+        $ns = New-Object System.Xml.XmlNamespaceManager $doc.NameTable
+        $ns.AddNamespace('p', 'http://schemas.microsoft.com/powershell/2004/04')
+        # one object and nothing beside it
+        if ($doc.SelectNodes('//p:Obj', $ns).Count -ne 1 -or @($doc.DocumentElement.ChildNodes | Where-Object { $_.NodeType -eq 'Element' }).Count -ne 1) { return $null }
+        $u = $doc.SelectSingleNode('/p:Objs/p:Obj/p:Props/p:S[@N="UserName"]', $ns)
+        $s = $doc.SelectSingleNode('/p:Objs/p:Obj/p:Props/p:SS[@N="Password"]', $ns)
+        if (-not $u -or -not $s -or $s.InnerText -notmatch '^[0-9a-fA-F]+\z') { return $null }
+        # Export-Clixml writes some characters of a string as _xHHHH_ (an underscore before an x among them): back to the name as typed
+        New-Object pscredential ([System.Xml.XmlConvert]::DecodeName([string]$u.InnerText), (ConvertTo-SecureString -String $s.InnerText))
+    } catch { Write-Verbose "stored credential unreadable: $($_.Exception.Message)"; $null }
+}
 function Get-VeroCredential {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config)
     $p = Get-VeroPath -VpnProfile $Config.Profile
     foreach ($f in $p.Cred, $p.LegacyCred) {
         if (-not (Test-Path $f)) { continue }
-        try { $c = Import-Clixml -LiteralPath $f } catch { continue }
-        if ($c -isnot [pscredential]) { continue }                                # the file is the user's own: only a credential is taken from it
+        $c = Read-VeroStoredCredential -Path $f
+        if (-not $c) { continue }
         if ($f -eq $p.Cred -or $c.UserName -eq $Config.Username) { return $c }    # the 1.0 single credential, if it is for this user
     }
     $null
@@ -17,8 +41,7 @@ function Get-VeroKeyPassphrase {
     <# OpenVPN: the private-key passphrase, stored like the password (DPAPI, this Windows account only). #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     $f = (Get-VeroPath -VpnProfile $ProfileName).KeyPass
-    if (Test-Path $f) { try { $k = Import-Clixml -LiteralPath $f; if ($k -is [pscredential]) { return $k } } catch { Write-Verbose 'key passphrase unreadable' } }
-    $null
+    Read-VeroStoredCredential -Path $f
 }
 
 $script:EventSettleSeconds = 3              # on-event waits this long before reading the termination records (tests: 0)
@@ -27,11 +50,22 @@ $script:RasAuthCodes = @(691)              # "the user name and password combina
 # + WSAEACCES (0x8007271D): with no TCP 80 permit, SSTP's revocation fetch is refused by the filters
 # and RasDial returns "access forbidden" instead of a revocation code
 $script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012, -2147014883, 10013)
+# a dial that keeps failing this way opens the window once per this many minutes, not after every attempt: a network that
+# makes every dial fail on the revocation check would otherwise keep svchost's HTTP open all the time
+$script:CrlWindowEveryMinutes = 15
 function Open-VeroCrlWindow {
     <# Allow svchost TCP 80 for 2 minutes so SSTP can fetch the CRL: after a dial failed on the revocation check, and right
        after an SSTP tunnel came up (it may still be checking when the filters arrive - RAS can report 829 ~5 s after arm). #>
-    [CmdletBinding()] param([string]$Action = 'core', [string]$Reason = 'SSTP could not check the server certificate revocation')
-    @{ Until = (Get-Date).AddMinutes(2).ToString('o') } | ConvertTo-Json | Set-Content (Get-VeroPath).CrlWindow
+    [CmdletBinding()] param([string]$Action = 'core', [string]$Reason = 'SSTP could not check the server certificate revocation', [switch]$AtArm)
+    # -AtArm: the window of a tunnel that just connected. It keeps the time of the last window opened for a FAILED dial,
+    # so a real revocation failure soon after an arm still gets its window (Test-VeroCrlWindowRecent counts only those)
+    $f = (Get-VeroPath).CrlWindow
+    $opened = (Get-Date).ToString('o')
+    if ($AtArm) {
+        $opened = ''
+        if (Test-Path $f) { try { $old = Get-Content $f -Raw | ConvertFrom-Json; if ($old.PSObject.Properties['Opened']) { $opened = [string]$old.Opened } } catch { Write-Verbose 'crl window unreadable' } }
+    }
+    Write-VeroStateFile -Path $f -Text (@{ Until = (Get-Date).AddMinutes(2).ToString('o'); Opened = $opened } | ConvertTo-Json)
     Write-VeroLog "$Reason - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can" $Action
 }
 function Test-VeroCrlWindow {
@@ -41,6 +75,19 @@ function Test-VeroCrlWindow {
         $until = [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)
         # never longer than the 2 minutes Open-VeroCrlWindow writes: a later time in the file is not ours
         return ((Get-Date) -lt $until -and $until -le (Get-Date).AddMinutes(2).AddSeconds(5))
+    } catch { return $false }
+}
+function Test-VeroCrlWindowRecent {
+    <# True while the last window was opened less than $script:CrlWindowEveryMinutes ago (a failed dial does not open another). #>
+    $f = (Get-VeroPath).CrlWindow
+    if (-not (Test-Path $f)) { return $false }
+    try {
+        $j = Get-Content $f -Raw | ConvertFrom-Json
+        if ($j.PSObject.Properties['Opened'] -and -not [string]$j.Opened) { return $false }   # only ever opened at an arm
+        $at = if ($j.PSObject.Properties['Opened']) { [datetime]::Parse([string]$j.Opened, $null, [Globalization.DateTimeStyles]::RoundtripKind) }
+              else { [datetime]::Parse([string]$j.Until, $null, [Globalization.DateTimeStyles]::RoundtripKind).AddMinutes(-2) }
+        $age = ((Get-Date) - $at).TotalMinutes
+        return ($age -ge 0 -and $age -lt $script:CrlWindowEveryMinutes)      # a time in the future is not ours: not counted
     } catch { return $false }
 }
 function Invoke-VeroDial {
@@ -69,7 +116,7 @@ function Invoke-VeroRasDial {
     if ($script:RasAuthCodes -contains [int64]$code) { Set-VeroAuthFailed -ProfileName $Config.Profile -Reason "RAS error $code" -Action $Action }
     # ONLY the RasDial result decides - never the Application log (RasClient 20227): ordinary users can write that log, and
     # a forged "revocation offline" record would keep svchost's HTTP open for as long as the redial runs
-    if ($script:RasRevocationCodes -contains [int64]$code -and -not (Test-VeroCrlWindow)) {
+    if ($script:RasRevocationCodes -contains [int64]$code -and -not (Test-VeroCrlWindow) -and -not (Test-VeroCrlWindowRecent)) {
         Open-VeroCrlWindow -Action $Action
         Sync-VeroKillSwitch -Config $Config -Action $Action                # the next attempt can reach the CRL
     }
@@ -90,7 +137,7 @@ function Set-VeroAuthFailed {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName, [string]$Reason = '', [string]$Action = 'core', [ValidateSet('Auth', 'Key')][string]$Which = 'Auth')
     $p = Get-VeroPath -VpnProfile $ProfileName
     $first = -not (Test-Path $p.AuthFail)
-    Set-Content -Path $p.AuthFail -Value ("{0} {1:o} {2}" -f $Which, (Get-Date), $Reason) -Encoding UTF8
+    Write-VeroStateFile -Path $p.AuthFail -Text ("{0} {1:o} {2}" -f $Which, (Get-Date), $Reason)
     if ($first) {
         Write-VeroLog "PASSWORD REJECTED for '$ProfileName' ($Reason) - automatic redial paused so the account is not locked; traffic stays blocked. Store the right password (tray Settings), then Turn on or Reconnect." $Action
     }
@@ -119,9 +166,7 @@ function Set-VeroRenewMarker {
     $m = @{ Profile = $ProfileName; Start = (Get-Date).ToString('o'); HungUp = '' }
     if ($HungUp -and (Test-Path $p.Renew)) { try { $old = Get-Content $p.Renew -Raw | ConvertFrom-Json; $m.Start = [string]$old.Start } catch { Write-Verbose 'renew marker unreadable' } }
     if ($HungUp) { $m.HungUp = (Get-Date).ToString('o') }
-    $tmp = "$($p.Renew).new"                                                 # whole or not at all: it is read by another process
-    $m | ConvertTo-Json | Set-Content $tmp
-    Move-Item -LiteralPath $tmp -Destination $p.Renew -Force
+    Write-VeroStateFile -Path $p.Renew -Text ($m | ConvertTo-Json)           # whole or not at all, any letters in the name
 }
 function Test-VeroRenewHangUp {
     <# Pure rule: is a termination record at $EventTime our own hang-up for Reconnect? Only for that profile, only between the
@@ -193,6 +238,18 @@ function Enter-VeroLock {
     $false
 }
 
+function Start-VeroRedial {
+    <# Three levels: Invoke-VeroReconnect is the redial loop (one at a time, by the reconnect lock); the 'redial' action
+       is the Redial task's way into it; this function is how everybody else gets it going - the watchdog, the Terminated
+       task and a profile switch start the Redial task and return. The watchdog so stays what it is, a check every 15 s
+       also during an outage, and the Terminated task is free for the next event. (Your own On and Reconnect run the
+       loop in their own task: they are the ones you wait for.)
+       From inside the Redial task itself (the loop took a pending switch) the task cannot be started again - it runs -
+       so the loop goes on here. So does it on an install from before the task existed. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
+    if ($Action -ne 'redial' -and (Start-VeroTask 'Redial')) { return }
+    Invoke-VeroReconnect -Config $Config -Action $Action
+}
 function Invoke-VeroReconnect {
     <# Blocked + redial forever, until the tunnel is up or the user turns the VPN off. Follows a profile switch: the
        config (and so the active profile) is re-read on every attempt.
@@ -229,9 +286,9 @@ function Invoke-VeroReconnect {
             }
             $attempt++
             if ($Action -eq 'watchdog') {
-                # the watchdog itself is redialing (a Hiddify or WireGuard drop has no event task): it is alive and working -
-                # without this the tray reports "Guard not running" after 3 minutes, and the minutes without a connection
-                # would be missing from the statistics
+                # fallback only - an install without the Redial task, where the watchdog itself runs this loop: it is
+                # alive and working. Without this the tray reports "Guard not running" after 3 minutes, and the minutes
+                # without a connection would be missing from the statistics
                 Write-VeroHeartbeat
                 try { Update-VeroStats -Up $false -Down $true -Id ([string]$Config.ProfileId) -Name $Config.Profile } catch { Write-Verbose "statistics: $($_.Exception.Message)" }
             }
@@ -242,18 +299,19 @@ function Invoke-VeroReconnect {
                 $Config = Get-VeroConfig
                 continue
             }
+            $h = Get-VeroTypeHandler (Get-VeroConfigType $Config)             # this attempt's profile (the config is re-read below)
             Invoke-VeroDial -Config $Config -Action $Action
             if (Test-VeroVpnConnected $Config.Profile) {
-                if ((Get-VeroConfigType $Config) -eq 'hiddify') { Write-VeroLog "Hiddify connected again - traffic goes through it" $Action }   # nothing was dialed
+                if (-not $h.Dials) { Write-VeroLog "$($h.Label) connected again - traffic goes through it" $Action }   # nothing was dialed
                 else { Write-VeroLog "reconnected '$($Config.Profile)' after $attempt attempt(s)" $Action }
-                if ((Get-VeroConfigType $Config) -eq 'ras') { Save-VeroRasCoId -ProfileName $Config.Profile }   # its "you hung up" must match it
+                & $h.OnReconnected $Config
                 break
             }
             # Hiddify: nothing is dialed - VeroScudo waits for you to connect it there; once, then every ~5 minutes
-            if ((Get-VeroConfigType $Config) -ne 'hiddify' -or $attempt -eq 1 -or $attempt % 30 -eq 0) { Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action }
+            if ($h.Dials -or $attempt -eq 1 -or $attempt % 30 -eq 0) { Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action }
             # the server may have moved: look it up again (the redial's DNS permit is in force while down) and let the new
             # address through before the next attempt - the cache alone would refuse it forever
-            if (@($Config.ServerIps).Count -eq 0 -and (Get-VeroConfigType $Config) -eq 'ras') {
+            if (@($Config.ServerIps).Count -eq 0 -and $h.RelookupOnFail) {
                 $cached = @(Resolve-VeroServerIp -Config $Config -CacheOnly)
                 $fresh = @(Resolve-VeroServerIp -Config $Config)
                 if (($fresh -join ',') -ne ($cached -join ',')) {
@@ -287,12 +345,12 @@ function Invoke-VeroCheck {
     [CmdletBinding()] param([string]$Action = 'watchdog')
     $cfg = Get-VeroConfig
     $script:CheckCount++
-    try { if (Update-VeroRasWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: Windows VPN watch: $($_.Exception.Message)" $Action }
-    if (@($cfg.Profiles | Where-Object Type -eq 'hiddify').Count -gt 0) {
-        try { if (Update-VeroHiddifyWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: Hiddify watch: $($_.Exception.Message)" $Action }
-    }
-    if (@($cfg.Profiles | Where-Object Type -eq 'wireguard').Count -gt 0) {
-        try { if (Update-VeroWgWatch -Config $cfg -Action $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: WireGuard watch: $($_.Exception.Message)" $Action }
+    # each type's own look at what happened outside VeroScudo since the last pass (a tunnel connected by hand, a WireGuard
+    # tunnel switched in its app ...): only for the types that have a profile, the built-in client always
+    foreach ($type in 'ras', 'hiddify', 'wireguard', 'openvpn') {
+        $h = Get-VeroTypeHandler $type
+        if (-not $h.Watch -or -not ($h.WatchAlways -or @($cfg.Profiles | Where-Object Type -eq $type).Count -gt 0)) { continue }
+        try { if (& $h.Watch $cfg $Action) { $cfg = Get-VeroConfig } } catch { Write-VeroLog "ERROR: $($h.Label) watch: $($_.Exception.Message)" $Action }
     }
     # about once a minute: other VPNs / kill-switches - every pass (15 s) while one is reported, so the tray's warning goes
     # away soon after you stop the other VPN (not up to a minute later)
@@ -309,7 +367,7 @@ function Invoke-VeroCheck {
     }
     if (Test-VeroArmed) {
         Sync-VeroKillSwitch -Config $cfg -Action $Action
-        if (-not (Test-VeroVpnConnected $cfg.Profile) -and -not (Test-VeroLockAlive)) { Invoke-VeroReconnect -Config $cfg -Action $Action }
+        if (-not (Test-VeroVpnConnected $cfg.Profile) -and -not (Test-VeroLockAlive)) { Start-VeroRedial -Config $cfg -Action $Action }
     } elseif (Test-VeroKillSwitchPresent) {
         Write-VeroLog 'disarmed but kill-switch still present - removing' $Action
         Disable-VeroKillSwitch -Action $Action
@@ -325,7 +383,7 @@ function Invoke-VeroSwitch {
     $new = Get-VeroConfig -Active $Name
     if ($old.Profile -eq $new.Profile) {
         Write-VeroLog "profile '$Name' is already active" $Action
-        if ((Test-VeroArmed) -and -not (Test-VeroVpnConnected $new.Profile)) { Invoke-VeroReconnect -Config $new -Action $Action }
+        if ((Test-VeroArmed) -and -not (Test-VeroVpnConnected $new.Profile)) { Start-VeroRedial -Config $new -Action $Action }
         return
     }
     Set-VeroActiveProfile -Name $Name -Action $Action                    # first: the old profile's 631 is then ignored
@@ -341,7 +399,7 @@ function Invoke-VeroSwitch {
         $t = Get-Date
         while ((Test-VeroVpnConnected $old.Profile -Type $oldType) -and ((Get-Date) - $t).TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500 }
         Write-VeroLog "hung up '$($old.Profile)'" $Action
-        Invoke-VeroReconnect -Config $new -Action $Action
+        Start-VeroRedial -Config $new -Action $Action                      # the loop's one owner dials; a switch from the watchdog does not keep the watchdog
     } elseif (Test-VeroVpnConnected $old.Profile -Type $oldType) {
         Invoke-VeroHangUp $old.Profile $oldType
         Write-VeroLog "hung up '$($old.Profile)' (VPN is off - '$Name' is selected for the next turn on)" $Action
@@ -351,19 +409,12 @@ function Invoke-VeroSwitch {
 function Get-VeroPendingSwitch {
     <# The profile the tray asked to switch to, without consuming the request; $null when none (or it is no profile). #>
     [CmdletBinding()] param([double]$MinAgeSeconds = 0)
-    $f = (Get-VeroPath).SwitchRequest
-    if (-not (Test-Path $f)) { return $null }
-    if ($MinAgeSeconds -gt 0 -and ((Get-Date) - (Get-Item $f).LastWriteTime).TotalSeconds -lt $MinAgeSeconds) { return $null }
-    $n = (Get-Content $f -Raw -ErrorAction SilentlyContinue)
-    if ($n) { $n.Trim() } else { $null }
+    Read-VeroUserInput -Path (Get-VeroPath).SwitchRequest -Name 'switch' -Peek -MinAgeSeconds $MinAgeSeconds
 }
 
 function Read-VeroSwitchRequest {
     <# The tray (unelevated) asks for a switch by writing a profile name to the user's own folder; only names that exist in
-       the admin-owned config.json are honoured. #>
-    $p = Get-VeroPath
-    if (-not (Test-Path $p.SwitchRequest)) { return $null }
-    $name = (Get-Content $p.SwitchRequest -Raw -ErrorAction SilentlyContinue)
-    Remove-Item $p.SwitchRequest -Force -ErrorAction SilentlyContinue
-    if ($name) { $name.Trim() } else { $null }
+       the admin-owned config.json are honoured. The request is taken once; the file itself stays the tray's to remove
+       (Read-VeroUserInput: the elevated guard deletes nothing in the user's folder). #>
+    Read-VeroUserInput -Path (Get-VeroPath).SwitchRequest -Name 'switch'
 }

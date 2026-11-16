@@ -11,10 +11,11 @@ import subprocess
 from pathlib import Path
 
 from .config import Config, server_rules
-from .firewall import IFNAME, DnsPolicy, group_endpoints, split_families
+from .firewall import DnsPolicy, group_endpoints, split_families
+from .netutil import IFNAME
 
 ANCHOR = "com.apple/250.VeroScudo"
-TOKEN = Path("/var/run/veroscudo-pf.token")
+TOKEN = Path("/var/run/veroscudo/pf.token")              # in the guard's own run folder (only root writes there)
 VM_TAG = "VEROSCUDO_VM"
 
 # the one rule every VeroScudo anchor ends with; is_active() looks for it
@@ -110,6 +111,7 @@ def _enable() -> None:
     r = _run(["-E"])
     m = re.search(r"Token\s*:\s*(\d+)", r.stdout + r.stderr)
     if m:
+        TOKEN.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         TOKEN.write_text(m.group(1))
 
 
@@ -122,10 +124,19 @@ def apply(ruleset: str) -> None:
         raise subprocess.CalledProcessError(r.returncode, "pfctl", r.stdout, r.stderr)
     if not enabled():                                   # rules in a pf that is off protect nothing
         raise subprocess.CalledProcessError(1, "pfctl -E", "", "pf could not be enabled")
+    if not referenced():                                # nor do rules the main ruleset never reaches
+        raise subprocess.CalledProcessError(1, "pfctl -s rules", "", 'the main pf ruleset has no anchor "com.apple/*" - '
+                                            "another program replaced it; VeroScudo's rules are not evaluated")
+
+
+LEGACY_TOKEN = Path("/var/run/veroscudo-pf.token")     # where versions up to 1.3 kept it
 
 
 def clear() -> None:
     _run(["-a", ANCHOR, "-F", "all"])
+    if LEGACY_TOKEN.exists():                            # a reference an older version took: given back as well
+        _run(["-X", LEGACY_TOKEN.read_text().strip()])
+        LEGACY_TOKEN.unlink(missing_ok=True)
     if TOKEN.exists():
         _run(["-X", TOKEN.read_text().strip()])
         TOKEN.unlink(missing_ok=True)
@@ -135,4 +146,12 @@ def is_active() -> bool:
     """The anchor ends with the final block AND pf is enabled - listed rules in a disabled pf protect nothing. The daemon's
     watchdog re-applies (and re-enables) within 15 s when this turns false, as the Linux backend does after `nft flush`."""
     r = _run(["-a", ANCHOR, "-s", "rules"])
-    return r.returncode == 0 and _FINAL in r.stdout.replace("  ", " ") and enabled()
+    return r.returncode == 0 and _FINAL in r.stdout.replace("  ", " ") and enabled() and referenced()
+
+
+def referenced() -> bool:
+    """The running main ruleset still evaluates `anchor "com.apple/*"` - the line of the stock /etc/pf.conf that leads to
+    VeroScudo's anchor. Another tool that loads a main ruleset of its own leaves the anchor's rules listed and never
+    looked at: no kill-switch at all, with everything else saying "active"."""
+    r = _run(["-s", "rules"])
+    return r.returncode == 0 and re.search(r'^anchor "com\.apple/\*"', r.stdout, re.MULTILINE) is not None

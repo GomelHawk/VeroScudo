@@ -110,12 +110,14 @@ def test_python_helpers_are_hidden_from_objective_c():
 def test_texts_match_the_linux_tray():
     mac, lin = (SRC / "tray_macos.py").read_text(), (SRC / "tray.py").read_text()
     for text in ("unless \"\n                   \"lanAllow lets it through", "Save connection settings", "Recent events",
-                 "VeroScudo - WireGuard profile", "it flows again once", "Statistics…", "\"Copy\"", "\"Statistics\"", "Open log",
-                 "traymodel.BEHAVIOUR_NOTE", "traymodel.EXIT_ABOUT", "traymodel.remove_question", "traymodel.foreign_prompt",
-                 "traymodel.turned_on_elsewhere", "Another VPN is connected"):
+                 "Statistics…", "\"Copy\"", "\"Statistics\"", "Open log",
+                 "traymodel.BEHAVIOUR_NOTE", "traymodel.EXIT_ABOUT", "traymodel.remove_question", "Another VPN is connected"):
         probe = text.replace('"\n                   "', "")
         assert probe in mac.replace('"\n                   "', "").replace('"\n                                    "', ""), text
     assert "lanAllow lets it through" in lin
+    # the notices and the Turn-on question are sent by the controller both trays use: written once
+    for name in ("tray_macos.py", "tray.py"):
+        assert "traymodel.TrayController" in (SRC / name).read_text(), name
     order = [ln.strip() for ln in mac.splitlines() if "self.add(\"" in ln]
     titles = [ln.split('"')[1] for ln in order]
     assert titles.index("Statistics…") + 1 == titles.index("Settings…")
@@ -197,27 +199,27 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(tmac, "_popen", lambda argv: sent.append(tuple(argv)))
     started = []
     monkeypatch.setattr(tmac.traymodel.Runner, "start", lambda self, tag, *argvs: started.append((tag, argvs)))
-    monkeypatch.setattr(tmac.exitinfo.ExitFetch, "start", lambda self, profile, now=None: False)
+    monkeypatch.setattr(tmac.traymodel.exitinfo.ExitFetch, "start", lambda self, profile, now=None: False)
     tray = tmac.Tray.alloc().init()
     tray.sent, tray.started, tray.fake, tray.mod = sent, started, fake, tmac
     return tray
 
 
 def test_mac_tray_builds_every_window_and_refreshes(mac):
-    assert mac.facts.configured and mac.facts.name == "CorporateVPN"
-    mac.store.armed_flag.write_text("1")
-    mac.refresh()
-    assert mac.view.state in ("protected", "blocked")
-    assert [x.name for x in mac.foreign] == ["Office L2TP"]
+    assert mac.ctl.facts.configured and mac.ctl.facts.name == "CorporateVPN"
+    mac.ctl.store.armed_flag.write_text("1")
+    mac.ctl.refresh()
+    assert mac.ctl.view.state in ("protected", "blocked")
+    assert [x.name for x in mac.ctl.foreign] == ["Office L2TP"]
     assert any(t == "VeroScudo - another VPN" for t, *_ in mac.sent)            # announced once
     n = len(mac.sent)
-    mac.refresh()
+    mac.ctl.refresh()
     assert len(mac.sent) == n
     mac.status_(None)
     mac.st_win.isVisible.return_value = True
     mac.update_status()
     assert mac.st["rows"] is not None
-    text = mac.copy_report()
+    text = mac.ctl.copy_report()
     assert "Other VPNs   Office L2TP (not imported)" in text and "Exit" in text and "--- last events" in text
     mac.statusClear_(None)
     mac.statusRefreshExit_(None)
@@ -253,33 +255,33 @@ def test_mac_foreign_question_maps_the_buttons(mac):
 
 def test_mac_turned_on_elsewhere_reads_as_connecting(mac):
     mac.fake.connected, mac.fake.owners = {}, {}
-    mac.refresh()
-    assert mac.view.state == "off"
-    mac.store.armed_flag.write_text("1")
-    mac.refresh()
-    assert mac.view.title == "Connecting"
+    mac.ctl.refresh()
+    assert mac.ctl.view.state == "off"
+    mac.ctl.store.armed_flag.write_text("1")
+    mac.ctl.refresh()
+    assert mac.ctl.view.title == "Connecting"
 
 
 def test_mac_exit_location_is_your_own_setting(mac):
     btn = mock.MagicMock()
     btn.state.return_value = 0
     mac.settingsExit_(btn)
-    assert mac.exit.enabled() is False
+    assert mac.ctl.exit.enabled() is False
     btn.state.return_value = 1
     mac.settingsExit_(btn)
-    assert mac.exit.enabled() is True
+    assert mac.ctl.exit.enabled() is True
 
 
 def test_stats_week_reads_the_guards_folder_per_profile(mac):
-    assert mac.stats_week("w")[0][1].vpn_minutes == 0
-    d = stats.stats_dir(mac.store.state)
+    assert mac.ctl.stats_week("w")[0][1].vpn_minutes == 0
+    d = stats.stats_dir(mac.ctl.store.state)
     d.mkdir(parents=True, exist_ok=True)
     from datetime import datetime
     (d / f"{datetime.now().date().isoformat()}.jsonl").write_text('{"m":0,"id":"w","p":"Work"}\n'
                                                                   '{"m":1,"id":"w","p":"Work","sent":3,"lost":0}\n'
                                                                   '{"m":2,"id":"h","p":"Home"}\n')
-    assert mac.stats_week("w")[0][1].vpn_minutes == 2 and mac.stats_week("h")[0][1].vpn_minutes == 1
-    assert ("h", "Home (removed)") in mac.stats_choices()
+    assert mac.ctl.stats_week("w")[0][1].vpn_minutes == 2 and mac.ctl.stats_week("h")[0][1].vpn_minutes == 1
+    assert ("h", "Home (removed)") in mac.ctl.stats_choices()
 
 
 def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
@@ -308,13 +310,13 @@ def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
     # the status page: your own setting, saved at once; a non-https address is refused
     monkeypatch.setattr(statuspage, "_get", lambda u, t: b'{"page":{"name":"Example Service"},'
                                                          b'"status":{"indicator":"minor","description":"Degraded"}}')
-    mac.status_page._get = statuspage._get
+    mac.ctl.status_page._get = statuspage._get
     btn = mock.MagicMock()
     btn.state.return_value = 1
     mac.settingsStatusPage_(btn)
-    assert mac.status_page.enabled()
-    mac.status_page._job["thread"].join(5)
-    mac.refresh()
+    assert mac.ctl.status_page.enabled()
+    mac.ctl.status_page._job["thread"].join(5)
+    mac.ctl.refresh()
     alerts = []
     mac.alert = lambda title, text, *a: alerts.append((title, text))
     field = mock.MagicMock()
@@ -323,10 +325,10 @@ def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
     assert alerts == [("Not saved", "The status page must be an https:// address")]
     mac.status_(None)
     mac.st_win.isVisible.return_value = True
-    assert not mac.status_page.checking                          # opening the window fetches nothing (after each connect / Refresh)
-    mac.refresh()
+    assert not mac.ctl.status_page.checking                          # opening the window fetches nothing (after each connect / Refresh)
+    mac.ctl.refresh()
     mac.update_status()
-    assert "Service      Example Service: Degraded" in mac.copy_report()
+    assert "Service      Example Service: Degraded" in mac.ctl.copy_report()
     # the status window: the service card under the exit line ("!" on amber), no Service row in the table
     st = mac.st
     st["svc"].setHidden_.assert_called_with(False)
@@ -336,11 +338,11 @@ def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
     assert "Service" not in [k for k, *_ in st["rows"][0]]
     # its Refresh: a fetch now, "checking..." until it ends
     mac.statusRefreshService_(None)
-    assert mac.status_page.checking and mac.status_page.view().right == "checking..."
+    assert mac.ctl.status_page.checking and mac.ctl.status_page.view().right == "checking..."
     st["sright"].setStringValue_.assert_called_with("checking...")
-    mac.status_page._job["thread"].join(5)
-    mac.refresh()
-    assert not mac.status_page.checking and mac.status_page.view().right.startswith("Degraded · ")
+    mac.ctl.status_page._job["thread"].join(5)
+    mac.ctl.refresh()
+    assert not mac.ctl.status_page.checking and mac.ctl.status_page.view().right.startswith("Degraded · ")
     # turned off: the card goes away
     btn.state.return_value = 0
     mac.settingsStatusPage_(btn)
@@ -348,6 +350,6 @@ def test_mac_status_page_https_method_and_exit_refresh(mac, monkeypatch):
     st["svc"].setHidden_.assert_called_with(True)
     # Refresh without a tunnel: refused, with the reason on screen
     mac.fake.connected = {}
-    mac.refresh()
+    mac.ctl.refresh()
     mac.statusRefreshExit_(None)
-    assert mac.exit.refused == exitinfo.NO_TUNNEL
+    assert mac.ctl.exit.refused == exitinfo.NO_TUNNEL

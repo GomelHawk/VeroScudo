@@ -108,7 +108,7 @@ def parse(raw: object, is_host) -> CheckConfig:
     try:
         interval = int(raw.get("intervalSeconds", 10))
         window = int(raw.get("windowMinutes", 1))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError("config.json: connectionCheck.intervalSeconds / windowMinutes must be numbers") from None
     if not INTERVAL_RANGE[0] <= interval <= INTERVAL_RANGE[1]:
         raise ValueError(f"config.json: connectionCheck.intervalSeconds must be {INTERVAL_RANGE[0]}-{INTERVAL_RANGE[1]}")
@@ -131,7 +131,7 @@ def parse(raw: object, is_host) -> CheckConfig:
         if method in PORT_METHODS:
             try:
                 port = int(t.get("port", 443))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 port = 0
             if not 1 <= port <= 65535:
                 raise ValueError(f"config.json: connectionCheck port must be 1-65535 ({host})")

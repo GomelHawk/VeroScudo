@@ -46,7 +46,11 @@ function Get-VeroFilterSpec {
     # the tunnel; while blocked the VMs get nothing). Not protected (vm=false): always - VeroScudo leaves them alone.
     if ($SwitchLuid -and ($TunnelLuid -or -not $Config.Vm)) { foreach ($l in $C4, $C6, $R4, $R6) { $null = (New-Spec 'Default Switch (VM DHCP/DNS)' $l $true $permit).Interface($SwitchLuid) } }
 
-    # the VPN server: only the protocol/ports of the profile's tunnel type; TCP/UDP only from svchost (SstpSvc, IKEEXT, RasMan)
+    # the VPN server: only the protocol/ports of the profile's tunnel type. SSTP's TCP only from svchost (SstpSvc). The
+    # ports of IKEv2, L2TP and PPTP only for traffic sent as Local System or by an elevated administrator (Sys) - Windows'
+    # IKE service, its tunnel drivers and whatever they send on behalf of the elevated guard's dial - never an ordinary
+    # program of the signed-in user. The port-less protocols (ESP, GRE, IP-in-IP) stay by address: ordinary programs
+    # cannot send them.
     if ($PermitKind -in 'endpoints', 'program') { $ServerIps = @() }        # reserve types: their own permits below
     $fam = Split-Family $ServerIps
     # IKEv2 data: Windows hands each packet of the tunnel to the firewall as an IP-in-IP flow to the server (protocol 4,
@@ -55,11 +59,11 @@ function Get-VeroFilterSpec {
     $ipInIp = @(@{ P = 4; Ports = @(); App = $false }, @{ P = 41; Ports = @(); App = $false })
     $parts = switch ($TunnelType) {
         'Sstp'  { @(@{ P = 6; Ports = @($Config.Port); App = $true }) }
-        'Ikev2' { @(@{ P = 17; Ports = @(500, 4500); App = $false }, @{ P = 50; Ports = @(); App = $false }) + $ipInIp }
-        'L2tp'  { @(@{ P = 17; Ports = @(500, 4500, 1701); App = $false }, @{ P = 50; Ports = @(); App = $false }) }
-        'Pptp'  { @(@{ P = 6; Ports = @(1723); App = $false }, @{ P = 47; Ports = @(); App = $false }) }
-        default { @(@{ P = 6; Ports = @($Config.Port); App = $true }, @{ P = 6; Ports = @(1723); App = $false },
-                    @{ P = 17; Ports = @(500, 4500, 1701); App = $false }, @{ P = 50; Ports = @(); App = $false }, @{ P = 47; Ports = @(); App = $false }) + $ipInIp }
+        'Ikev2' { @(@{ P = 17; Ports = @(500, 4500); App = $false; Sys = $true }, @{ P = 50; Ports = @(); App = $false }) + $ipInIp }
+        'L2tp'  { @(@{ P = 17; Ports = @(500, 4500, 1701); App = $false; Sys = $true }, @{ P = 50; Ports = @(); App = $false }) }
+        'Pptp'  { @(@{ P = 6; Ports = @(1723); App = $false; Sys = $true }, @{ P = 47; Ports = @(); App = $false }) }
+        default { @(@{ P = 6; Ports = @($Config.Port); App = $true }, @{ P = 6; Ports = @(1723); App = $false; Sys = $true },
+                    @{ P = 17; Ports = @(500, 4500, 1701); App = $false; Sys = $true }, @{ P = 50; Ports = @(); App = $false }, @{ P = 47; Ports = @(); App = $false }) + $ipInIp }
     }
     foreach ($pair in @(@($C4, $fam[0]), @($C6, $fam[1]))) {
         $layer = $pair[0]; $ips = @($pair[1])
@@ -68,8 +72,9 @@ function Get-VeroFilterSpec {
             $s = New-Spec "VPN server proto $($pt.P)" $layer $true $permit
             $null = $s.Protocol([byte]$pt.P)
             foreach ($port in $pt.Ports) { $null = $s.RemotePort([uint16]$port) }
-            foreach ($ip in @($ips | Sort-Object)) { $null = $s.Remote($ip) }      # sorted: a name whose answers rotate gives the same set
+            foreach ($ip in @($ips | Sort-Object)) { $null = $s.Remote((ConvertTo-VeroRuleAddress $ip)) }      # sorted: a name whose answers rotate gives the same set
             if ($pt.App) { $null = $s.App($Svchost) }
+            if ($pt.ContainsKey('Sys') -and $pt.Sys) { $null = $s.Privileged() }
         }
     }
 
@@ -83,7 +88,7 @@ function Get-VeroFilterSpec {
                 $layer = $pair[0]; $list = @($pair[1])
                 if ($list.Count -eq 0) { continue }
                 $s = (New-Spec "VPN server proto $($first.Proto)" $layer $true $permit).Protocol([byte]$first.Proto).RemotePort([uint16]$first.Port)
-                foreach ($ip in $list) { $null = $s.Remote($ip) }
+                foreach ($ip in $list) { $null = $s.Remote((ConvertTo-VeroRuleAddress $ip)) }
                 if ($EndpointApp) { $null = $s.App($EndpointApp) }
             }
         }
@@ -114,7 +119,7 @@ function Get-VeroFilterSpec {
             $layer = $pair[0]; $srv = @($pair[1])
             if ($srv.Count -eq 0) { continue }
             $s = (New-Spec 'DNS (redial)' $layer $true $permit).Protocol(17).Protocol(6).RemotePort(53).App($Svchost)
-            foreach ($ip in $srv) { $null = $s.Remote($ip) }
+            foreach ($ip in $srv) { $null = $s.Remote((ConvertTo-VeroRuleAddress $ip)) }
         }
         # SSTP's certificate revocation check (HTTP to the CA's CRL/OCSP servers, anywhere): NOT open by default - BITS,
         # Delivery Optimization and WPAD share svchost.exe, so a standing "svchost may use TCP 80" permit is a side door.
@@ -125,8 +130,8 @@ function Get-VeroFilterSpec {
     }
 
     $lan = Split-Family $Config.LanAllow
-    foreach ($c in $lan[0]) { foreach ($l in $C4, $R4) { $null = (New-Spec "LAN $c" $l $true $permit).Remote($c) } }
-    foreach ($c in $lan[1]) { foreach ($l in $C6, $R6) { $null = (New-Spec "LAN $c" $l $true $permit).Remote($c) } }
+    foreach ($c in $lan[0]) { foreach ($l in $C4, $R4) { $null = (New-Spec "LAN $c" $l $true $permit).Remote((ConvertTo-VeroRuleAddress $c -Range)) } }
+    foreach ($c in $lan[1]) { foreach ($l in $C6, $R6) { $null = (New-Spec "LAN $c" $l $true $permit).Remote((ConvertTo-VeroRuleAddress $c -Range)) } }
 
     foreach ($l in $C4, $C6, $R4, $R6) { $null = New-Spec 'block everything else' $l $false 0 }
     , $specs.ToArray()
@@ -143,8 +148,8 @@ function Test-VeroUsableServerIp {
        sing-box / Hiddify (198.18.0.0/15, fc00::/18). Private ranges stay allowed - a company VPN server can sit in the
        local network. Pure (= usable_server_ip on Linux/macOS). #>
     [CmdletBinding()] param([string]$Address)
-    $a = $null
-    if (-not [System.Net.IPAddress]::TryParse(($Address -split '%')[0], [ref]$a)) { return $false }
+    if ($Address -match '/' -or -not (Test-VeroCidr $Address)) { return $false }   # a plain address (Test-VeroCidr says what that is)
+    $a = [System.Net.IPAddress]::Parse($Address)
     $b = $a.GetAddressBytes()
     if ($a.AddressFamily -eq 'InterNetwork') {
         if ($b[0] -eq 127 -or $b[0] -eq 0 -or $b[0] -ge 224 -or ($b[0] -eq 169 -and $b[1] -eq 254)) { return $false }
@@ -171,7 +176,7 @@ function Resolve-VeroServerIp {
                    ForEach-Object { $_.IPAddressToString } | Where-Object { Test-VeroUsableServerIp $_ })
     } catch { Write-Verbose "DNS lookup of $($Config.Server) failed: $($_.Exception.Message)" }
     $all = @(@($fresh) + @($cached) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
-    if ($all.Count -gt 0 -and (($all -join ',') -ne ($cached -join ','))) { Set-Content -Path $p.ServerIp -Value $all }
+    if ($all.Count -gt 0 -and (($all -join ',') -ne ($cached -join ','))) { Write-VeroStateFile -Path $p.ServerIp -Text ($all -join "`r`n") }
     return $all
 }
 
@@ -211,7 +216,7 @@ function Get-VeroDnsServer {
     @(Get-VeroNic | Where-Object { [string]$_.OperationalStatus -eq 'Up' -and [string]$_.NetworkInterfaceType -notin 'Ppp', 'Loopback', 'Tunnel' -and
                                    $_.Name -notlike 'vEthernet*' -and $_.Name -ne $ProfileName -and -not (Test-VeroTunnelAdapter $_) } |
         ForEach-Object { $_.GetIPProperties().DnsAddresses } | ForEach-Object { ($_.ToString() -split '%')[0] } |
-        Where-Object { $_ -and $_ -notlike 'fec0:0:0:ffff::*' } | Select-Object -Unique | Sort-Object)
+        Where-Object { $_ -and $_ -notlike 'fec0:0:0:ffff::*' -and $_ -notmatch '/' -and (Test-VeroCidr $_) } | Select-Object -Unique | Sort-Object)   # plain addresses only: one that is not would stop the whole filter set
 }
 
 function Get-VeroWindowsVpn {
@@ -323,7 +328,7 @@ function Set-VeroVmAccess {
         $orig = if ($vs) { [string]$vs.DefaultOutboundAction } else { 'NotConfigured' }
         # Block is VeroScudo's own value (a leftover of an earlier arm), never a real original: WSL would have no network at all
         if ($orig -eq 'Block') { $orig = 'NotConfigured' }
-        @{ DefaultOutboundAction = $orig } | ConvertTo-Json | Set-Content $p.VmBackup
+        Write-VeroStateFile -Path $p.VmBackup -Text (@{ DefaultOutboundAction = $orig } | ConvertTo-Json)
     }
     # the allow rule first, the default Block after it: turning on while the tunnel is up never leaves WSL a moment without
     # network (the other order - Block, then 1 s later allowed - could hang a connection open in WSL at that moment)
@@ -361,14 +366,45 @@ function Restore-VeroVmAccess {
     if ($r -and $restored) { Remove-NetFirewallHyperVRule -Name $script:VmRule }
 }
 
+function Set-VeroFailClosed {
+    <# A sync that could not work out or apply the filters, on an armed machine: never left as it happened to be.
+       No filter in force: the emergency block (set again also when it is noted already - a policy refresh may have undone
+       it). In every case the VMs and WSL get the blocked side - the state of the tunnel is not known here - and the note
+       of the applied filters goes, so the next sync that works applies everything and gives them their way back.
+       Each step on its own: one that fails is logged and the next still runs. Never throws. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [string]$Why = '')
+    if (-not (Test-VeroArmed)) { return }
+    $p = Get-VeroPath
+    $have = try { Get-VeroWfpCount } catch { 0 }
+    if ($have -eq 0) {
+        try {
+            if (-not (Test-Path $p.Emergency)) { Write-VeroLog "ERROR: $Why" $Action; Enable-VeroEmergencyBlock -Action $Action }
+            elseif (@(Get-NetFirewallProfile | Where-Object { [string]$_.Enabled -notin 'True', '1' -or [string]$_.DefaultOutboundAction -notin 'Block', '4' }).Count -gt 0) {
+                Set-NetFirewallProfile -All -Enabled True -DefaultOutboundAction Block
+            }
+        } catch { Write-VeroLog "ERROR: emergency block failed too - NOT PROTECTED: $($_.Exception.Message)" $Action }
+    } elseif ($Why) { Write-VeroLog "ERROR: $Why - the filters in force stay" $Action }
+    if ($Config.Vm) {
+        try { $null = Set-VeroVmBlock -Block $true -Action $Action; $script:AclBlocked = $true } catch { Write-VeroLog "ERROR: Hyper-V VMs could not be blocked: $($_.Exception.Message)" $Action }
+        try { if (Test-VeroVmWanted -Config $Config) { Set-VeroVmAccess -Allow $false -Action $Action; $script:VmAllowed = $false } }
+        catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $Action }
+    }
+    try { if (Test-Path -LiteralPath $p.WfpState) { Remove-Item -LiteralPath $p.WfpState -Force } } catch { Write-Verbose 'applied-filters note kept' }
+}
+
 function Enable-VeroEmergencyBlock {
     <# Fail closed: when the WFP filters cannot be applied, block with the Windows Firewall profile default instead. Weaker
        (allow rules still pass) but never open. The next successful sync removes it. #>
     [CmdletBinding()] param([string]$Action = 'core')
     $p = Get-VeroPath
-    if (-not (Test-Path $p.FwBackup)) { Get-NetFirewallProfile | Select-Object Name, DefaultOutboundAction | ConvertTo-Json | Set-Content -Path $p.FwBackup }
-    Set-NetFirewallProfile -All -DefaultOutboundAction Block
-    New-Item -ItemType File -Path $p.Emergency -Force | Out-Null
+    # the note of how the firewall was, for the way back - the block does not wait on it
+    if (-not (Test-Path $p.FwBackup)) {
+        try { Write-VeroStateFile -Path $p.FwBackup -Text (Get-NetFirewallProfile | Select-Object Name, DefaultOutboundAction, Enabled | ConvertTo-Json) }
+        catch { Write-VeroLog "WARNING: the firewall's settings could not be noted ($($_.Exception.Message)) - they are not restored automatically afterwards" $Action }
+    }
+    # the flag first: with it there, every later pass sets the block again. A flag that cannot be written does not stop the block
+    try { New-Item -ItemType File -Path $p.Emergency -Force | Out-Null } catch { Write-VeroLog "WARNING: the emergency block could not be noted ($($_.Exception.Message))" $Action }
+    Set-NetFirewallProfile -All -Enabled True -DefaultOutboundAction Block     # a profile that is switched off blocks nothing
     Write-VeroLog 'EMERGENCY: WFP unavailable - Windows Firewall default outbound set to Block' $Action
 }
 
@@ -385,9 +421,17 @@ function Remove-VeroLegacyFirewall {
             if ($v -match '^\d+$') { $v = @{ '0' = 'NotConfigured'; '2' = 'Allow'; '4' = 'Block' }[$v] }
             if (-not $v) { $v = 'NotConfigured' }
             Set-NetFirewallProfile -Name $pr.Name -DefaultOutboundAction $v
+            # a profile that was switched off before the emergency block is switched off again (a backup from before 1.4 has no such note)
+            if ($pr.PSObject.Properties['Enabled'] -and [string]$pr.Enabled -in '0', 'False') { Set-NetFirewallProfile -Name $pr.Name -Enabled False }
         }
+        if (Test-Path $p.Emergency) { Remove-Item $p.Emergency -Force }       # before the note: a flag left behind alone would read as "block without a note" next time
         Remove-Item $p.FwBackup -Force
         Write-VeroLog 'Windows Firewall default outbound restored' $Action
+    } elseif (Test-Path $p.Emergency) {
+        # the emergency block was set without a note of how the firewall was (the note could not be written): the block
+        # itself still goes - back to Windows' own default; profiles that had been switched off stay switched on
+        Set-NetFirewallProfile -All -DefaultOutboundAction NotConfigured
+        Write-VeroLog 'emergency block lifted - Windows Firewall default outbound back to its default (the earlier settings had not been noted; check them if you had changed them)' $Action
     }
     $rules = @(Get-NetFirewallRule -Group $script:LegacyGroup -ErrorAction SilentlyContinue)
     if ($rules) { Remove-NetFirewallRule -Group $script:LegacyGroup; Write-VeroLog "removed $($rules.Count) Windows Firewall rule(s) of the old kill-switch" $Action }
@@ -420,8 +464,8 @@ function Resolve-VeroEndpoint {
     if (Test-Path $p.EndpointCache) { try { (Get-Content $p.EndpointCache -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cache[$_.Name] = @($_.Value) } } catch { Write-Verbose 'endpoint cache unreadable' } }
     $changed = $false
     $out = foreach ($r in $remotes) {
-        $a = $null
-        $ips = if ([System.Net.IPAddress]::TryParse($r.Host, [ref]$a)) { @($r.Host) } else {
+        $literal = (Test-VeroCidr ([string]$r.Host)) -and [string]$r.Host -notmatch '/'
+        $ips = if ($literal) { @($r.Host | Where-Object { Test-VeroUsableServerIp ([string]$_) }) } else {
             $cached = @($cache[$r.Host] | Where-Object { $_ -and (Test-VeroUsableServerIp ([string]$_)) })
             if ($CacheOnly) { $cached } else {
                 $fresh = @()
@@ -434,7 +478,7 @@ function Resolve-VeroEndpoint {
         }
         foreach ($ip in $ips) { [pscustomobject]@{ Ip = [string]$ip; Proto = $(if ($r.Proto -eq 'tcp') { 6 } else { 17 }); Port = [int]$r.Port } }
     }
-    if ($changed) { $cache | ConvertTo-Json -Depth 3 | Set-Content $p.EndpointCache }
+    if ($changed) { Write-VeroStateFile -Path $p.EndpointCache -Text ($cache | ConvertTo-Json -Depth 3) }
     @($out)
 }
 
@@ -460,7 +504,9 @@ function Sync-VeroKillSwitch {
 function Invoke-VeroLocked([scriptblock]$Script, [object[]]$Arguments = @()) {
     <# Applying and removing filters never overlap (watchdog, event tasks and On/Off run in parallel processes). Otherwise
        a slow disarm can finish after a re-arm applied its filters and leave an armed machine without any. #>
-    $held = Enter-VeroSingleton -Name 'sync' -WaitMs 60000                 # after a minute: go ahead anyway (as before)
+    # after a minute without the lock: ahead anyway - Off must work even while another process is stuck in a sync - and said so
+    $held = Enter-VeroSingleton -Name 'sync' -WaitMs 60000
+    if (-not $held) { Write-VeroLog 'WARNING: another VeroScudo process has held the filter lock for a minute - going ahead without it' 'core' }
     try {
         & $Script @Arguments                       # values passed explicitly, not read from the caller's scope
     } finally {
@@ -503,44 +549,58 @@ function Sync-VeroKillSwitchCore {
        caller re-syncs once). #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Force, [switch]$NoRefresh, [switch]$ForceDown)
     $p = Get-VeroPath
-    $plan = Get-VeroSyncPlan -Config $Config -Action $Action -ForceDown:$ForceDown
-    $type = $plan.Type; $th = $plan.Handler; $ForceDown = $plan.ForceDown; $tun = $plan.Tunnel
-    $ips = @($plan.Ips); $dns = @($plan.Dns); $vm = $plan.Vm; $wsl = $plan.Wsl; $sw = $plan.Switch; $specs = @($plan.Specs)
-    $fp = Get-VeroSpecFingerprint $specs
-    $prev = Get-VeroAppliedState
-    $present = Get-VeroWfpCount
+    # under the lock: turned off since the caller looked? Then no filters - they would stay until the next watchdog pass
+    if (-not (Test-VeroArmed)) { return $false }
+    try {
+        $plan = Get-VeroSyncPlan -Config $Config -Action $Action -ForceDown:$ForceDown
+        $type = $plan.Type; $th = $plan.Handler; $ForceDown = $plan.ForceDown; $tun = $plan.Tunnel
+        $ips = @($plan.Ips); $dns = @($plan.Dns); $vm = $plan.Vm; $wsl = $plan.Wsl; $sw = $plan.Switch; $specs = @($plan.Specs)
+        $fp = Get-VeroSpecFingerprint $specs
+        $prev = Get-VeroAppliedState
+        $present = Get-VeroWfpCount
+    } catch {
+        # the filters could not even be worked out (the native helper does not load, an adapter cannot be read ...): an
+        # armed machine with no filter in force gets the emergency block, like a failed apply below
+        Set-VeroFailClosed -Config $Config -Action $Action -Why "the filters could not be worked out: $($_.Exception.Message)"
+        throw
+    }
     $applied = $false
     if ($Force -or -not $prev -or $prev.Fingerprint -ne $fp -or $present -ne $specs.Count -or (Test-Path $p.Emergency)) {
         $applied = $true
         try {
             Set-VeroWfpFilter $specs
         } catch {
-            Write-VeroLog "ERROR: WFP apply failed: $($_.Exception.Message)" $Action
-            Enable-VeroEmergencyBlock -Action $Action
+            Set-VeroFailClosed -Config $Config -Action $Action -Why "WFP apply failed: $($_.Exception.Message)"
             throw
         }
         # a blocked set (a drop, a Reconnect, a switch): the connection check starts its rating over from here, however short
         # the gap - its own rounds every 10-100 s can miss a Reconnect of a few seconds (otherwise "unstable" 1 s after one)
-        if (-not $tun) { try { [IO.File]::WriteAllText($p.LastDown, [string](Get-VeroEpoch)) } catch { Write-Verbose 'last-down not written' } }
-        @{ Fingerprint = $fp; Count = $specs.Count; Profile = $Config.Profile; Type = $type; Tunnel = [string]$tun; Wsl = [string]$wsl; Switch = [string]$sw; Servers = $ips; Time = (Get-Date).ToString('o') } |
-            ConvertTo-Json | Set-Content $p.WfpState
+        if (-not $tun) { try { Write-VeroStateFile -Path $p.LastDown -Text ([string](Get-VeroEpoch)) } catch { Write-Verbose 'last-down not written' } }
+        # the note of what is in force (for the next pass, status and the tray). The steps below - the VMs and WSL - never
+        # depend on it: a file somebody holds open at this moment must not leave them as they were
+        try { Write-VeroStateFile -Path $p.WfpState -Text (@{ Fingerprint = $fp; Count = $specs.Count; Profile = $Config.Profile; Type = $type; Tunnel = [string]$tun; Wsl = [string]$wsl; Switch = [string]$sw; Servers = $ips; Time = (Get-Date).ToString('o') } | ConvertTo-Json) }
+        catch { Write-VeroLog "WARNING: the note of the applied filters could not be written ($($_.Exception.Message)) - they are applied again on the next pass" $Action }
         $why = if (-not $prev) { 'armed' } elseif ($present -ne $prev.Count) { "filters missing ($present of $($prev.Count))" } else { 'changed' }
         Write-VeroLog ("kill-switch {0}: {1} filters, profile '{2}' ({7}), tunnel {3}, wsl {4}, default switch {8}, server {5}, dns {6}" -f $why, $specs.Count, $Config.Profile,
             $(if ($tun) { 'up' } elseif ($ForceDown) { 'BLOCKED for reconnect' } else { 'DOWN' }), $(if ($wsl) { 'bound' } else { '-' }), ($ips -join ','),
             $(if ($tun) { 'tunnel only' } else { ($dns -join ',') }), (Get-VeroTypeLabel $type), $(if ($sw -and ($tun -or -not $Config.Vm)) { 'open' } else { '-' })) $Action   # as the filters have it
-        if (Test-Path $p.Emergency) { Remove-VeroLegacyFirewall -Action $Action }
     }
+    $liftEmergency = $applied -and ((Test-Path $p.Emergency) -or (Test-Path $p.FwBackup))   # lifted below, after the VM and WSL steps (the note of the old settings alone tells of a block too)
     # Hyper-V Default Switch VMs: their traffic never reaches these filters (62-HyperVAcl.ps1). Protected: port ACLs while
     # the tunnel is down - right after the filters, before the slower WSL step (after it they would come 3 s later).
     # On every change; while blocked also every sync, so a VM created meanwhile is covered. Not protected: none at all.
     # fix B: after Windows logged "network disconnected" (NetDown task) they stay blocked until the tunnel is proven: a new
     # tunnel (a redial), or traffic through it - RAS reports a dead tunnel only seconds after the network is back
-    $suspect = Get-VeroNetSuspect
-    if ($suspect -and $tun) {
-        if ([string]$tun -ne [string]$suspect.Tunnel -or (Test-VeroTunnelCarries -Luid $tun)) {
-            Clear-VeroNetSuspect; $suspect = $null
-            Write-VeroLog 'the tunnel carries traffic again - Hyper-V VMs through the tunnel' $Action
-        }
+    $suspect = try { Get-VeroNetSuspect } catch { Write-VeroLog "ERROR: the note of the network drop cannot be read ($($_.Exception.Message)) - Hyper-V VMs stay blocked for now" $Action; $true }
+    if ($suspect -and $suspect -isnot [bool] -and $tun) {
+        # a failure in this look (an adapter that just went away, a note that cannot be removed) leaves the VMs blocked
+        # for this pass - it never skips the steps below
+        try {
+            if ([string]$tun -ne [string]$suspect.Tunnel -or (Test-VeroTunnelCarries -Luid $tun)) {
+                Clear-VeroNetSuspect; $suspect = $null
+                Write-VeroLog 'the tunnel carries traffic again - Hyper-V VMs through the tunnel' $Action
+            }
+        } catch { Write-VeroLog "ERROR: could not tell whether the tunnel carries traffic again ($($_.Exception.Message)) - Hyper-V VMs stay blocked for now" $Action }
     }
     $aclWant = ((-not [bool]$tun) -or [bool]$suspect) -and [bool]$Config.Vm
     if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {
@@ -549,10 +609,15 @@ function Sync-VeroKillSwitchCore {
     }
     # the Hyper-V firewall queries are slow (~0.4 s): only when something changed, else every ~5 min as a tamper check
     $script:SyncCount++
+    # what this long-lived process remembers about the Windows VPN entries is looked up again now and then: an entry changed
+    # from SSTP to IKEv2 would otherwise keep its old ports here while every short task computes the new ones
+    if ($script:SyncCount % 20 -eq 0) { $script:TunnelTypes = @{} }
     if ($vm -and ($applied -or $script:VmAllowed -ne [bool]$tun -or $script:SyncCount % 20 -eq 0)) {
-        Set-VeroVmAccess -Allow ([bool]$tun) -Action $Action
-        $script:VmAllowed = [bool]$tun
+        try { Set-VeroVmAccess -Allow ([bool]$tun) -Action $Action; $script:VmAllowed = [bool]$tun }
+        catch { Write-VeroLog "ERROR: WSL (Hyper-V firewall): $($_.Exception.Message) - tried again on the next pass" $Action; $script:VmAllowed = $null }
     }
+    # the emergency block of an earlier failure goes last: the real filters and the VM / WSL steps are in force by now
+    if ($liftEmergency) { try { Remove-VeroLegacyFirewall -Action $Action } catch { Write-VeroLog "ERROR: the emergency block could not be lifted ($($_.Exception.Message)) - tried again on the next pass" $Action } }
     # refresh the server addresses only now - through the tunnel, after the filters let it through
     if ($tun -and -not $NoRefresh -and @($Config.ServerIps).Count -eq 0) {
         $fresh = @(& $th.ResolveIps $Config)
@@ -594,10 +659,21 @@ function Test-VeroNative {
     $missing = @()
     foreach ($l in 'ConnectV4', 'ConnectV6', 'RecvAcceptV4', 'RecvAcceptV6') {
         $fields = [VeroScudo.Wfp]::LayerFields([VeroScudo.Layer]::$l)
-        foreach ($n in 'Flags', 'LocalInterface', 'RemoteAddress', 'Protocol', 'RemotePort', 'LocalPort', 'AppId') {
+        foreach ($n in 'Flags', 'LocalInterface', 'RemoteAddress', 'Protocol', 'RemotePort', 'LocalPort', 'AppId', 'UserId') {
             if ($fields -notcontains [VeroScudo.Field]::$n) { $missing += "$l/$n" }
         }
     }
     if ($missing) { throw "WFP self-test failed - unknown field(s): $($missing -join ', ')" }
+    # and one filter of every shape the guard builds, offered to WFP inside a transaction that is rolled back: a condition
+    # this Windows does not take is found here, before anything is changed
+    $probe = foreach ($l in [VeroScudo.Layer]::ConnectV4, [VeroScudo.Layer]::ConnectV6) {
+        $s = New-Object VeroScudo.FilterSpec('self-test', $l, $true, [byte]8)
+        $null = $s.Protocol([byte]17).RemotePort([uint16]500).Remote($(if ($l -eq [VeroScudo.Layer]::ConnectV4) { '203.0.113.5' } else { '2001:db8::5' })).Privileged()
+        $s
+        $t = New-Object VeroScudo.FilterSpec('self-test', $l, $true, [byte]8)
+        $null = $t.Protocol([byte]6).RemotePort([uint16]443).App($script:Svchost)
+        $t
+    }
+    try { [VeroScudo.Wfp]::Validate([VeroScudo.FilterSpec[]]@($probe)) } catch { throw "WFP self-test failed - a filter was refused: $($_.Exception.Message)" }
     $true
 }

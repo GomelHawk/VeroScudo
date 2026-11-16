@@ -46,9 +46,10 @@ def _stays_local(name: str) -> bool:
 
 def is_virtual(name: str) -> bool:
     """A tunnel interface (tun0, wg0, ppp0): no backing device and nothing below it; never a bridge or a bond."""
-    if _IFNAME.match(name) is None or not _stays_local(name):
-        return False
     d = SYS_NET / name
+    # it must be there: a name that is missing right now (a USB card just unplugged) is nothing to allow under
+    if _IFNAME.match(name) is None or not d.is_dir() or not _stays_local(name):
+        return False
     return not (d / "bridge").is_dir() and not (d / "bonding").is_dir()
 
 
@@ -78,7 +79,7 @@ def iface(profile: str) -> str | None:
     if hiddify.is_profile(profile):
         t = hiddify.iface(profile)
         return t if t and is_virtual(t) else None
-    v = _nmcli("-g", "GENERAL.IP-IFACE", "connection", "show", profile)
+    v = _nmcli("-g", "GENERAL.IP-IFACE", "connection", "show", "id", profile)
     if not v or v == "--":
         return None                                             # not active
     if is_virtual(v):
@@ -90,7 +91,7 @@ def _iface_by_address(profile: str) -> str | None:
     """pppd-based VPN plugins (SSTP, L2TP, PPTP): NetworkManager reports the card underneath as GENERAL.IP-IFACE (eth0
     for an SSTP connection on ppp0). The tunnel is then the virtual interface that holds the
     connection's own IPv4 address - exactly one such interface, never a physical card; anything else = None (blocked)."""
-    raw = _nmcli("-g", "IP4.ADDRESS", "connection", "show", profile)
+    raw = _nmcli("-g", "IP4.ADDRESS", "connection", "show", "id", profile)
     own = {a.strip().split("/")[0] for a in raw.split("|") if a.strip() and a.strip() != "--"}
     if not own:
         return None
@@ -110,9 +111,9 @@ def kind(profile: str) -> str | None:
     if hiddify.is_profile(profile):
         return hiddify.KIND
     if profile not in _kinds:
-        t = _nmcli("-g", "connection.type", "connection", "show", profile)
+        t = _nmcli("-g", "connection.type", "connection", "show", "id", profile)
         if t == "vpn":
-            st = _nmcli("-g", "vpn.service-type", "connection", "show", profile)
+            st = _nmcli("-g", "vpn.service-type", "connection", "show", "id", profile)
             t = "openvpn" if "openvpn" in st else "vpn"
         _kinds[profile] = t or None
     return _kinds[profile]
@@ -169,7 +170,7 @@ def live_endpoints(profile: str) -> list[str]:
     packets would be blocked. [] for other kinds, without `wg`, or when the interface does not exist."""
     if kind(profile) != "wireguard":
         return []
-    ifname = iface(profile) or _nmcli("-g", "connection.interface-name", "connection", "show", profile)
+    ifname = iface(profile) or _nmcli("-g", "connection.interface-name", "connection", "show", "id", profile)
     if not ifname or not _IFNAME.match(ifname):
         return []
     try:
@@ -197,7 +198,7 @@ def is_connected(profile: str) -> bool:
     A Hiddify profile: Hiddify runs and its tunnel interface is up with its address."""
     if hiddify.is_profile(profile):
         return iface(profile) is not None
-    if _nmcli("-g", "GENERAL.STATE", "connection", "show", profile) != "activated":
+    if _nmcli("-g", "GENERAL.STATE", "connection", "show", "id", profile) != "activated":
         _wg_first_seen.pop(profile, None)
         return False
     if kind(profile) == "wireguard":
@@ -301,7 +302,7 @@ def check(cfg) -> list[str]:
                 out.append(f'{p.name}: WireGuard uses UDP - set "protocol": "udp" and "port": the endpoint\'s port')
             out.append(f"{p.name}: WireGuard - make sure the peer has PersistentKeepalive (e.g. 25): VeroScudo judges the link by its handshakes")
         elif k == "openvpn":
-            d = parse_openvpn_data(unescape(_nmcli("-g", "vpn.data", "connection", "show", p.name)))
+            d = parse_openvpn_data(unescape(_nmcli("-g", "vpn.data", "connection", "show", "id", p.name)))
             if d["proto"] != p.protocol:
                 out.append(f"{p.name}: OpenVPN uses {d['proto'].upper()} but the profile says {p.protocol.upper()}")
             if d["port"] and d["port"] != p.port:
@@ -456,10 +457,10 @@ def unescape(value: str) -> str:
 def split_address(value: str) -> tuple[str, int]:
     """'host', 'host:4443', '[2001:db8::1]:443', 'https://host:8443/x' -> (host, port or 0). Pure."""
     v = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", (value or "").strip()).split("/")[0]
-    m = re.match(r"^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$", v)
+    m = re.match(r"^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?\Z", v)
     if m:
         return m.group(1), int(m.group(2) or 0)
-    m = re.match(r"^([^:]+):(\d{1,5})$", v)
+    m = re.match(r"^([^:]+):(\d{1,5})\Z", v)
     if m:
         return m.group(1), int(m.group(2))
     return v, 0
@@ -575,7 +576,7 @@ def discover() -> list[dict]:
                 d["note"] = "no peer endpoint in the connection"
             out.append(d)
         elif ctype == "vpn":
-            st = _nmcli("-g", "vpn.service-type", "connection", "show", name)
+            st = _nmcli("-g", "vpn.service-type", "connection", "show", "id", name)
             k = next((v for key, v in _SERVICE_TYPES.items() if key in st), "")
-            out.append(describe_vpn(name, k, unescape(_nmcli("-g", "vpn.data", "connection", "show", name))))
+            out.append(describe_vpn(name, k, unescape(_nmcli("-g", "vpn.data", "connection", "show", "id", name))))
     return out

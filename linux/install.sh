@@ -28,11 +28,11 @@ USER_ID="$(id -u "$USER_NAME")"
 
 echo "== 1/6 packages"
 need=()
-have_gi() { "$PY3" -c "import gi; gi.require_version('$1', '$2'); from gi.repository import $1" 2>/dev/null; }
+have_gi() { "$PY3" -I -c "import gi; gi.require_version('$1', '$2'); from gi.repository import $1" 2>/dev/null; }
 command -v nft >/dev/null || need+=(nftables)
 command -v nmcli >/dev/null || need+=(network-manager)
 [ -x "$PY3" ] || need+=(python3)
-"$PY3" -c 'import gi' 2>/dev/null || need+=(python3-gi)
+"$PY3" -I -c 'import gi' 2>/dev/null || need+=(python3-gi)
 have_gi NM 1.0 || need+=(gir1.2-nm-1.0)                                 # the "you hung up" reason
 have_gi Gtk 3.0 || need+=(gir1.2-gtk-3.0)                                 # tray windows
 have_gi AyatanaAppIndicator3 0.1 || need+=(gir1.2-ayatanaappindicator3-0.1)   # tray icon
@@ -91,8 +91,9 @@ chown -R root:root "$PREFIX"
 chmod -R go-w "$PREFIX"
 chmod 755 "$BIN" "$TRAY"
 # up to 1.3: installed with pip into the system Python - remove that copy so only one exists
-if "$PY3" -m pip show veroscudo >/dev/null 2>&1; then
-  "$PY3" -m pip uninstall -y -q --break-system-packages veroscudo 2>/dev/null || "$PY3" -m pip uninstall -y -q veroscudo || true
+# -I: as root, nothing from the caller's own site-packages, environment or current folder
+if "$PY3" -I -m pip show veroscudo >/dev/null 2>&1; then
+  "$PY3" -I -m pip uninstall -y -q --break-system-packages veroscudo 2>/dev/null || "$PY3" -I -m pip uninstall -y -q veroscudo || true
 fi
 RULE_PATHS=("$BIN")
 if [ -d /usr/local/bin ]; then
@@ -141,7 +142,11 @@ grep -q "^ExecStart=$BIN daemon" /etc/systemd/system/veroscudo.service || { echo
 # the log: root:adm 0640, so an administrator's tray can show it (adm reads the journal, where the same lines go anyway)
 if getent group adm >/dev/null; then
   sed -i 's/^#SupplementaryGroups=adm$/SupplementaryGroups=adm/' /etc/systemd/system/veroscudo.service
-  touch /var/log/veroscudo.log && chgrp adm /var/log/veroscudo.log && chmod 640 /var/log/veroscudo.log
+  # /var/log can be writable by a system group: a link put in the log's place must not take these changes elsewhere
+  # The file itself is made by the program (never through a link). Here only the group of one that is there already, and
+  # only of a real file.
+  [ -L /var/log/veroscudo.log ] && rm -f /var/log/veroscudo.log
+  if [ -f /var/log/veroscudo.log ] && [ ! -L /var/log/veroscudo.log ]; then chgrp -h adm /var/log/veroscudo.log; fi
 fi
 # an armed flag left in /run by an older layout (lost on reboot): move it, or the upgrade would silently disarm
 for f in armed.flag server.ip; do

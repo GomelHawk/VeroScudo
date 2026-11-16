@@ -286,7 +286,7 @@ function Update-VeroQuality {
     if ($key -ne $script:QualityKey -or $down -gt $script:QualityStarted) {   # new connection, other profile or other rules: start over
         $script:QualitySamples.Clear(); $script:QualityKey = $key; $script:QualityStarted = $now; $script:QualityLast = ''
     }
-    $hid = [string]$cfg.Type -eq 'hiddify'                                  # Hiddify answers ping/TCP itself: TLS handshakes instead
+    $hid = [bool](Get-VeroTypeHandler ([string]$cfg.Type)).ProbeTls          # Hiddify answers ping/TCP itself: TLS handshakes instead
     $round = @(Invoke-VeroProbeRound -Targets $chk.Targets -Tls:$hid -TimeoutMs $(if ($hid) { 5000 } else { 3000 }))
     for ($ti = 0; $ti -lt $round.Count; $ti++) { $r = $round[$ti]; $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs; Ti = $ti; Slow = (Test-VeroSlowResult $r) }) }
     try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Slow @($round | Where-Object { Test-VeroSlowResult $_ }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
@@ -298,8 +298,7 @@ function Update-VeroQuality {
     $per = @(Get-VeroQualityPerTarget -Samples $script:QualitySamples.ToArray() -Targets @($chk.Targets) -Now $now -WindowSeconds $win)
     $json = [ordered]@{ profile = $cfg.Profile; state = $q.State; lossPct = $q.LossPct; rttMs = $q.RttMs; checks = $q.Checks; lost = $q.Lost; slow = $q.Slow
                         intervalSeconds = $chk.IntervalSeconds; windowMinutes = $chk.WindowMinutes; updated = $now; targets = $per } | ConvertTo-Json -Compress -Depth 4
-    [IO.File]::WriteAllText("$p.new", $json)
-    Move-Item -LiteralPath "$p.new" -Destination $p -Force
+    Write-VeroStateFile -Path $p -Text $json
     if ($q.State -ne 'checking' -and $q.State -ne $script:QualityLast) {
         Write-VeroLog ("connection quality: {0} ({1} of {2} checks lost, {3} slow, {4})" -f $q.State, $q.Lost, $q.Checks, $q.Slow, $(if ($null -ne $q.RttMs) { "$($q.RttMs) ms" } else { 'no answer' })) $Action
         $script:QualityLast = $q.State

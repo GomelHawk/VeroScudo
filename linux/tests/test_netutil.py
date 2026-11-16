@@ -29,3 +29,15 @@ def test_a_server_address_is_never_a_fake_dns_answer_or_loopback():
         assert not usable_server_ip(bad), bad
     for good in ("203.0.113.5", "185.72.199.130", "10.0.0.5", "192.168.1.10", "2001:db8::1", "fd00::5"):
         assert usable_server_ip(good), good
+
+
+def test_the_trays_lookups_follow_no_redirect_and_ask_https_only():
+    import urllib.error
+
+    import pytest
+
+    with pytest.raises(urllib.error.HTTPError):
+        netutil._NoRedirect().redirect_request(type("R", (), {"full_url": "https://a.example.com/"})(), None, 302, "Found", {},
+                                               "https://b.example.com/")
+    with pytest.raises(ValueError):
+        netutil.fetch_https("http://a.example.com/", 1, 10)

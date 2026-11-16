@@ -4,14 +4,14 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 
 from . import __version__
+from .netutil import fetch_https
 
 REPO = "GomelHawk/VeroScudo"
 RELEASES = f"https://github.com/{REPO}/releases/"
-_TAG = re.compile(r"^v?(\d+(?:\.\d+){1,3})$")
+_TAG = re.compile(r"^[vV]?(\d+(?:\.\d+){1,3})\Z")
 
 
 def is_release_url(url: str) -> bool:
@@ -44,14 +44,15 @@ class Release:
 
 
 def fetch_latest(repo: str = REPO, timeout: float = 10.0) -> Release | None:
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/releases/latest",
-        headers={"User-Agent": f"VeroScudo/{__version__}", "Accept": "application/vnd.github+json"},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            j = json.load(r)
-        rel = Release(tag=str(j["tag_name"]), url=str(j["html_url"]))
+        raw = fetch_https(f"https://api.github.com/repos/{repo}/releases/latest", timeout, 262144,
+                          {"User-Agent": f"VeroScudo/{__version__}", "Accept": "application/vnd.github+json"})
+        tag = str(json.loads(raw)["tag_name"])
+        if not _TAG.match(tag):
+            return None
+        # the link is built here from the tag (digits and dots only), not taken from the answer: what is opened is what
+        # was checked (the Windows tray does the same)
+        rel = Release(tag=tag, url=RELEASES + "tag/" + tag)
         return rel if is_release_url(rel.url) else None
     except Exception:  # noqa: BLE001 - any network/parse problem just means "no notice this time"
         return None

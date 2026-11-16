@@ -2,17 +2,24 @@
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
 # ---------------------------------------------------------------- profile types: one handler per type
-# Everything that differs between the built-in client ('ras'), OpenVPN and WireGuard, in one place. The scriptblocks call
+# Everything that differs between the built-in client ('ras'), OpenVPN, WireGuard and Hiddify, in one place. The scriptblocks call
 # module functions by name (tests mock those) and are invoked as `& $h.Op args`. Built last: every function exists by now.
 # Keys: Label, DefaultPort, PasswordCapable (asks for / stores a password), HasDco (OpenVPN kernel data channel option),
 # OwnLayer (the client's own WFP layer name, expected while its tunnel runs), HangUpOnOffAlways (Off ends the client even
 # mid-connect); config rules NamePattern/NameHint, ServerRequired, UsernameRequired; on-disk form OnDiskType, OnDiskPort,
 # OnDiskAuth (the type's own keys); SwitchNotice, IsConnected, TunnelLuid, ServerPermit (@{ Kind; Ips; Endpoints; App }
 # for the filters), ResolveIps, RasTunnelType, CrlWindow, Dial, HangUp, DialFailure, StatusDetail, ServerText (what the
-# profile names, for status), ForeignText, ForeignHangUp.
+# profile names, for status), ForeignText, ForeignHangUp; Dials ($false: connected in its own app only - VeroScudo waits),
+# ProbeTls (the connection check uses TLS handshakes), RelookupOnFail (look the server name up again after a failed dial),
+# Watch (the watchdog's per-pass look at this type: $true when it changed the state), WatchAlways (also without a profile of
+# the type), OnArmConnected (what to note when a tunnel connected by hand is armed), OnReconnected (after a redial succeeded).
 $script:TypeHandler = @{
     ras = @{
         Label = 'Windows VPN'; DefaultPort = 443; PasswordCapable = $true; HasDco = $false; OwnLayer = $null; HangUpOnOffAlways = $false
+        Dials = $true; ProbeTls = $false; RelookupOnFail = $true; WatchAlways = $true
+        Watch         = { param($Config, $Action) Update-VeroRasWatch -Config $Config -Action $Action }
+        OnArmConnected = { param($Config, $Action) Save-VeroRasArm -Config $Config -Action $Action }
+        OnReconnected = { param($Config) Save-VeroRasCoId -ProfileName $Config.Profile }   # its "you hung up" must match it
         NamePattern = $null; NameHint = ''; ServerRequired = $true; UsernameRequired = $true; OnDiskType = $false; OnDiskPort = $true
         OnDiskAuth    = { param($Entry, $o) if ($Entry.PSObject.Properties['Auth'] -and -not $Entry.Auth) { $o.auth = $false } }   # certificate sign-in
         ServerText    = { param($Config) $Config.Server }
@@ -32,6 +39,7 @@ $script:TypeHandler = @{
     }
     openvpn = @{
         Label = 'OpenVPN'; DefaultPort = 1194; PasswordCapable = $true; HasDco = $true; OwnLayer = 'OpenVPN'; HangUpOnOffAlways = $true
+        Dials = $true; ProbeTls = $false; RelookupOnFail = $false; WatchAlways = $false; Watch = $null; OnArmConnected = { }; OnReconnected = { }
         NamePattern = $null; NameHint = ''; ServerRequired = $false; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $false   # server/port: the .ovpn's remote lines
         OnDiskAuth    = { param($Entry, $o) $o.auth = if ($Entry.PSObject.Properties['Auth']) { [bool]$Entry.Auth } else { $true }; if ($Entry.PSObject.Properties['Dco'] -and $Entry.Dco) { $o.dco = $true } }
         ServerText    = { param($Config) (@(try { Get-VeroOpenVpnRemote -ProfileName $Config.Profile } catch { @() }) | ForEach-Object { '{0}:{1}/{2}' -f $_.Host, $_.Port, $_.Proto }) -join ' ' }
@@ -52,8 +60,10 @@ $script:TypeHandler = @{
     }
     wireguard = @{
         Label = 'WireGuard'; DefaultPort = 51820; PasswordCapable = $false; HasDco = $false; OwnLayer = 'WireGuard'; HangUpOnOffAlways = $false
+        Dials = $true; ProbeTls = $false; RelookupOnFail = $false; WatchAlways = $false; OnArmConnected = { }; OnReconnected = { }
+        Watch         = { param($Config, $Action) Update-VeroWgWatch -Config $Config -Action $Action }
         # WireGuard names its tunnel service after the tunnel: the same rule as the WireGuard app (and safe on a command line)
-        NamePattern = '^[A-Za-z0-9_=+.-]{1,32}$'; NameHint = 'a WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -'
+        NamePattern = '^[A-Za-z0-9_=+.-]{1,32}\z'; NameHint = 'a WireGuard tunnel name is 1-32 of A-Z a-z 0-9 _ = + . -'
         ServerRequired = $true; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $true
         OnDiskAuth    = { }                                                   # no password, no DCO: nothing of its own on disk
         ServerText    = { param($Config) $Config.Server }
@@ -76,6 +86,8 @@ $script:TypeHandler = @{
     hiddify = @{
         # kill-switch only (84-Hiddify.ps1): Hiddify connects, disconnects and reconnects itself - VeroScudo only blocks
         Label = 'Hiddify'; DefaultPort = 443; PasswordCapable = $false; HasDco = $false; OwnLayer = 'sing-box|sing-tun|Hiddify'; HangUpOnOffAlways = $false
+        Dials = $false; ProbeTls = $true; RelookupOnFail = $false; WatchAlways = $false; OnArmConnected = { }; OnReconnected = { }
+        Watch         = { param($Config, $Action) Update-VeroHiddifyWatch -Config $Config -Action $Action }
         NamePattern = $null; NameHint = ''; ServerRequired = $false; UsernameRequired = $false; OnDiskType = $true; OnDiskPort = $false
         OnDiskAuth    = { }
         ServerText    = { 'servers of the Hiddify app' }
@@ -96,7 +108,7 @@ $script:TypeHandler = @{
 }
 function Get-VeroTypeHandler {
     <# The handler table of a profile type ('' = the built-in client, like Get-VeroConfigType). Unknown: throw - config
-       validation only lets the three through, so this is a programming error, never a user error. #>
+       validation only lets the known types through, so this is a programming error, never a user error. #>
     [CmdletBinding()] param([string]$Type)
     if (-not $Type) { $Type = 'ras' }
     $h = $script:TypeHandler[$Type]
