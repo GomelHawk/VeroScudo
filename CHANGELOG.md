@@ -88,7 +88,9 @@ All notable changes to VeroScudo are recorded here. The format follows
   refused on every platform. A stored user name with `_x` in it was sent to the server changed.
 - **Windows:** a filter set that cannot be applied blocks the VMs and WSL as well (only one that could not be worked
   out did); the emergency block is set even when the firewall's old settings cannot be noted first, and lifted only
-  after the real filters and the VM steps are in force. A server written as a hexadecimal number or with a leading
+  after the real filters and the VM steps are in force; the block itself is never noted as the old settings. A DNS
+  server the network hands out in a form the rules refuse (an IPv4 address written as IPv6) is left out on every
+  platform - it stopped the whole rule set. A server written as a hexadecimal number or with a leading
   zero is refused on every platform. `Uninstall.ps1` removes a custom install folder only when it is the
   administrators' own.
 - **macOS:** rules that the main pf ruleset no longer reaches (another program replaced it) count as *not active*; a

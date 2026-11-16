@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import hiddify
 from .netutil import IFNAME as _IFNAME
-from .netutil import ipv4_by_iface, nameservers, resolve  # noqa: F401  (nameservers, resolve: part of this backend's contract)
+from .netutil import ipv4_by_iface, nameservers, resolve, resolver_address  # noqa: F401  (nameservers, resolve: part of this backend's contract)
 
 SYS_NET = Path("/sys/class/net")
 
@@ -349,18 +349,14 @@ def resolver_uid() -> int | None:
 
 def nm_dns() -> list[str]:
     """The DNS servers NetworkManager handed out on the physical links (when resolv.conf only names a local stub such as
-    dnsmasq, unbound or Pi-hole): the only DNS destinations while blocked. No loopback."""
+    dnsmasq, unbound or Pi-hole): the only DNS destinations while blocked. No loopback, plain addresses only."""
     out = []
     for line in _nmcli("-f", "IP4.DNS,IP6.DNS", "device", "show").splitlines():
         if ":" not in line:
             continue
-        v = unescape(line.split(":", 1)[1]).strip()
-        try:
-            a = ipaddress.ip_address(v.split("%")[0])
-        except ValueError:
-            continue
-        if not a.is_loopback:
-            out.append(str(a))
+        a = resolver_address(unescape(line.split(":", 1)[1]).strip())
+        if a:
+            out.append(a)
     return sorted(set(out))
 
 

@@ -72,19 +72,27 @@ def resolve(server: str) -> list[str]:
         return []
 
 
+def resolver_address(value: str) -> str:
+    """A resolver's address as the firewall rules take it (the zone of a link-local one dropped), "" for a loopback stub
+    and for anything that is not a plain address. Pure."""
+    try:
+        s = plain_ip(str(value).split("%")[0])
+    except ValueError:
+        return ""
+    return "" if ipaddress.ip_address(s).is_loopback else s
+
+
 def nameservers(path: Path = Path("/etc/resolv.conf")) -> list[str]:
-    """Upstream resolvers from resolv.conf (no loopback stubs): the only DNS destinations while blocked."""
+    """Upstream resolvers from resolv.conf (no loopback stubs): the only DNS destinations while blocked. Plain addresses
+    only - these go into firewall rules, and one that the rules refuse would stop the whole ruleset."""
     out = []
     try:
         for line in path.read_text().splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[0] == "nameserver":
-                try:
-                    a = ipaddress.ip_address(parts[1].split("%")[0])
-                except ValueError:
-                    continue
-                if not a.is_loopback:
-                    out.append(str(a))
+                a = resolver_address(parts[1])
+                if a:
+                    out.append(a)
     except OSError:
         pass
     return sorted(set(out))

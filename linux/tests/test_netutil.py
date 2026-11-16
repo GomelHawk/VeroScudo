@@ -14,6 +14,17 @@ def test_nameservers_skip_loopback_stubs_and_junk(tmp_path):
     assert netutil.nameservers(tmp_path / "missing") == []
 
 
+def test_a_resolver_the_rules_would_refuse_is_left_out_instead_of_stopping_the_ruleset(tmp_path):
+    from veroscudo.config import Config
+    from veroscudo.firewall import DnsPolicy, render_ruleset
+    f = tmp_path / "resolv.conf"
+    f.write_text("nameserver ::ffff:192.0.2.53\nnameserver 192.168.1.1\nnameserver ::1\nnameserver 192.168.1.1/24\n")
+    assert netutil.nameservers(f) == ["192.168.1.1"]
+    assert netutil.resolver_address("fe80::1%wlp2s0") == "fe80::1" and netutil.resolver_address("::ffff:127.0.0.1") == ""
+    cfg = Config.from_text('{"vpn":{"profile":"Work","server":"vpn.example.com","port":443,"username":"jdoe"}}')
+    render_ruleset(cfg, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(servers=tuple(netutil.nameservers(f))))
+
+
 def test_resolve_returns_nothing_when_the_lookup_fails(monkeypatch):
     import socket
 

@@ -128,7 +128,7 @@ def test_gtk_forms_save_through_the_controller(app):
     se["every"].get_value_as_int.return_value, se["over"].get_value_as_int.return_value = 10, 2
     app.win._save_check()
     tag, argvs = app.started[-1]
-    assert tag == "admin:set" and argvs[0][0] == "pkexec"
+    assert tag == "admin:set" and argvs[0][0] == tm.admin_argv(["uninstall"])[0]   # pkexec; osascript where the tests run on a Mac
     assert '{"host": "api.example.com", "method": "https", "port": 443}' in argvs[0][-1]
     row[0].get_text.return_value = "not a host!"
     app.win._save_check()

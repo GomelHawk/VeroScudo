@@ -392,19 +392,23 @@ function Set-VeroFailClosed {
     try { if (Test-Path -LiteralPath $p.WfpState) { Remove-Item -LiteralPath $p.WfpState -Force } } catch { Write-Verbose 'applied-filters note kept' }
 }
 
+$script:EmergencyUnnoted = $false     # this process set the emergency block and could write neither its flag nor the note of the old settings
+
 function Enable-VeroEmergencyBlock {
     <# Fail closed: when the WFP filters cannot be applied, block with the Windows Firewall profile default instead. Weaker
        (allow rules still pass) but never open. The next successful sync removes it. #>
     [CmdletBinding()] param([string]$Action = 'core')
     $p = Get-VeroPath
-    # the note of how the firewall was, for the way back - the block does not wait on it
-    if (-not (Test-Path $p.FwBackup)) {
+    # the note of how the firewall was, for the way back - the block does not wait on it. Never taken once the block is
+    # in force: it would note the block itself as "how the firewall was"
+    if (-not (Test-Path $p.FwBackup) -and -not (Test-Path $p.Emergency) -and -not $script:EmergencyUnnoted) {
         try { Write-VeroStateFile -Path $p.FwBackup -Text (Get-NetFirewallProfile | Select-Object Name, DefaultOutboundAction, Enabled | ConvertTo-Json) }
         catch { Write-VeroLog "WARNING: the firewall's settings could not be noted ($($_.Exception.Message)) - they are not restored automatically afterwards" $Action }
     }
     # the flag first: with it there, every later pass sets the block again. A flag that cannot be written does not stop the block
     try { New-Item -ItemType File -Path $p.Emergency -Force | Out-Null } catch { Write-VeroLog "WARNING: the emergency block could not be noted ($($_.Exception.Message))" $Action }
     Set-NetFirewallProfile -All -Enabled True -DefaultOutboundAction Block     # a profile that is switched off blocks nothing
+    if (-not (Test-Path $p.Emergency) -and -not (Test-Path $p.FwBackup)) { $script:EmergencyUnnoted = $true }
     Write-VeroLog 'EMERGENCY: WFP unavailable - Windows Firewall default outbound set to Block' $Action
 }
 
@@ -427,7 +431,7 @@ function Remove-VeroLegacyFirewall {
         if (Test-Path $p.Emergency) { Remove-Item $p.Emergency -Force }       # before the note: a flag left behind alone would read as "block without a note" next time
         Remove-Item $p.FwBackup -Force
         Write-VeroLog 'Windows Firewall default outbound restored' $Action
-    } elseif (Test-Path $p.Emergency) {
+    } elseif ((Test-Path $p.Emergency) -or $script:EmergencyUnnoted) {
         # the emergency block was set without a note of how the firewall was (the note could not be written): the block
         # itself still goes - back to Windows' own default; profiles that had been switched off stay switched on
         Set-NetFirewallProfile -All -DefaultOutboundAction NotConfigured
@@ -436,6 +440,7 @@ function Remove-VeroLegacyFirewall {
     $rules = @(Get-NetFirewallRule -Group $script:LegacyGroup -ErrorAction SilentlyContinue)
     if ($rules) { Remove-NetFirewallRule -Group $script:LegacyGroup; Write-VeroLog "removed $($rules.Count) Windows Firewall rule(s) of the old kill-switch" $Action }
     Remove-Item $p.Emergency -Force -ErrorAction SilentlyContinue
+    $script:EmergencyUnnoted = $false
 }
 
 # thin wrappers: the only places that touch the WFP engine (mockable in tests)
@@ -585,7 +590,7 @@ function Sync-VeroKillSwitchCore {
             $(if ($tun) { 'up' } elseif ($ForceDown) { 'BLOCKED for reconnect' } else { 'DOWN' }), $(if ($wsl) { 'bound' } else { '-' }), ($ips -join ','),
             $(if ($tun) { 'tunnel only' } else { ($dns -join ',') }), (Get-VeroTypeLabel $type), $(if ($sw -and ($tun -or -not $Config.Vm)) { 'open' } else { '-' })) $Action   # as the filters have it
     }
-    $liftEmergency = $applied -and ((Test-Path $p.Emergency) -or (Test-Path $p.FwBackup))   # lifted below, after the VM and WSL steps (the note of the old settings alone tells of a block too)
+    $liftEmergency = $applied -and ((Test-Path $p.Emergency) -or (Test-Path $p.FwBackup) -or $script:EmergencyUnnoted)   # lifted below, after the VM and WSL steps (the note of the old settings alone tells of a block too)
     # Hyper-V Default Switch VMs: their traffic never reaches these filters (62-HyperVAcl.ps1). Protected: port ACLs while
     # the tunnel is down - right after the filters, before the slower WSL step (after it they would come 3 s later).
     # On every change; while blocked also every sync, so a VM created meanwhile is covered. Not protected: none at all.

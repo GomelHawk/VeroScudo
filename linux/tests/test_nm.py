@@ -64,6 +64,11 @@ def test_parse_ip_addr_reads_point_to_point_links():
     assert a == {"lo": ["127.0.0.1"], "eth0": ["198.51.100.236"], "ppp0": ["192.0.2.103"]}
 
 
+def test_nm_dns_plain_addresses_only(monkeypatch):
+    monkeypatch.setattr(nm, "_nmcli", lambda *a, **k: "IP4.DNS[1]:192.168.1.1\nIP6.DNS[1]:\\:\\:ffff\\:192.0.2.53\nIP6.DNS[2]:fe80\\:\\:1%wlp2s0\nIP4.DNS[2]:127.0.0.1\n")
+    assert nm.nm_dns() == ["192.168.1.1", "fe80::1"]
+
+
 def test_nameservers_skip_loopback_stubs(tmp_path):
     f = tmp_path / "resolv.conf"
     f.write_text("nameserver 127.0.0.53\nnameserver 192.168.1.1\nnameserver fe80::1%wlp2s0\noptions edns0\n")

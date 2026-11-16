@@ -615,6 +615,49 @@ Describe 'the emergency block is always lifted again' {
         Test-Path $p.Emergency | Should -BeTrue
         Remove-TestFile $p.Emergency
     }
+    It 'the block in force is never noted as the firewall''s old settings' {
+        Mock -ModuleName VeroScudo.Core Write-VeroStateFile { }
+        $p = Get-VeroPath
+        Remove-TestFile $p.FwBackup
+        Set-Content -Path $p.Emergency -Value ''
+        & (Get-Module VeroScudo.Core) { Enable-VeroEmergencyBlock -Action test }
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroStateFile -Times 0 -Exactly
+        Remove-TestFile $p.Emergency
+    }
+    It 'a block set with neither its flag nor the note is remembered, not noted later, and lifted' {
+        Mock -ModuleName VeroScudo.Core Get-NetFirewallRule { }
+        Mock -ModuleName VeroScudo.Core Write-VeroStateFile { throw 'file in use' }
+        Mock -ModuleName VeroScudo.Core New-Item { throw 'no room' }
+        $p = Get-VeroPath
+        Remove-TestFile $p.FwBackup, $p.Emergency
+        & (Get-Module VeroScudo.Core) { Enable-VeroEmergencyBlock -Action test }
+        & (Get-Module VeroScudo.Core) { $script:EmergencyUnnoted } | Should -BeTrue
+        & (Get-Module VeroScudo.Core) { Enable-VeroEmergencyBlock -Action test }
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroStateFile -Times 1 -Exactly          # the first call only
+        & (Get-Module VeroScudo.Core) { Remove-VeroLegacyFirewall -Action test }
+        Should -Invoke -ModuleName VeroScudo.Core Set-NetFirewallProfile -Times 1 -Exactly -ParameterFilter { $All -and [string]$DefaultOutboundAction -eq 'NotConfigured' }
+        & (Get-Module VeroScudo.Core) { $script:EmergencyUnnoted } | Should -BeFalse
+    }
+}
+
+Describe 'the resolvers allowed while blocked' {
+    It 'are plain addresses only: one the filters would refuse is left out instead of stopping the whole filter set' {
+        $nic = [pscustomobject]@{ Name = 'Ethernet'; Description = 'Example Ethernet'; NetworkInterfaceType = 'Ethernet'; OperationalStatus = 'Up'; Id = [guid]::NewGuid().ToString() }
+        $nic | Add-Member -MemberType ScriptMethod -Name GetIPProperties -Value {
+            [pscustomobject]@{ DnsAddresses = @('192.168.1.1', '::ffff:192.0.2.53', 'fe80::1%12', 'fec0:0:0:ffff::1', '192.168.1.1', '2001:db8::53') | ForEach-Object { [ipaddress]$_ } } }
+        $script:dnsNic = $nic
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:dnsNic }
+        $got = & (Get-Module VeroScudo.Core) { Get-VeroDnsServer -ProfileName 'X' }
+        $got | Should -Be @('192.168.1.1', '2001:db8::53', 'fe80::1')
+    }
+}
+
+Describe 'the machine''s variables for a program the guard starts' {
+    It 'are read as stored: a %NAME% in a value is not filled in from this process''s environment' {
+        $m = & (Get-Module VeroScudo.Core) { Get-VeroMachineVariable }
+        $m | Should -BeOfType [hashtable]
+        [string]$m['windir'] | Should -Be '%SystemRoot%'
+    }
 }
 
 Describe 'the VPN server''s ports are for Windows itself, not for any program' {

@@ -261,9 +261,10 @@ def test_a_refused_ruleset_is_an_error_with_nfts_words_in_the_log(monkeypatch, c
 def test_a_lock_whose_process_id_went_to_another_process_is_stale(tmp_path, monkeypatch):
     from veroscudo import state
     store = StateStore(tmp_path / "run", tmp_path / "lib")
+    monkeypatch.setattr(state, "proc_started", lambda pid, proc=None: "4242")     # the start time is read on Linux only
     assert store.take_lock() and store.lock_alive()
     pid, started = store.lock.read_text().split()
-    assert int(pid) == os.getpid() and started == state.proc_started(os.getpid())
+    assert int(pid) == os.getpid() and started == "4242"
     store.lock.write_text(f"{pid} 1")                             # the same id, started at another time
     assert not store.lock_alive() and not store.lock.exists()
     store.lock.write_text(pid)                                    # a lock from an earlier version: the id alone
@@ -272,6 +273,16 @@ def test_a_lock_whose_process_id_went_to_another_process_is_stale(tmp_path, monk
     assert store.lock_alive()
     old = time.time() - 60
     os.utime(store.lock, (old, old))                              # empty for a minute: nobody is going to
+    assert not store.lock_alive()
+
+
+def test_a_lock_without_a_start_time_goes_by_the_process_id(tmp_path, monkeypatch):
+    from veroscudo import state
+    store = StateStore(tmp_path / "run", tmp_path / "lib")
+    monkeypatch.setattr(state, "proc_started", lambda pid, proc=None: None)       # macOS: no /proc
+    assert store.take_lock() and store.lock.read_text() == str(os.getpid())
+    assert store.lock_alive() and not store.take_lock()
+    store.lock.write_text("999999999")
     assert not store.lock_alive()
 
 
