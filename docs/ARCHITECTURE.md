@@ -7,7 +7,7 @@ what this protects against and what it does not - is in [`SECURITY.md`](SECURITY
 | Platform | Status | Kill-switch | VPN control |
 |---|---|---|---|
 | Windows 10/11 | stable | WFP filters (own provider + sublayer) | RAS (`RasDial` API, `rasdial`) |
-| Linux (Ubuntu 22.04+) | beta - unit-tested, no real-machine log yet | nftables table `inet veroscudo` | NetworkManager (`nmcli`, libnm) |
+| Linux (Ubuntu 22.04+) | stable - unit-tested, live-tested on a real machine (SSTP, OpenVPN, WireGuard, Hiddify) | nftables table `inet veroscudo` | NetworkManager (`nmcli`, libnm) |
 | macOS | alpha - unit-tested, never run on a Mac | pf anchor `com.apple/250.VeroScudo` | `scutil --nc` |
 
 ## The rule

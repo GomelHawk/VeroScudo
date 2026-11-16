@@ -1,4 +1,4 @@
-# VeroScudo for Linux (NetworkManager + nftables) — beta
+# VeroScudo for Linux (NetworkManager + nftables)
 
 Same rule as on Windows: **VPN on + connection lost ⇒ no network until the VPN is back or you
 turn it off.** See `../docs/ARCHITECTURE.md`.
@@ -103,8 +103,9 @@ in NetworkManager when the link is dead, so VeroScudo reads its handshakes (`wg`
 no handshake for 3 minutes counts as a drop and the connection is restarted. Give the peer a
 `PersistentKeepalive` (e.g. 25). Every switch to a WireGuard profile shows a notice.
 
-**Status: beta.** The state machine and the nftables ruleset are unit-tested, every ruleset passes `nft -c`, and
+**Status: stable.** The state machine and the nftables ruleset are unit-tested, every ruleset passes `nft -c`, and
 `tests-local/container-test.sh` installs, turns on, upgrades, turns off and uninstalls in a systemd container on Ubuntu
-22.04, 24.04 and 26.04 (CI). On a real machine with a real VPN (SSTP) `tests-local/live.sh` passed with no leak: On,
-Reconnect, the VPN dying, a network drop, your own hang-up, Off (`../docs/TESTING.md`). Not yet checked on a real
-machine: the tray, a reboot while armed, uninstall, and the other VPN types.
+22.04, 24.04 and 26.04 (CI). On a real machine `tests-local/live.sh` passed with no leak for SSTP, OpenVPN, WireGuard and
+Hiddify (VPN mode): On, Reconnect, the VPN dying, a network drop, the VPN server unreachable, your own hang-up, Off; the
+tray, a reboot while on and uninstall (also `--purge`) were checked by hand (`../docs/TESTING.md`). Not checked on a real
+machine: L2TP, PPTP, IKEv2 and OpenConnect profiles.

@@ -5,6 +5,10 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed: Linux is stable
+- Live-tested on a real machine with SSTP, OpenVPN, WireGuard and Hiddify (VPN mode) profiles - no leak in any phase,
+  the VPN server unreachable included - plus the tray, a reboot while on and uninstall (`docs/TESTING.md`).
+
 ### Fixed: Linux - Hiddify 5 not found by the import
 - Hiddify 5 runs VPN mode through its own root service, which keeps the live config in
   `/var/lib/hiddify-admin-bgservice/core/work/data/current-config.json` (root only). The import now finds it (the

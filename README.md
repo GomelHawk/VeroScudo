@@ -8,7 +8,7 @@
   <a href="https://github.com/GomelHawk/VeroScudo/actions/workflows/ci.yml"><img src="https://github.com/GomelHawk/VeroScudo/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/GomelHawk/VeroScudo/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licence"></a>
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078d4.svg" alt="Windows 10/11">
-  <img src="https://img.shields.io/badge/Linux-NetworkManager%20(beta)-e95420.svg" alt="Linux beta">
+  <img src="https://img.shields.io/badge/Linux-NetworkManager-e95420.svg" alt="Linux">
   <img src="https://img.shields.io/badge/macOS-pf%20(alpha)-999.svg" alt="macOS alpha">
 </p>
 
@@ -27,7 +27,7 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 | Platform | Status |
 | :-- | :-- |
 | Windows 10/11 | **stable** - verified with the live leak tests |
-| Linux (Ubuntu 22.04+, NetworkManager) | **beta** - unit-tested, install/on/off/uninstall tested in a container in CI, real-machine leak test passed with SSTP |
+| Linux (Ubuntu 22.04+, NetworkManager) | **stable** - verified with the live leak tests (SSTP, OpenVPN, WireGuard, Hiddify), the tray, a reboot while on and uninstall on a real machine |
 | macOS (pf + scutil) | **alpha** - unit-tested, install/uninstall checked in CI, never run with a real VPN |
 
 ## What you get
@@ -134,7 +134,7 @@ To update, run `Install.ps1` again; it keeps your config (a 1.0 single-profile c
 1.0 firewall rules are replaced by WFP filters - new filters first, so an armed PC is never open). To remove everything:
 `Uninstall.ps1` (add `-Purge` to also delete config and credential).
 
-### Linux (Ubuntu 22.04+, NetworkManager) - beta
+### Linux (Ubuntu 22.04+, NetworkManager)
 
 1. Create the VPN connection in **Settings > Network > VPN** (or let IT do it) and connect once by hand.
 2. Download the [latest release](https://github.com/GomelHawk/VeroScudo/releases) (`VeroScudo-<version>-linux.tar.gz`),
@@ -151,8 +151,8 @@ To update, run `Install.ps1` again; it keeps your config (a 1.0 single-profile c
 3. Connect the VPN - as usual, or with the tray's **Turn VPN on**. The shield turns green. Done.
 
 Uninstall: tray > **About** > *Uninstall…*, or `sudo /opt/veroscudo/uninstall.sh` (add `--purge` to also delete the
-config). See [`linux/README.md`](linux/README.md). CI installs, uses and uninstalls it in a container; the real-machine
-leak test passed with an SSTP profile (`linux/tests-local/live.sh`).
+config). See [`linux/README.md`](linux/README.md). CI installs, uses and uninstalls it in a container; on a real machine
+the leak test (`linux/tests-local/live.sh`) passed with SSTP, OpenVPN, WireGuard and Hiddify profiles.
 
 ### macOS - alpha
 

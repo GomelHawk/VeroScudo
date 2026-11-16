@@ -51,7 +51,6 @@ Run from an elevated PowerShell with the VPN connected and the credential stored
 - A manual disconnect (`rasdial /disconnect`) still disarms - its 631 has to name the connection id recorded at arm or
   the newest System-log connect of that profile.
 - On a Windows without the Hyper-V firewall (Windows 10): On, Off and Status work, and the log says VM traffic is not covered.
-- Linux (beta): the daemon starts under the new systemd hardening; `nft list table inet veroscudo` shows the input chain.
 
 Expected: every leak probe `False` while blocked, `dns=True` (documented), filters present
 throughout, all phases `PASS`.
@@ -104,22 +103,30 @@ Windows 11 25H2, SSTP profile, strict mode, through the real tasks:
 
 ### Linux run
 
-Ubuntu 26.04 in a Hyper-V VM, SSTP profile (`network-manager-sstp`), `sudo linux/tests-local/live.sh`:
+Ubuntu 26.04 in a Hyper-V VM, one profile of each type, `sudo linux/tests-local/live.sh` (`vt live`) - phases 1-on,
+2-reconnect (Hiddify: you disconnect and connect in Hiddify), 3-vpn-dies, 4-drop, 4b-unreachable (the VPN server dropped
+by a test rule; not for Hiddify), 5-hangup, 6-off:
 
 ```
-1-on           protected after 0 s, exit through the VPN
-2-reconnect    protected again after 4 s
-3-vpn-dies     pppd killed -> blocked after 1 s, redialed, protected again after 5 s (tunnel ppp1)
-4-drop         network card down 30 s -> blocked during it, protected 0 s after it came back
-5-hangup       nmcli connection down -> VeroScudo off after 0 s
-6-off          kill-switch table gone, network normal
-probes 44 (blocked 20), leaks 0 -> PASS
+SSTP (network-manager-sstp)       probes 56 (blocked 29), leaks 0 -> PASS
+OpenVPN (network-manager-openvpn) probes 62 (blocked 28), leaks 0 -> PASS
+WireGuard (NetworkManager)        probes 49 (blocked 2),  leaks 0 -> PASS
+Hiddify 5.5.5 (VPN mode, .deb)    probes 38 (blocked 6),  leaks 0 -> PASS
 ```
 
-Still by hand on Linux: the tray (colours, windows, profile switch), a reboot while armed, uninstall; other VPN types
-(OpenVPN, WireGuard, L2TP).
+By hand, all as expected: the tray (colours, status window with Copy / Clear / Statistics, profile switch, Settings and
+Import, Keep awake, Exit and the menu entry), a reboot while on (`vt boot`: the kill-switch was in place before
+NetworkManager started, protected after login), uninstall and `--purge` (`vt gone`: nothing left; config and log kept
+without `--purge`). Not run on a real machine: L2TP, PPTP, IKEv2, OpenConnect.
 
 ## Things that bit us, so you don't have to
+
+- A VM behind a Windows host that runs Hiddify (TUN): the host's Hiddify carries the VM's UDP and lost about half of the
+  WireGuard handshakes after the interface was re-created - with VeroScudo stopped too (`vt wgcycle`). Run the VM's live
+  tests with Hiddify off on the host.
+- Hiddify 5.5's Linux `.deb`: VPN mode fails with "exit status 127" - its service looks for `./lib/hiddify-core.so` in the
+  wrong folder (fix: `vt hfix`, or the commands in `linux/README.md`). Hiddify 5's core runs in its root service and keeps
+  its own conntrack mark: a kill-switch that sets its own mark on Hiddify's connections loses their replies.
 
 - A 5-second `netsh wlan` reconnect does **not** drop an SSTP tunnel; to produce a real drop,
   block the server first.
