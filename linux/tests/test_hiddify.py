@@ -338,9 +338,16 @@ def hcfg():
 
 def test_nft_permits_each_endpoint_for_its_protocols():
     rs = firewall.render_ruleset(hcfg(), [], "tun0", vm_allowed=True, endpoints=EPS)
-    assert "ip daddr { 203.0.113.7, 203.0.113.8 } meta l4proto { tcp, udp } th dport 443 ct mark set 0x5653 accept" in rs
-    assert "ip6 daddr { 2001:db8::7 } meta l4proto { tcp, udp } th dport 51820 ct mark set 0x5653 accept" in rs
-    assert "ip daddr { 203.0.113.53 } tcp dport 853 ct mark set 0x5653 accept" in rs
+    # no VeroScudo mark on Hiddify's flows (its core keeps its own conntrack mark); the replies are let in explicitly
+    assert "ip daddr { 203.0.113.7, 203.0.113.8 } meta l4proto { tcp, udp } th dport 443 accept" in rs
+    assert "ip6 daddr { 2001:db8::7 } meta l4proto { tcp, udp } th dport 51820 accept" in rs
+    assert "ip daddr { 203.0.113.53 } tcp dport 853 accept" in rs
+    assert ("ip saddr { 203.0.113.7, 203.0.113.8 } meta l4proto { tcp, udp } th sport 443 ct state established,related "
+            "accept") in rs
+    assert "ip saddr { 203.0.113.53 } tcp sport 853 ct state established,related accept" in rs
+    out, inp = rs.split("chain input")[0], rs.split("chain input")[1].split("chain forward")[0]
+    assert "saddr" not in out and "daddr { 203.0.113.7" not in inp
+    assert "203.0.113" not in "".join(ln for ln in rs.splitlines() if "ct mark set" in ln)
     assert 'oifname "tun0" accept' in rs
     down = firewall.render_ruleset(hcfg(), [], None, vm_allowed=False, endpoints=EPS)
     assert "203.0.113.7" in down and "tun0" not in down                        # blocked: Hiddify may still reach its servers
@@ -357,8 +364,9 @@ def test_nft_lets_hiddifys_service_out_by_its_cgroup_and_pf_ignores_it():
     cg = (hiddify.SERVICE_CGROUP, 4242)
     for tun in ("tun0", None):                                          # in every state, like its servers
         rs = firewall.render_ruleset(hcfg(), [], tun, vm_allowed=False, endpoints=EPS, cgroup=cg)
-        assert ('socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" ct mark set 0x5653 accept '
-                'comment "Hiddify core, cgroup 4242"') in rs
+        out, inp = rs.split("chain input")[0], rs.split("chain input")[1].split("chain forward")[0]
+        assert 'socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" accept comment "Hiddify core, cgroup 4242"' in out
+        assert '    socket cgroupv2 level 2 "system.slice/HiddifyAdminBG.service" accept\n' in inp      # its replies
     assert "cgroup" not in firewall.render_ruleset(hcfg(), [], "tun0", vm_allowed=False, endpoints=EPS)
     assert "cgroup" not in pf.render_ruleset(hcfg(), [], "utun5", vm_allowed=False, endpoints=EPS, cgroup=cg)
     for bad in ('x" accept; #', "a b", "../etc", ""):

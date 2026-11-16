@@ -88,6 +88,7 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         "  chain output {",
         "    type filter hook output priority 0; policy drop;",
         "    oifname lo accept",
+        "    fib daddr type local accept",                               # to this machine's own addresses: never leaves it
     ]
     if tun_iface:
         lines.append(f'    oifname "{tun_iface}" accept')
@@ -124,15 +125,21 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} {proto} dport {plist} {'accept' if wg else keep}")
             else:
                 lines.append(f"    {fam} daddr {{ {', '.join(lst)} }} meta l4proto {proto} {keep}")
+    # Hiddify: its core (sing-box, auto_redirect) keeps its own conntrack mark on its connections and routes their replies
+    # by it - VeroScudo's mark would overwrite it (as with WireGuard above), so these permits leave the mark alone and the
+    # replies are let in explicitly (input chain)
+    cg_match = None
     if cgroup:                                                          # Hiddify's root service, to any address (hiddify.py)
         path, cid = cgroup
         if not _CGROUP.match(path) or {".", ".."} & set(path.split("/")) or not isinstance(cid, int):
             raise ValueError(f"unsafe cgroup path {path!r}")
-        lines.append(f'    socket cgroupv2 level {path.count("/") + 1} "{path}" {keep} comment "Hiddify core, cgroup {cid}"')
-    for ver, port, protos, addrs in group_endpoints(endpoints):        # Hiddify: its servers and direct DNS servers
+        cg_match = f'socket cgroupv2 level {path.count("/") + 1} "{path}"'
+        lines.append(f'    {cg_match} accept comment "Hiddify core, cgroup {cid}"')
+    groups = group_endpoints(endpoints)
+    for ver, port, protos, addrs in groups:                             # Hiddify: its servers and direct DNS servers
         fam = "ip" if ver == 4 else "ip6"
         l4 = f"{protos[0]} dport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th dport {port}"
-        lines.append(f"    {fam} daddr {{ {', '.join(addrs)} }} {l4} {keep}")
+        lines.append(f"    {fam} daddr {{ {', '.join(addrs)} }} {l4} accept")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):
         for cidr in lst:
             lines.append(f"    {fam} daddr {cidr} {keep}")
@@ -160,6 +167,12 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
                 elif wg:                                                 # WireGuard: the server's replies (see output)
                     plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
                     lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} {proto} sport {plist} accept")
+    if cg_match:                                                        # Hiddify: replies to its core's own sockets
+        lines.append(f"    {cg_match} accept")
+    for ver, port, protos, addrs in groups:                             # Hiddify: replies from its servers (see output)
+        fam = "ip" if ver == 4 else "ip6"
+        l4 = f"{protos[0]} sport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th sport {port}"
+        lines.append(f"    {fam} saddr {{ {', '.join(addrs)} }} {l4} ct state established,related accept")
     for fam, lst in (("ip", lan4), ("ip6", lan6)):                       # lanAllow: both directions
         for cidr in lst:
             lines.append(f"    {fam} saddr {cidr} accept")

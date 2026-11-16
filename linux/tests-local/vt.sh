@@ -79,17 +79,37 @@ print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel
     echo "guard log:"; tail -n 10 /var/log/veroscudo.log | cut -c12-150
     echo "kill-switch permits:"; nft list table inet veroscudo 2>/dev/null | grep -E "daddr|ifname|cgroupv2|skuid" | grep -v -E "/(8|10|12|16|24) " | head -12 | cut -c1-110
     echo "DNS servers: $(resolvectl dns 2>/dev/null | grep -v -E ': *$' | tr '\n' ';' | cut -c1-120)"
-    # 10 s: every NEW connection that leaves outside the tunnel (allowed or not) - meanwhile a lookup and a fetch by IP
+    # 10 s: traffic counted before (-10) and after (+10) VeroScudo's chains (priority 0) - what is seen before but not after
+    # was dropped by VeroScudo. Outgoing: new connections not into the tunnel; incoming: packets not from the tunnel.
     tn="$(veroscudo status | awk -F' *: ' '$1 == "tunnel" {print $2}')"; case "$tn" in -|"") tn=lo ;; esac
     nft delete table inet vsflows 2>/dev/null
-    printf 'table inet vsflows {\n set seen { type ipv4_addr . inet_proto . inet_service; flags dynamic; size 512; }\n chain o {\n  type filter hook output priority -10; policy accept;\n  ct state new oifname != { "lo", "%s" } meta l4proto { tcp, udp } add @seen { ip daddr . meta l4proto . th dport }\n }\n}\n' "$tn" | nft -f - || echo "(flow capture not possible)"
+    {
+      echo 'table inet vsflows {'
+      for x in ob oa ib ia; do echo "  set $x { type ifname . ipv4_addr . inet_proto . inet_service; flags dynamic; size 1024; }"; done
+      echo "  chain o1 { type filter hook output priority -10; policy accept; ct state new oifname != { \"lo\", \"$tn\" } meta l4proto { tcp, udp } add @ob { oifname . ip daddr . meta l4proto . th dport }; }"
+      echo "  chain o2 { type filter hook output priority 10; policy accept; ct state new oifname != { \"lo\", \"$tn\" } meta l4proto { tcp, udp } add @oa { oifname . ip daddr . meta l4proto . th dport }; }"
+      echo "  chain i1 { type filter hook input priority -10; policy accept; iifname != { \"lo\", \"$tn\" } meta l4proto { tcp, udp } add @ib { iifname . ip saddr . meta l4proto . th sport }; }"
+      echo "  chain i2 { type filter hook input priority 10; policy accept; iifname != { \"lo\", \"$tn\" } meta l4proto { tcp, udp } add @ia { iifname . ip saddr . meta l4proto . th sport }; }"
+      echo '}'
+    } | nft -f - || echo "(traffic capture not possible)"
     echo "name lookup (example.com): $(timeout 6 getent ahostsv4 example.com | awk 'NR == 1 {print $1}' || true)"
     echo "fetch by IP, no DNS (https://1.1.1.1): $(curl -s -m 6 -o /dev/null -w '%{http_code}' https://1.1.1.1 || true)"
-    sleep 3
-    echo "new connections outside the tunnel in these 10 s:"
-    nft list set inet vsflows seen 2>/dev/null | tr -d '\n\t' | grep -oE 'elements = \{[^}]*' | sed 's/elements = {//' | tr ',' '\n' | sed 's/^ */  /' | head -15
+    echo "fetch by name (https://example.com): $(curl -s -m 6 -o /dev/null -w '%{http_code}' https://example.com || true)"
+    sleep 2
+    elems() { nft list set inet vsflows "$1" 2>/dev/null | tr -d '\n\t' | grep -oE 'elements = \{[^}]*' | sed 's/elements = {//' | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep . | sort -u; }
+    w="$(mktemp -d)"
+    elems ob > "$w/ob"; elems oa > "$w/oa"; elems ib > "$w/ib"; elems ia > "$w/ia"
     nft delete table inet vsflows 2>/dev/null
-    echo "Hiddify's own connections (peer):"; ss -tunpH 2>/dev/null | grep -i hiddify | awk '{print $1, $6}' | sort | uniq -c | head -8
+    echo "OUT, allowed by VeroScudo:"; head -10 "$w/oa" | sed 's/^/  /'
+    echo "OUT, DROPPED by VeroScudo:"; comm -23 "$w/ob" "$w/oa" | head -10 | sed 's/^/  /'
+    echo "IN, DROPPED by VeroScudo:"; comm -23 "$w/ib" "$w/ia" | head -10 | sed 's/^/  /'
+    rm -f "$w/ob" "$w/oa" "$w/ib" "$w/ia"; rmdir "$w"
+    echo "other nftables tables: $(nft list tables | grep -v -E 'veroscudo$' | awk '{print $3}' | paste -sd' ')"
+    for t in $(nft list tables | grep -i -E 'sing|hiddify' | awk '{print $2 ":" $3}'); do
+      echo "  $t chains: $(nft list table "${t%%:*}" "${t#*:}" | grep -E 'type .* hook' | sed -E 's/^\s*//; s/;.*//' | paste -sd'|' | cut -c1-150)"
+    done
+    echo "ip rules: $(ip rule | grep -v -E 'lookup (local|main|default)$' | cut -c1-60 | paste -sd';' | cut -c1-200)"
+    echo "Hiddify's connections (state peer):"; ss -tunapH 2>/dev/null | grep -i hiddify | grep -v '127.0.0.1' | awk '{print $1, $2, $6}' | sort | uniq -c | head -8
     echo "exit address now: $(curl -s --max-time 6 https://ifconfig.me || echo none)" ;;
   cgtest)
     cg="system.slice/HiddifyAdminBG.service"

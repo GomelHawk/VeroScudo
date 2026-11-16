@@ -17,6 +17,9 @@ All notable changes to VeroScudo are recorded here. The format follows
   Hiddify's core resolves them with its own DNS (other addresses behind a CDN) and talks to that DNS too, so with
   VeroScudo on nothing went through. A kernel that cannot match a service (no `nft_socket`) falls back to the server
   list, logged once.
+- Linux: Hiddify's permits no longer set VeroScudo's conntrack mark - Hiddify's core keeps its own mark on its connections
+  and routes their replies by it (as NetworkManager does for WireGuard); the replies to its service and from its servers
+  are let in explicitly. Traffic to the machine's own addresses is always allowed (it never leaves the machine).
 
 ### Changed: status window - Copy next to Clear, a Statistics button (Windows, Linux, macOS)
 - The report is copied with a **Copy** link next to *Clear* in Recent events (*Copied* after a click); the button row
