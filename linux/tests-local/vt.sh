@@ -21,7 +21,7 @@ OWNER="${SUDO_USER:-root}"
 HOME_DIR="$(getent passwd "$OWNER" | cut -d: -f6)"
 
 if [ -z "${VT_PULLED:-}" ]; then          # update, then run the updated script
-  sudo -u "$OWNER" git -C "$REPO" pull --ff-only -q || echo "(git pull failed - running the version on disk)"
+  timeout 20 sudo -u "$OWNER" git -C "$REPO" pull --ff-only -q || echo "(git pull failed - running the version on disk)"
   VT_PULLED=1 exec "$SELF" "$@"
 fi
 
@@ -77,7 +77,18 @@ print("Hiddify running:", hiddify.running(), "| its tunnel now:", hiddify.tunnel
     echo "shared for the tray: $(cat /run/veroscudo/hiddify-tun.json 2>&1)"
     veroscudo status | grep -E "^(armed|connected|state|tunnel) "
     echo "guard log:"; tail -n 10 /var/log/veroscudo.log | cut -c12-150
-    echo "kill-switch permits:"; nft list table inet veroscudo 2>/dev/null | grep -E "daddr|ifname" | grep -v -E "dport 53 |/(8|10|12|16|24) " | head -8 | cut -c1-110
+    echo "kill-switch permits:"; nft list table inet veroscudo 2>/dev/null | grep -E "daddr|ifname|cgroupv2|skuid" | grep -v -E "/(8|10|12|16|24) " | head -12 | cut -c1-110
+    echo "DNS servers: $(resolvectl dns 2>/dev/null | grep -v -E ': *$' | tr '\n' ';' | cut -c1-120)"
+    # 10 s: every NEW connection that leaves outside the tunnel (allowed or not) - meanwhile a lookup and a fetch by IP
+    tn="$(veroscudo status | awk -F' *: ' '$1 == "tunnel" {print $2}')"; case "$tn" in -|"") tn=lo ;; esac
+    nft delete table inet vsflows 2>/dev/null
+    printf 'table inet vsflows {\n set seen { type ipv4_addr . inet_proto . inet_service; flags dynamic; size 512; }\n chain o {\n  type filter hook output priority -10; policy accept;\n  ct state new oifname != { "lo", "%s" } meta l4proto { tcp, udp } add @seen { ip daddr . meta l4proto . th dport }\n }\n}\n' "$tn" | nft -f - || echo "(flow capture not possible)"
+    echo "name lookup (example.com): $(timeout 6 getent ahostsv4 example.com | awk 'NR == 1 {print $1}' || true)"
+    echo "fetch by IP, no DNS (https://1.1.1.1): $(curl -s -m 6 -o /dev/null -w '%{http_code}' https://1.1.1.1 || true)"
+    sleep 3
+    echo "new connections outside the tunnel in these 10 s:"
+    nft list set inet vsflows seen 2>/dev/null | tr -d '\n\t' | grep -oE 'elements = \{[^}]*' | sed 's/elements = {//' | tr ',' '\n' | sed 's/^ */  /' | head -15
+    nft delete table inet vsflows 2>/dev/null
     echo "Hiddify's own connections (peer):"; ss -tunpH 2>/dev/null | grep -i hiddify | awk '{print $1, $6}' | sort | uniq -c | head -8
     echo "exit address now: $(curl -s --max-time 6 https://ifconfig.me || echo none)" ;;
   cgtest)
