@@ -162,10 +162,13 @@ function Invoke-VeroWgDial {
 }
 
 function Test-VeroWgOwnRemoval([string]$Name) {
-    <# VeroScudo itself removed this tunnel within the last minute (Invoke-VeroWgHangUp left the note). #>
-    $f = (Get-VeroPath).WgOwnRemoval
-    try { $j = Get-Content -LiteralPath $f -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return $false }
-    [string]$j.Profile -eq $Name -and ((Get-Date) - [datetime]::Parse([string]$j.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds -lt 60
+    <# VeroScudo itself removed this tunnel: the redial (or Reconnect) that holds the lock right now left the note, within the
+       last minute. A note of an earlier run never counts - your Off in the app after it is your Off. #>
+    $p = Get-VeroPath
+    try { $j = Get-Content -LiteralPath $p.WgOwnRemoval -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return $false }
+    if ([string]$j.Profile -ne $Name -or -not $j.PSObject.Properties['Pid'] -or -not (Test-VeroLockAlive)) { return $false }
+    $holder = Get-Content -LiteralPath $p.Lock -ErrorAction SilentlyContinue | Select-Object -First 1
+    [string]$j.Pid -eq [string]$holder -and ((Get-Date) - [datetime]::Parse([string]$j.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds -lt 60
 }
 
 function Invoke-VeroWgHangUp {
@@ -174,7 +177,7 @@ function Invoke-VeroWgHangUp {
     if ((Get-VeroWgState $ProfileName) -eq 'missing') { return }
     $exe = Join-Path (Get-VeroWgDir) 'wireguard.exe'
     # the note first: the watchdog must not take this removal for your Off in the WireGuard app
-    try { Write-VeroStateFile -Path (Get-VeroPath).WgOwnRemoval -Text (@{ Profile = $ProfileName; Time = (Get-Date).ToString('o') } | ConvertTo-Json) } catch { Write-Verbose 'own-removal note not written' }
+    try { Write-VeroStateFile -Path (Get-VeroPath).WgOwnRemoval -Text (@{ Profile = $ProfileName; Pid = $PID; Time = (Get-Date).ToString('o') } | ConvertTo-Json) } catch { Write-Verbose 'own-removal note not written' }
     $null = (Start-VeroCleanProcess -FilePath $exe -ArgumentList ('/uninstalltunnelservice {0}' -f $ProfileName)).WaitForExit(60000)
     $t = Get-Date
     while ((Get-VeroWgState $ProfileName) -ne 'missing' -and ((Get-Date) - $t).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 500 }
