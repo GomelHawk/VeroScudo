@@ -418,7 +418,7 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         $t = Get-SpecText (Get-VeroFilterSpec -Config $script:cfgH -PermitKind 'program' -ProgramApps $script:apps -TunnelLuid 77)
         $app = @($t | Where-Object { $_ -like 'VPN app*' })
         $app.Count | Should -Be 4                                              # 2 programs x connect v4/v6
-        foreach ($x in $app) { $x | Should -Match "$($script:F.App)=.*Hiddify(Cli)?\.exe"; $x | Should -Not -Match $script:F.Addr }
+        foreach ($x in $app) { $x | Should -Match "$($script:F.App)=.*Hiddify(Cli)?\.exe"; $x | Should -Not -Match $script:F.Addr; $x | Should -Match 'af043a0a=SYSTEM\+ADMINS' }   # elevated only
         @($t | Where-Object { $_ -like 'VPN server*' }).Count | Should -Be 0
         @($t | Where-Object { $_ -like 'VPN tunnel*' }).Count | Should -Be 4
     }

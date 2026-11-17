@@ -98,7 +98,8 @@ function Get-VeroFilterSpec {
     # UDP); outbound only - nothing may connect in to them. No program known: nothing at all (never a program-less permit).
     if ($PermitKind -eq 'program') {
         foreach ($app in @($ProgramApps | Where-Object { $_ })) {
-            foreach ($l in $C4, $C6) { $null = (New-Spec "VPN app $([IO.Path]::GetFileName($app))" $l $true $permit).App($app) }
+            # elevated only (VPN mode runs elevated): the same program started by anyone else stays blocked
+            foreach ($l in $C4, $C6) { $null = (New-Spec "VPN app $([IO.Path]::GetFileName($app))" $l $true $permit).App($app).Privileged() }
         }
     }
 
