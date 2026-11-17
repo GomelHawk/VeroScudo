@@ -21,10 +21,6 @@ WATCHDOG_SECONDS = 15
 # its records differently - see docs/ARCHITECTURE.md, "Timing windows". Both markers are consumed on first use.
 OFF_MARKER_SECONDS = 60.0
 RENEW_MARKER_SECONDS = 120.0
-# After your Off, a dial VeroScudo itself had started may still succeed: for this long it is taken down again instead of
-# turning the VPN back on (Windows: Test-VeroRecentOff, the same 30 s).
-OFF_RECENT_SECONDS = 30.0
-
 
 OFF_STAMP = "off.at"            # when Off last ran (a redial in flight must not undo it); in the run folder
 
@@ -410,10 +406,8 @@ class Guard:
         return self._take_marker(self.renew_marker, RENEW_MARKER_SECONDS)
 
     def _off_recent(self) -> bool:
-        try:
-            return 0 <= time.time() - self.off_stamp.stat().st_mtime <= OFF_RECENT_SECONDS
-        except OSError:
-            return False
+        """You pressed Off and nothing armed since (arm removes the note) - however long a dial in flight then takes."""
+        return self.off_stamp.exists()
 
     def off(self) -> None:
         self.renew_marker.unlink(missing_ok=True)

@@ -215,6 +215,19 @@ def test_a_dial_that_succeeds_after_off_is_taken_down_not_armed(guard):
     assert g.store.armed
 
 
+def test_a_dial_that_succeeds_long_after_off_is_still_taken_down(guard):
+    g, st, _ = guard
+    st["fail"] = False
+    g.arm()
+    assert g.store.take_lock()
+    g.off()
+    os.utime(g.off_stamp, (time.time() - 90, time.time() - 90))  # NetworkManager may take up to ~60 s to connect a VPN
+    st["connected"].add("Work")
+    g.on_event_up("Work")
+    assert not g.store.armed and st["down"] == ["Work"]
+    g.store.release_lock()
+
+
 def test_on_after_off_is_not_held_back(guard):
     g, st, _ = guard
     st["fail"] = False

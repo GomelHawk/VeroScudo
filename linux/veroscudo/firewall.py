@@ -176,9 +176,10 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
             for proto, ports in server_rules(cfg.current):
                 if not ports:
                     lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} meta l4proto {proto} accept")
-                elif wg:                                                 # WireGuard: the server's replies (see output)
+                elif wg:                                                 # WireGuard: the server's replies (see output) -
+                    # replies only: a forged sender address must not reach the host's own UDP services
                     plist = str(ports[0]) if len(ports) == 1 else "{ " + ", ".join(str(x) for x in ports) + " }"
-                    lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} {proto} sport {plist} accept")
+                    lines.append(f"    {fam} saddr {{ {', '.join(lst)} }} {proto} sport {plist} ct state established,related accept")
     if cg_match:                                                        # Hiddify: replies to its core's own sockets
         lines.append(f"    {cg_match} ct state established,related accept")
     for ver, port, protos, addrs in groups:                             # Hiddify: replies from its servers (see output)

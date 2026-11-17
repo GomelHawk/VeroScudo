@@ -242,8 +242,8 @@ function Start-VeroRedial {
     <# Three levels: Invoke-VeroReconnect is the redial loop (one at a time, by the reconnect lock); the 'redial' action
        is the Redial task's way into it; this function is how everybody else gets it going - the watchdog, the Terminated
        task and a profile switch start the Redial task and return. The watchdog so stays what it is, a check every 15 s
-       also during an outage, and the Terminated task is free for the next event. (Your own On and Reconnect run the
-       loop in their own task: they are the ones you wait for.)
+       also during an outage, and the Terminated task is free for the next event; so is On. (Your own Reconnect runs the
+       loop in its own task.)
        From inside the Redial task itself (the loop took a pending switch) the task cannot be started again - it runs -
        so the loop goes on here. So does it on an install from before the task existed. #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')

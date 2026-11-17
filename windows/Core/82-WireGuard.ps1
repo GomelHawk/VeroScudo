@@ -154,7 +154,7 @@ function Invoke-VeroWgDial {
     } else {
         $conf = Join-Path (Get-VeroWgDir) "Data\Configurations\$name.conf.dpapi"
         if (-not (Test-Path $conf)) { Write-VeroLog "ERROR: WireGuard tunnel '$name' not found - import it in the WireGuard app first" $Action; return }
-        Start-Process -FilePath $exe -ArgumentList ('/installtunnelservice "{0}"' -f $conf) -WindowStyle Hidden -Wait
+        $null = (Start-VeroCleanProcess -FilePath $exe -ArgumentList ('/installtunnelservice "{0}"' -f $conf)).WaitForExit(60000)   # elevated: the system's environment only
     }
     $t = Get-Date
     while (((Get-Date) - $t).TotalSeconds -lt 15) { Start-Sleep -Seconds 1; if ((Get-VeroWgHealthNow $name) -eq 'up') { return }; if (Get-VeroPendingSwitch) { return } }
@@ -165,7 +165,7 @@ function Invoke-VeroWgHangUp {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     if ((Get-VeroWgState $ProfileName) -eq 'missing') { return }
     $exe = Join-Path (Get-VeroWgDir) 'wireguard.exe'
-    Start-Process -FilePath $exe -ArgumentList ('/uninstalltunnelservice {0}' -f $ProfileName) -WindowStyle Hidden -Wait
+    $null = (Start-VeroCleanProcess -FilePath $exe -ArgumentList ('/uninstalltunnelservice {0}' -f $ProfileName)).WaitForExit(60000)
     $t = Get-Date
     while ((Get-VeroWgState $ProfileName) -ne 'missing' -and ((Get-Date) - $t).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 500 }
 }

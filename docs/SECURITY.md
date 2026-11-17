@@ -20,7 +20,7 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 | Threat | How |
 |---|---|
 | The tunnel drops (Wi-Fi, server, sleep, reboot) and apps carry on over the plain network | default-block filters stay in force; redial forever |
-| Apps that have their own firewall allow rules (Store apps, installers, GPO), QUIC, ICMP, IPv6 | Windows: WFP filters in an own sublayer - a block there is final; Linux: a `policy drop` table; all protocols, both IP versions, inbound and outbound |
+| Apps that have their own firewall allow rules (Store apps, installers, GPO), QUIC, ICMP, IPv6 | Windows: WFP filters in an own top-priority sublayer - firewall rules cannot override its block (see *Out of scope* for another layer of the same priority); Linux: a `policy drop` table; all protocols, both IP versions, inbound and outbound |
 | DNS leaking to the local network while protected | no DNS permit outside the tunnel while it is up |
 | DNS / port 53 used as a side door while blocked | Windows: only the DNS Client service, only to the network's resolvers; Linux with systemd-resolved: only that service's user; otherwise only the network's resolvers; none known: no DNS permit |
 | A hostile network spoofing the VPN server's address | server permit limited to the VPN's protocol/port (Windows: SSTP also to `svchost.exe`; the IKEv2/L2TP/PPTP ports to traffic sent as Local System or by an elevated administrator, so no ordinary program of the signed-in user can use them - with UAC switched off, or signed in as the built-in Administrator, every program is elevated and this limit does not apply); the server's certificate is still validated by the VPN |
@@ -92,6 +92,22 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   prompt of the tray's *Save* and of `Install.ps1` is Windows' own: what it starts gets the signed-in user's environment,
   which a program running as that user can add to beforehand. Use a separate administrator account for the prompt if
   programs you do not trust run under your own.
+- **Another filter layer of VeroScudo's own top priority (Windows).** WFP evaluates sublayers of equal weight in no
+  defined order; a *hard permit* there (another program's, installed with administrator rights) can win before
+  VeroScudo's block is seen - only a kernel callout could veto it. VeroScudo detects such layers and shows *Attention*.
+- **Split-tunnel VPNs and VMs/WSL (Windows).** Their traffic is translated below WFP and follows Windows' routing table:
+  while the tunnel is up, destinations the VPN does not route into the tunnel - and the local network - are reached
+  directly. Use a profile that routes everything (default gateway, `redirect-gateway`, `AllowedIPs = 0.0.0.0/0`) when
+  VMs and WSL must be covered.
+- **Mobile Hotspot, Internet Connection Sharing and custom NAT (Windows).** What Windows forwards for other devices is
+  not filtered.
+- **Another local account turning it off (Linux).** NetworkManager lets local users disconnect a VPN by default
+  (polkit); VeroScudo reads that as your hang-up and turns off.
+- **What is let out is let out for every local program.** The VPN server's ports, Hiddify's servers and direct DNS
+  servers, and while blocked the DNS and DHCP permits are not tied to the VPN client (Linux: DNS only for
+  `systemd-resolved`, DHCP needs root to bind port 68; macOS: any process).
+- **Linux: checked every 15 s.** A bridge that gets a network card added counts as host-only until the next check, and
+  a `nft flush ruleset` (reloading `nftables.service`, for one) removes VeroScudo's table until then.
 - **Windows: before the filtering service starts.** The filters are persistent, not boot-time: they act from the moment
   Windows' Base Filtering Engine starts during boot, not in the instants before it.
 

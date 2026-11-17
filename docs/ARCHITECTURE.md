@@ -60,7 +60,7 @@ because the platforms report differently, and each value was chosen for its plat
 
 | | Windows (`windows/Core`) | Linux / macOS (`daemon.py`) |
 |---|---|---|
-| after Off, nothing re-arms by itself | 30 s (`Test-VeroRecentOff`) | the off marker explains the down-event for 60 s (`OFF_MARKER_SECONDS`); a dial VeroScudo had started that succeeds within 30 s is taken down again (`OFF_RECENT_SECONDS`) |
+| after Off, nothing re-arms by itself | 30 s (`Test-VeroRecentOff`); VeroScudo's own dial: until the next On (its connection id, `Test-VeroOwnRasDial`) | the off marker explains the down-event for 60 s (`OFF_MARKER_SECONDS`); a dial VeroScudo had started that succeeds after Off is taken down again, however late, until the next On (`off.at`) |
 | own hang-up for Reconnect | until 30 s after the hang-up finished, marker at most 5 min old (`Test-VeroRenewHangUp`) | 120 s (`RENEW_MARKER_SECONDS`) |
 
 RAS writes its records with a delay and VeroScudo waits 3 s before reading them, so the Windows rule is tied to the
@@ -202,8 +202,9 @@ Windows Defender Firewall's default-outbound Block still lets through every *ena
 allow rule* - Store apps, "Core Networking", rules installers add, GPO rules (a typical PC has
 150+). That is not a kill-switch. VeroScudo instead adds **its own WFP provider and sublayer**
 (weight 0xFFFF) with persistent filters at `ALE_AUTH_CONNECT_V4/V6` and `ALE_AUTH_RECV_ACCEPT_V4/V6`:
-scoped PERMIT filters (weight 8) and one catch-all BLOCK per layer (weight 0). WFP arbitration
-makes a BLOCK in any sublayer final, so no firewall rule can override it; the PERMITs are soft
+scoped PERMIT filters (weight 8) and one catch-all BLOCK per layer (weight 0). A filter BLOCK is a
+hard block: no lower-priority sublayer can override it, so no firewall rule can (another sublayer of the same top weight
+with a hard permit can win - VeroScudo warns about such layers); the PERMITs are soft
 (they do not clear the action right), so the user's own firewall blocks still apply.
 
 - **Atomic**: the whole set is replaced in one WFP transaction - no gap, no half state.

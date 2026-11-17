@@ -72,7 +72,7 @@ function Invoke-VeroActionArm {
         $Config = Get-VeroConfig
     }
     # a redial of VeroScudo's own that connected after your Off or your hang-up is not you connecting
-    if (-not (Test-VeroArmed) -and (Test-VeroOwnRasDial $who)) { Write-VeroLog "connect of VeroScudo's own redial after it was turned off - not armed" $Action; return }
+    if (-not (Test-VeroArmed) -and ((Test-VeroLockAlive) -or (Test-VeroOwnRasDial $who))) { Write-VeroLog "connect of VeroScudo's own redial after it was turned off - not armed" $Action; return }
     Invoke-VeroArmConnected -Config $Config -Action $Action
 }
 
@@ -101,7 +101,10 @@ function Invoke-VeroActionOn {
     Enter-VeroArmed -Config $Config -Action $Action
     $notice = Get-VeroSwitchNotice -Type (Get-VeroConfigType $Config) -ProfileName $Config.Profile
     if ($notice) { Write-VeroLog "NOTICE: $notice" $Action }
-    if (-not (Test-VeroVpnConnected $Config.Profile)) { Invoke-VeroReconnect -Config $Config -Action $Action }
+    # the Redial task dials: this task ends at once, so an On right after an Off is never dropped as "already running".
+    # Already up: note it as at any arm (the connection id your later hang-up must name - IKEv2 logs it nowhere else)
+    if (-not (Test-VeroVpnConnected $Config.Profile)) { Start-VeroRedial -Config $Config -Action $Action }
+    else { try { & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).OnArmConnected $Config $Action } catch { Write-VeroLog "ERROR: notes at arm: $($_.Exception.Message)" $Action } }
 }
 
 function Invoke-VeroActionOff {
@@ -200,7 +203,7 @@ function Invoke-VeroActionSwitch {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'switch', [string]$VpnProfile)
     $name = if ($VpnProfile) { $VpnProfile } else { Read-VeroSwitchRequest }
     if (-not $name) { Write-VeroLog 'switch requested without a profile name - ignored' $Action; return }
-    if (@($Config.Profiles | ForEach-Object Profile) -notcontains $name) { Write-VeroLog "switch to unknown profile '$name' - ignored" $Action; return }
+    if (@($Config.Profiles | ForEach-Object Profile) -notcontains $name) { Write-VeroLog 'switch to a profile that is not configured - ignored' $Action; return }   # its text is not logged: the log is readable by all users
     Invoke-VeroSwitch -Name $name -Action $Action
 }
 

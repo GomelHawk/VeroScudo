@@ -155,8 +155,8 @@ def test_wireguard_server_keeps_networkmanagers_own_conntrack_mark():
     for tun in ("wg", None):
         rs = render_ruleset(wg, ["203.0.113.30", "2001:db8::30"], tun, vm_allowed=False)
         assert "    ip daddr { 203.0.113.30 } udp dport 3389 accept" in rs.splitlines()
-        assert "    ip saddr { 203.0.113.30 } udp sport 3389 accept" in rs.splitlines()
-        assert "    ip6 saddr { 2001:db8::30 } udp sport 3389 accept" in rs.splitlines()
+        assert "    ip saddr { 203.0.113.30 } udp sport 3389 ct state established,related accept" in rs.splitlines()
+        assert "    ip6 saddr { 2001:db8::30 } udp sport 3389 ct state established,related accept" in rs.splitlines()
         assert "203.0.113.30 } udp dport 3389 ct mark" not in rs
     other = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False)            # every other type: unchanged
     assert "ip daddr { 203.0.113.5 } tcp dport 443 ct mark set 0x5653 accept" in other and "sport 443 accept" not in other

@@ -206,7 +206,10 @@ function Get-VeroSwitchLuid {
 }
 
 function Get-VeroWslLuid {
-    $a = Get-VeroNic | Where-Object { $_.Name -like 'vEthernet (WSL*' -and [string]$_.OperationalStatus -eq 'Up' } | Select-Object -First 1
+    # WSL's own adapter sits on an internal switch: no default gateway. A switch merely named "WSL..." but bridged to a network
+    # card (external) carries that card's gateway - its adapter is the way out to the network and is never allowed
+    $a = Get-VeroNic | Where-Object { $_.Name -like 'vEthernet (WSL*' -and [string]$_.OperationalStatus -eq 'Up' -and
+        @($_.GetIPProperties().GatewayAddresses | Where-Object { -not $_.Address.Equals([Net.IPAddress]::Any) -and -not $_.Address.Equals([Net.IPAddress]::IPv6Any) }).Count -eq 0 } | Select-Object -First 1
     if ($a) { Import-VeroNative; [VeroScudo.Iface]::LuidFromGuid([guid]$a.Id) } else { [uint64]0 }
 }
 
