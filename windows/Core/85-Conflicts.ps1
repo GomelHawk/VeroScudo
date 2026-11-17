@@ -20,7 +20,7 @@ function Get-VeroConflict {
         try { $k = Get-ItemProperty 'HKLM:\SOFTWARE\OpenVPN' -ErrorAction Stop; if ($k.PSObject.Properties['config_dir']) { $dirs += [string]$k.config_dir }; if ($k.PSObject.Properties['autostart_config_dir']) { $auto = [string]$k.autostart_config_dir } } catch { Write-Verbose 'no OpenVPN key' }
         $dirs += (Join-Path (Get-VeroSystemDir ProgramFiles) 'OpenVPN\config')
         foreach ($pr in $ovpnProfiles) {
-            $mine = @(Get-VeroOpenVpnRemote -ProfileName $pr.Profile | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object
+            $mine = @(@(Get-VeroOpenVpnRemote -ProfileName $pr.Profile | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object)
             if ($mine.Count -eq 0) { continue }
             foreach ($d in @($dirs + $auto | Select-Object -Unique)) {
                 if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
@@ -29,7 +29,7 @@ function Get-VeroConflict {
                 $where = @($d) + @(Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Select-Object -First 20 | ForEach-Object FullName)
                 $files = @(foreach ($w in $where) { Get-ChildItem -LiteralPath $w -Filter '*.ovpn' -File -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $_.Length -le 1MB } })   # the user's folders: no links, no file of any size
                 foreach ($f in @($files | Select-Object -First 50)) {
-                    $theirs = @((Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($f.FullName)) -ReadFile { param($x) $null = $x; [byte[]]@() }).Remotes | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object
+                    $theirs = @(@((Test-VeroOpenVpnConf -Text ([IO.File]::ReadAllText($f.FullName)) -ReadFile { param($x) $null = $x; [byte[]]@() }).Remotes | ForEach-Object { '{0}:{1}' -f $_.Host, $_.Port }) | Sort-Object)
                     if ($theirs.Count -gt 0 -and (@($theirs | Where-Object { $mine -contains $_ }).Count -gt 0)) {
                         $where = if ($d -eq $auto) { 'the OpenVPN service starts it by itself' } else { "OpenVPN GUI lists it - don't connect it there" }
                         $items.Add("'$($f.Name)' has the same server as '$($pr.Profile)': $where")
