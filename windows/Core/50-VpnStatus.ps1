@@ -124,6 +124,15 @@ function Save-VeroRasCoId {
     if ($rec) { Write-VeroStateFile -Path (Get-VeroPath).RasCoId -Text (@{ Profile = $rec.Profile; CoId = $rec.CoId; Time = (Get-Date).ToString('o') } | ConvertTo-Json) }
 }
 
+function Test-VeroOwnRasDial {
+    <# The profile's connection is the one VeroScudo itself dialed last (its id noted by Save-VeroRasCoId after a redial). #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
+    $own = try { Get-Content (Get-VeroPath).RasCoId -Raw | ConvertFrom-Json } catch { $null }
+    if (-not $own -or [string]$own.Profile -ne $ProfileName) { return $false }
+    $rec = Get-VeroRasConnectedRecord -ProfileName $ProfileName -AllowApplicationLog
+    [bool]($rec -and [string]$rec.CoId -eq [string]$own.CoId)
+}
+
 function Invoke-VeroArmConnected {
     <# A Windows VPN profile connected by hand (any protocol): arm for it - the same steps from the Connected task and from the
        watchdog's own check, so the outcome never depends on which events a protocol logs. #>
@@ -180,9 +189,7 @@ function Update-VeroRasWatch {
         if ((Test-VeroArmed) -and $pr.Profile -eq $Config.Profile) { continue }      # already protected by it
         if (Test-VeroRecentOff) { continue }                                         # a redial finishing just after your Off
         if (Test-VeroLockAlive) { continue }                                         # our own redial / switch is running
-        $own = try { Get-Content (Get-VeroPath).RasCoId -Raw | ConvertFrom-Json } catch { $null }   # VeroScudo's own last dial (OnReconnected)
-        $rec = if ($own -and $own.Profile -eq $pr.Profile) { Get-VeroRasConnectedRecord -ProfileName $pr.Profile -AllowApplicationLog } else { $null }
-        if ($rec -and [string]$rec.CoId -eq [string]$own.CoId) { continue }        # that dial, finished - not a VPN you connected
+        if (Test-VeroOwnRasDial $pr.Profile) { continue }                           # VeroScudo's own dial, finished - not a VPN you connected
         Write-VeroLog "Windows VPN '$($pr.Profile)' connected - kill-switch on for it (decision source: watchdog saw the tunnel come up)" $Action
         if ($pr.Profile -ne $Config.Profile) { Set-VeroActiveProfile -Name $pr.Profile -Action $Action }
         Invoke-VeroArmConnected -Config (Get-VeroConfig) -Action $Action

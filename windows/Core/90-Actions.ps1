@@ -71,6 +71,8 @@ function Invoke-VeroActionArm {
         Set-VeroActiveProfile -Name $c -Action $Action
         $Config = Get-VeroConfig
     }
+    # a redial of VeroScudo's own that connected after your Off or your hang-up is not you connecting
+    if (-not (Test-VeroArmed) -and (Test-VeroOwnRasDial $who)) { Write-VeroLog "connect of VeroScudo's own redial after it was turned off - not armed" $Action; return }
     Invoke-VeroArmConnected -Config $Config -Action $Action
 }
 
