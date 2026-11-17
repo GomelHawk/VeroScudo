@@ -160,10 +160,20 @@ class StateStore:
         except OSError as e:
             logging.getLogger("veroscudo").warning("could not write %s: %s", path.name, e)
 
-    def set_applied(self, profile: str | None, tunnel: str | None) -> None:
+    def set_applied(self, profile: str | None, tunnel: str | None, ruleset: str | None = None) -> None:
         """Written by the guard each time it applies or removes the kill-switch: the profile and the tunnel interface the
-        rules let through (None: everything blocked). Atomic replace; readable by the signed-in user."""
-        self._note(self.applied_file, {"profile": profile, "tunnel": tunnel})
+        rules let through (None: everything blocked), and the fingerprint of the rules - shared by the daemon and every CLI
+        call, so the daemon sees rules another process put in force. Atomic replace; readable by the signed-in user."""
+        rules = hashlib.sha256(ruleset.encode()).hexdigest() if ruleset else None
+        self._note(self.applied_file, {"profile": profile, "tunnel": tunnel, "rules": rules})
+
+    def applied_rules(self) -> str | None:
+        """The fingerprint of the rules in force, as the process that applied them last noted it."""
+        try:
+            j = json.loads(self.applied_file.read_text())
+            return j.get("rules") if isinstance(j, dict) else None
+        except (OSError, ValueError):
+            return None
 
     def mark_down(self, now: float | None = None) -> None:
         """The kill-switch was just applied without a tunnel (a drop, a Reconnect, a switch): the connection check starts

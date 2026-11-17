@@ -470,3 +470,17 @@ def test_record_minute_passes_up_and_down_to_the_statistics_and_logs_a_write_err
     with caplog.at_level("ERROR", logger="veroscudo"):
         g.record_minute(True)                                      # logged, not raised: the guard's pass goes on
     assert [(r.message, r.exc_info[0]) for r in caplog.records] == [("statistics", OSError)]
+
+
+def test_rules_another_process_applied_are_put_back(env):
+    """A CLI call (Reconnect, a switch) applied other rules and ended before it put these back: the daemon sees it by the
+    shared note in applied.json, not by its own memory, and applies its rules again."""
+    g, calls, connected = env
+    connected.add("Work")
+    g.arm()
+    n = len(calls["apply"])
+    g.watchdog()
+    assert len(calls["apply"]) == n                                   # its rules are in force: nothing to do
+    g.store.set_applied("Work", None, "the blocked rules of a CLI call that ended early")
+    g.watchdog()
+    assert len(calls["apply"]) == n + 1 and calls["allows_tunnel"](calls["apply"][-1])

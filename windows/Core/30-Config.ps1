@@ -325,8 +325,29 @@ function Import-VeroSavePayload {
         if ($chk.Errors.Count -gt 0) { throw ("OpenVPN config for '{0}' refused: {1} - nothing was changed" -f [string]$i.Profile, (@($chk.Errors | Select-Object -First 3) -join '; ')) }
     }
     foreach ($i in $imports) { $null = Import-VeroOpenVpnText -ProfileName ([string]$i.Profile) -Text ([string]$i.Text) }
+    $before = try { Get-Content -LiteralPath (Get-VeroPath).Config -Raw | ConvertFrom-Json } catch { $null }
     Save-VeroConfig -Json ([string]$payload.Config) | Out-Null
+    try { Write-VeroLog ('settings saved: ' + (Get-VeroConfigChange -Old $before -New ([string]$payload.Config | ConvertFrom-Json))) 'save' } catch { Write-Verbose 'save not logged' }
     Remove-VeroStaleOpenVpnFile -Config (Get-VeroConfig -Raw ([string]$payload.Config)) -Action 'save'   # a deleted profile's keys go too
+}
+
+function Get-VeroConfigChange {
+    <# Pure: what a Settings save changed, for the log (readable by every user): each setting with its old and new value,
+       profiles added, removed or changed - by name only (a profile entry holds the user name). #>
+    [CmdletBinding()] param($Old, $New)
+    $out = New-Object System.Collections.Generic.List[string]
+    $names = @(foreach ($o in @($Old, $New)) { if ($o) { $o.PSObject.Properties.Name } }) | Where-Object { $_ -ne 'profiles' } | Sort-Object -Unique
+    foreach ($n in $names) {
+        $a = if ($Old -and $Old.PSObject.Properties[$n]) { ConvertTo-Json -InputObject $Old.$n -Compress -Depth 5 } else { '-' }
+        $b = if ($New -and $New.PSObject.Properties[$n]) { ConvertTo-Json -InputObject $New.$n -Compress -Depth 5 } else { '-' }
+        if ($a -ne $b) { $out.Add("$n $a -> $b") }
+    }
+    $po = @{}; $pn = @{}
+    if ($Old -and $Old.PSObject.Properties['profiles']) { foreach ($p in @($Old.profiles)) { $po[[string]$p.profile] = ConvertTo-Json -InputObject $p -Compress -Depth 5 } }
+    if ($New -and $New.PSObject.Properties['profiles']) { foreach ($p in @($New.profiles)) { $pn[[string]$p.profile] = ConvertTo-Json -InputObject $p -Compress -Depth 5 } }
+    foreach ($k in @($pn.Keys | Sort-Object)) { if (-not $po.ContainsKey($k)) { $out.Add("profile added '$k'") } elseif ($po[$k] -ne $pn[$k]) { $out.Add("profile changed '$k'") } }
+    foreach ($k in @($po.Keys | Sort-Object)) { if (-not $pn.ContainsKey($k)) { $out.Add("profile removed '$k'") } }
+    if ($out.Count -eq 0) { 'nothing changed' } else { $out -join '; ' }
 }
 
 function Test-VeroElevated {

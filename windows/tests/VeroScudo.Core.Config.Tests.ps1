@@ -193,6 +193,19 @@ Describe 'Import from Windows' {
     }
 }
 
+Describe 'a Settings save is logged with what it changed (the log is readable by every user)' {
+    It 'names changed settings with old and new value, profiles by name only - never a user name' {
+        $old = '{"profiles":[{"profile":"Work","server":"a.example.com","username":"alice"},{"profile":"Old","server":"b.example.com","username":"bob"}],"vm":false,"retrySeconds":10}' | ConvertFrom-Json
+        $new = '{"profiles":[{"profile":"Work","server":"c.example.com","username":"alice"},{"profile":"New","server":"d.example.com","username":"carol"}],"vm":true,"retrySeconds":10}' | ConvertFrom-Json
+        $t = & (Get-Module VeroScudo.Core) { param($o, $n) Get-VeroConfigChange -Old $o -New $n } $old $new
+        $t | Should -Match 'vm false -> true'
+        $t | Should -Match "profile added 'New'"; $t | Should -Match "profile removed 'Old'"; $t | Should -Match "profile changed 'Work'"
+        $t | Should -Not -Match 'retrySeconds'
+        $t | Should -Not -Match 'alice|bob|carol|example\.com'
+        & (Get-Module VeroScudo.Core) { param($o) Get-VeroConfigChange -Old $o -New $o } $old | Should -Be 'nothing changed'
+    }
+}
+
 Describe 'Import-VeroSavePayload: the elevated half of the tray''s Save reads one file, text only' {
     BeforeAll {
         Mock -ModuleName VeroScudo.Core Import-VeroOpenVpnText { }

@@ -1,6 +1,7 @@
 """The guard: arms on connect, decides on disconnect, redials forever while armed and down, keeps the ruleset exact."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import subprocess
 import threading
@@ -274,9 +275,14 @@ class Guard:
         except Exception:
             log.exception("EMERGENCY: the kill-switch rules AND the lockdown could not be applied - NOT PROTECTED")
 
+    def _in_force(self, rs: str) -> bool:
+        """These rules are the ones in force - by the shared note, not this process's memory: a CLI call (Reconnect, a
+        switch) may have applied others and ended before it put these back."""
+        return self.store.applied_rules() == hashlib.sha256(rs.encode()).hexdigest() and firewall.is_active()
+
     def _apply_rules(self, tunnel_up: bool, force: bool, plan: tuple[str, str | None]) -> str | None:
         rs, tun = plan
-        if not force and rs == self._applied and firewall.is_active():
+        if not force and self._in_force(rs):
             return tun
         try:
             firewall.apply(rs)
@@ -288,12 +294,12 @@ class Guard:
             log.warning("kill-switch: nftables refused the rule for Hiddify's service (cgroup) - Hiddify is let out by "
                         "its server addresses only")
             rs, tun = self.desired_ruleset(tunnel_up)
-            if not force and rs == self._applied and firewall.is_active():
+            if not force and self._in_force(rs):
                 return tun
             firewall.apply(rs)
         why = "armed" if self._applied is None else ("changed" if rs != self._applied else "table was missing")
         self._applied = rs
-        self.store.set_applied(self.cfg.profile, tun)
+        self.store.set_applied(self.cfg.profile, tun, rs)
         if not tun:
             self.store.mark_down()                          # the connection check's rating starts over (quality.py)
         log.info("kill-switch %s (profile=%s, tunnel=%s)", why, self.cfg.profile, "up" if tun else "DOWN")
