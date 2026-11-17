@@ -138,6 +138,9 @@ function Invoke-VeroActionOnEvent {
     $r = Resolve-VeroTerminationCode -Termination $t -RenewMarker (Get-VeroRenewMarker) -ExpectedCoIds $want
     foreach ($n in $r.Notes) { Write-VeroLog $n $Action }
     $code = $r.Code
+    # a hang-up from before the latest On (your Off, logged late) does not undo that On; write time, not creation time (NTFS
+    # keeps the old creation time of a file deleted and created again within seconds)
+    if ($code -eq 631 -and (Test-VeroArmed) -and $t.PSObject.Properties['Time'] -and $t.Time -lt (Get-Item -LiteralPath (Get-VeroPath).ArmedFlag).LastWriteTime) { Write-VeroLog "the hang-up was before the latest On - ignored" $Action; return }
     Write-VeroLog ("decision source: RAS reason code {0} -> {1}" -f $code, $(if ($code -eq 631) { 'you hung up' } else { 'link failure' })) $Action
     switch (Get-VeroDecision -ReasonCode $code -Armed (Test-VeroArmed)) {
         'disarm'    { Exit-VeroArmed -Action $Action }

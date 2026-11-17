@@ -212,6 +212,7 @@ function Invoke-VeroActionNetDown {
         $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]0 }
         if (-not (Get-VeroNetSuspect)) { Write-VeroLog 'network disconnected - Hyper-V VMs blocked until the tunnel is proven to work again' $a }
         $null = Set-VeroVmBlock -Block $true -Action $a                    # first the block, then the note of why
+        try { if (Test-VeroVmWanted -Config $c) { Set-VeroVmAccess -Allow $false -Action $a } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
         try { Write-VeroStateFile -Path (Get-VeroPath).NetSuspect -Text (@{ Time = (Get-Date).ToString('o'); Tunnel = [string]$tun } | ConvertTo-Json) }
         catch { Write-VeroLog "WARNING: the note of the network drop could not be written ($($_.Exception.Message))" $a }
         $script:AclBlocked = $true

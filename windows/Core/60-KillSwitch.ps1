@@ -617,8 +617,9 @@ function Sync-VeroKillSwitchCore {
     # what this long-lived process remembers about the Windows VPN entries is looked up again now and then: an entry changed
     # from SSTP to IKEv2 would otherwise keep its old ports here while every short task computes the new ones
     if ($script:SyncCount % 20 -eq 0) { $script:TunnelTypes = @{} }
-    if ($vm -and ($applied -or $script:VmAllowed -ne [bool]$tun -or $script:SyncCount % 20 -eq 0)) {
-        try { Set-VeroVmAccess -Allow ([bool]$tun) -Action $Action; $script:VmAllowed = [bool]$tun }
+    $wslAllow = [bool]$tun -and -not [bool]$suspect                        # like the VMs: blocked after a network drop until proven
+    if ($vm -and ($applied -or $script:VmAllowed -ne $wslAllow -or $script:SyncCount % 20 -eq 0)) {
+        try { Set-VeroVmAccess -Allow $wslAllow -Action $Action; $script:VmAllowed = $wslAllow }
         catch { Write-VeroLog "ERROR: WSL (Hyper-V firewall): $($_.Exception.Message) - tried again on the next pass" $Action; $script:VmAllowed = $null }
     }
     # the emergency block of an earlier failure goes last: the real filters and the VM / WSL steps are in force by now
