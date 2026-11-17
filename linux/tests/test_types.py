@@ -1,4 +1,6 @@
 """Reserve VPN kinds on NetworkManager: WireGuard handshake health, OpenVPN data parsing, other tunnels, notices."""
+import types
+
 from veroscudo import keepawake, nm
 from veroscudo.config import Config
 from veroscudo.state import kind_label, switch_notice
@@ -50,8 +52,14 @@ def test_check_reports_a_protocol_mismatch(monkeypatch):
     monkeypatch.setattr(nm, "_nmcli", lambda *a: "remote = vpn.example.com:1194, connection-type = password")
     out = "\n".join(nm.check(cfg))
     assert "R: OpenVPN uses UDP but the profile says TCP" in out
-    assert 'W: WireGuard uses UDP' in out and "PersistentKeepalive" in out
+    assert 'W: WireGuard uses UDP' in out and "PersistentKeepalive" not in out      # tunnel not up: nothing to read
     assert "Gone: no NetworkManager connection" in out
+
+
+def test_wireguard_keepalive_is_read_not_assumed(monkeypatch):
+    out = {"wg0": "pubA=\t25\npubB=\toff\n", "wg1": "pubA=\t25\n"}
+    monkeypatch.setattr(nm.subprocess, "run", lambda a, **k: types.SimpleNamespace(returncode=0, stdout=out[a[2]]))
+    assert nm.wg_keepalive_missing("wg0") is True and nm.wg_keepalive_missing("wg1") is False
 
 
 def test_other_tunnels_are_found_but_not_ours(tmp_path):

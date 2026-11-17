@@ -630,6 +630,8 @@ def check_profile(name: str, path: str) -> list[str]:
     """`veroscudo check` for a Hiddify profile."""
     try:
         conf = read_config(path)
+    except PermissionError:
+        return [f"{name}: Hiddify's config {path} is readable only by root - run: sudo veroscudo check"]
     except (OSError, ValueError) as e:
         return [f"{name}: cannot read Hiddify's config {path} ({e}) - is Hiddify installed and connected once in VPN mode?"]
     out = []

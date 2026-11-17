@@ -21,7 +21,8 @@ function LanDnsQuery { if (-not $LanDns) { return $false }; try { $null = Resolv
 function Ping8 { Test-Connection 8.8.8.8 -Count 1 -Quiet -ErrorAction SilentlyContinue }
 function Leaks {
     # everything that must be False while blocked; the allow-rule probe runs from this PowerShell, which has its own firewall allow rule
-    [ordered]@{ tcp443 = (Tcp 1.1.1.1 443); tcp80 = (Tcp 1.1.1.1 80); tcp53 = (Tcp 1.1.1.1 53); ipv6 = (Tcp '2606:4700:4700::1111' 443); ping = (Ping8); wsl = (Wsl) }
+    # WSL only when VeroScudo protects it (Settings: Protect VMs and containers) - otherwise its traffic is left alone by design
+    [ordered]@{ tcp443 = (Tcp 1.1.1.1 443); tcp80 = (Tcp 1.1.1.1 80); tcp53 = (Tcp 1.1.1.1 53); ipv6 = (Tcp '2606:4700:4700::1111' 443); ping = (Ping8); wsl = $(if ($cfg.Vm) { Wsl } else { 'n/a' }) }
 }
 function Probe($tag) { $k = Leaks; L ("   {0} vpn={1} armed={2} filters={3} | leaks: {4} | dns={5}" -f $tag, (Up), (Armed), (Filters), (($k.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '), (Dns)); $k }
 function Wifi { Get-NetAdapter | Where-Object { $_.PhysicalMediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' } | Select-Object -First 1 }

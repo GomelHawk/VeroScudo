@@ -149,6 +149,18 @@ def wg_handshakes(ifname: str) -> list[int] | None:
     return out
 
 
+def wg_keepalive_missing(ifname: str) -> bool:
+    """A peer of the WireGuard interface has no PersistentKeepalive (`wg show IF persistent-keepalive` says off). False
+    when that cannot be read (the tunnel is down, not root): `check` then says nothing."""
+    if not _IFNAME.match(ifname):
+        return False
+    try:
+        r = subprocess.run(["wg", "show", ifname, "persistent-keepalive"], check=False, capture_output=True, text=True)
+    except OSError:
+        return False
+    return r.returncode == 0 and any(line.split()[1:2] == ["off"] for line in r.stdout.splitlines())
+
+
 def parse_wg_endpoints(text: str) -> list[str]:
     """`wg show <if> endpoints` ("<peer key>\t<ip>:<port>" per peer, "(none)" before the first handshake) -> the IPs. Pure."""
     out = []
@@ -300,7 +312,9 @@ def check(cfg) -> list[str]:
         if k == "wireguard":
             if p.protocol != "udp":
                 out.append(f'{p.name}: WireGuard uses UDP - set "protocol": "udp" and "port": the endpoint\'s port')
-            out.append(f"{p.name}: WireGuard - make sure the peer has PersistentKeepalive (e.g. 25): VeroScudo judges the link by its handshakes")
+            t = iface(p.name)
+            if t and wg_keepalive_missing(t):
+                out.append(f"{p.name}: WireGuard - the peer has no PersistentKeepalive (set e.g. 25): VeroScudo judges the link by its handshakes")
         elif k == "openvpn":
             d = parse_openvpn_data(unescape(_nmcli("-g", "vpn.data", "connection", "show", "id", p.name)))
             if d["proto"] != p.protocol:
