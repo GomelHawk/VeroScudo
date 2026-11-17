@@ -99,6 +99,9 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   while the tunnel is up, the local network is reached directly. With a split-tunnel profile (the route to the internet
   does not lead into the tunnel) VeroScudo keeps VMs and WSL blocked even while it is up, and logs why; if the route
   cannot be looked up it lets them through as before.
+- **IKEv2: disconnecting in Windows Settings can be undone (Windows).** Windows logs an IKEv2 hang-up about 20 s late;
+  VeroScudo sees the tunnel go down first, takes it for a failure and dials again. Turn the VPN off in VeroScudo's tray
+  instead. Not a leak: traffic stays blocked or goes through the tunnel throughout.
 - **Mobile Hotspot, Internet Connection Sharing and custom NAT (Windows).** What Windows forwards for other devices is
   not filtered.
 - **Another local account turning it off (Linux).** NetworkManager lets local users disconnect a VPN by default
