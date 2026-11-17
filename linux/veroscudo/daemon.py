@@ -560,6 +560,8 @@ class Guard:
                     else:
                         log.info("reconnected '%s' after %d attempt(s)", self.cfg.profile, attempt)
                     break
+                if not self.store.armed:                     # you turned the VPN off during the dial: not a failure
+                    break
                 log.info("attempt %d failed", attempt)
                 self._lookup_next = True                     # the server may have moved: look it up with the next block
                 if self.attempts is not None and attempt >= self.attempts:
@@ -568,7 +570,7 @@ class Guard:
                     break
                 time.sleep(self.cfg.retry_seconds)
             if not self.store.armed:
-                log.info("disarmed during reconnect - stopping")
+                log.info("you turned the VPN off - redial stopped")
         finally:
             self.store.release_lock()
         if not self.store.armed and attempt and self._off_recent() and nm.is_connected(self.cfg.profile):

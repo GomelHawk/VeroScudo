@@ -307,6 +307,7 @@ function Invoke-VeroReconnect {
                 & $h.OnReconnected $Config
                 break
             }
+            if (-not (Test-VeroArmed)) { break }              # you turned the VPN off during the dial: not a failure
             # Hiddify: nothing is dialed - VeroScudo waits for you to connect it there; once, then every ~5 minutes
             if ($h.Dials -or $attempt -eq 1 -or $attempt % 30 -eq 0) { Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action }
             # the server may have moved: look it up again (the redial's DNS permit is in force while down) and let the new
@@ -322,7 +323,7 @@ function Invoke-VeroReconnect {
             Start-Sleep -Seconds $Config.RetrySeconds
             $Config = Get-VeroConfig
         }
-        if (-not (Test-VeroArmed)) { Write-VeroLog 'disarmed during reconnect - stopping' $Action }
+        if (-not (Test-VeroArmed)) { Write-VeroLog 'you turned the VPN off - redial stopped' $Action }
     } finally {
         Remove-Item $p.Lock -Force -ErrorAction SilentlyContinue
     }
