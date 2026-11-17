@@ -617,7 +617,7 @@ function Sync-VeroKillSwitchCore {
     }
     # a split-tunnel profile: the VMs and WSL stay blocked even while it is up (they would reach the rest past the tunnel)
     $full = if ($tun -and $Config.Vm) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
-    if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "'$($Config.Profile)' routes only part of the traffic into the tunnel (split tunnel) - VMs and WSL stay blocked" $Action }
+    if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "the route to the internet does not lead into the tunnel of '$($Config.Profile)' (a split-tunnel profile, or the network is changing) - VMs and WSL stay blocked" $Action }
     $script:SplitLogged = -not $full
     $aclWant = ((-not [bool]$tun) -or [bool]$suspect -or -not $full) -and [bool]$Config.Vm
     if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {

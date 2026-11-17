@@ -49,7 +49,7 @@ try {
     L "   armed=$(Armed) vpn=$(Up) filters=$(Filters)"
 
     L '=== PHASE 1: STRICT - server unreachable + link bounce; must stay blocked 3 min (incl. a firewall-default reset)'
-    New-NetFirewallRule -DisplayName $BlockRule -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $ServerIps -RemotePort $cfg.Port -Profile Any | Out-Null
+    New-NetFirewallRule -DisplayName $BlockRule -Direction Outbound -Action Block -RemoteAddress $ServerIps -Profile Any | Out-Null   # every protocol: IKEv2/L2TP use UDP and ESP, not the TCP port
     BounceWifi; $dropped = WaitFor { -not (Up) } 60 'tunnel dropped'
     $leak = $false; $unblocked = $false; $t = Get-Date; $i = 0
     while (((Get-Date) - $t).TotalSeconds -lt 180) {

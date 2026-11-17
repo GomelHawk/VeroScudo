@@ -31,9 +31,14 @@ jobs:
           )
           foreach ($m in $mods) {
             $pkg = Join-Path $env:RUNNER_TEMP "$($m.Name).$($m.Version).zip"
-            Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/$($m.Name)/$($m.Version)" -OutFile $pkg -UseBasicParsing
-            $h = (Get-FileHash $pkg -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($h -ne $m.Sha256) { throw "$($m.Name) $($m.Version): SHA-256 $h is not the pinned one" }
+            # up to 3 tries: a download cut short or an error page is refused by its hash, never used
+            for ($try = 1; $try -le 3; $try++) {
+              try { Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/$($m.Name)/$($m.Version)" -OutFile $pkg -UseBasicParsing } catch { Write-Host "download $try failed: $($_.Exception.Message)" }
+              $h = if (Test-Path $pkg) { (Get-FileHash $pkg -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+              if ($h -eq $m.Sha256) { break }
+              Write-Host "$($m.Name) $($m.Version): try $try got SHA-256 '$h', not the pinned one"; Start-Sleep -Seconds 5
+            }
+            if ($h -ne $m.Sha256) { throw "$($m.Name) $($m.Version): no download with the pinned SHA-256" }
             Expand-Archive -Path $pkg -DestinationPath (Join-Path $d "$($m.Name)/$($m.Version)") -Force
           }
       - name: Lint
