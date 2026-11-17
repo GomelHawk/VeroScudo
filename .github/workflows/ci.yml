@@ -18,15 +18,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Get Pester and PSScriptAnalyzer (exact versions, into the job's own folder)
-        # Save-Module, not Install-Module: the lint step runs in pwsh and the tests in Windows PowerShell 5.1, and each shell
-        # has its own module folders. A folder of the job, put first on PSModulePath in both steps, is read by both.
+      - name: Get Pester and PSScriptAnalyzer (exact versions and SHA-256, into the job's own folder)
+        # the packages themselves, checked against pinned hashes - not whatever the gallery serves under that version. The
+        # lint step runs in pwsh and the tests in Windows PowerShell 5.1: a folder of the job, put first on PSModulePath in
+        # both steps, is read by both.
         shell: pwsh
         run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
           $d = Join-Path $env:RUNNER_TEMP 'psmodules'
-          Save-Module Pester -RequiredVersion 5.7.1 -Path $d -Force                 # exact: a new major must be a deliberate change
-          Save-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Path $d -Force
+          $mods = @(
+            @{ Name = 'Pester'; Version = '5.7.1'; Sha256 = '4a27904c6814a5fbe4758f8e49861f6a1994aee77b71165a5c43c0371ba6c580' },
+            @{ Name = 'PSScriptAnalyzer'; Version = '1.25.0'; Sha256 = '14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60' }
+          )
+          foreach ($m in $mods) {
+            $pkg = Join-Path $env:RUNNER_TEMP "$($m.Name).$($m.Version).zip"
+            Invoke-WebRequest "https://www.powershellgallery.com/api/v2/package/$($m.Name)/$($m.Version)" -OutFile $pkg -UseBasicParsing
+            $h = (Get-FileHash $pkg -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($h -ne $m.Sha256) { throw "$($m.Name) $($m.Version): SHA-256 $h is not the pinned one" }
+            Expand-Archive -Path $pkg -DestinationPath (Join-Path $d "$($m.Name)/$($m.Version)") -Force
+          }
       - name: Lint
         shell: pwsh
         run: |
@@ -66,7 +75,6 @@ jobs:
       - name: Install
         working-directory: linux
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
       - name: Unit tests
         working-directory: linux

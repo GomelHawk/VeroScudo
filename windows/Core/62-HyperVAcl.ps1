@@ -201,6 +201,21 @@ function Test-VeroTunnelCarries {
     Test-VeroTcpVia -Source $src -Remote '1.1.1.1' -Port 443
 }
 
+function Test-VeroTunnelHoldsDefault {
+    <# Does the route to the internet lead into the tunnel? VMs and WSL follow Windows' routing table: with a split-tunnel
+       profile everything outside its routes would leave past the tunnel. Unknown (lookup failed): $true - as before. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][uint64]$Luid)
+    try {
+        Import-VeroNative
+        $nic = Get-VeroNic | Where-Object { try { [VeroScudo.Iface]::LuidFromGuid([guid]$_.Id) -eq $Luid } catch { $false } } | Select-Object -First 1
+        if (-not $nic) { return $true }
+        $idx = $nic.GetIPProperties().GetIPv4Properties().Index
+        $r = @(Find-NetRoute -RemoteIPAddress '1.1.1.1' -ErrorAction Stop | Where-Object { $_.PSObject.Properties['DestinationPrefix'] }) | Select-Object -First 1
+        if (-not $r) { return $true }
+        [int]$r.InterfaceIndex -eq [int]$idx
+    } catch { $true }
+}
+
 function Invoke-VeroActionNetDown {
     <# \VeroScudo\NetDown (Windows logged "network disconnected"): while armed and VMs are protected, block the Default
        Switch VMs now and remember why - the sync keeps them blocked until the tunnel is proven again. #>

@@ -12,6 +12,8 @@ def test_output_policy_is_drop_with_scoped_allows():
     assert 'oifname "tun0" accept' in rs
     assert "ip daddr { 203.0.113.5 } tcp dport 443 ct mark set 0x5653 accept" in rs
     assert "udp sport 68 udp dport 67 ct mark set 0x5653 accept" in rs
+    dhcp = [ln for ln in rs.splitlines() if "dport 67" in ln or "dport 547" in ln]
+    assert dhcp and all("meta skuid { 0" in ln for ln in dhcp)                  # DHCP only for the DHCP clients
     assert "oifname lo accept" in rs
 
 

@@ -42,6 +42,7 @@ function Get-VeroPath {
         Conflicts     = Join-Path $state 'conflicts.json'
         NativeBlocked = Join-Path $state 'native-blocked.json'             # Windows refused to load VeroScudo.Native.dll
         OffAt         = Join-Path $state 'off-at.txt'                      # when you last pressed Off
+        WgOwnRemoval  = Join-Path $state 'wg-own-removal.json'             # VeroScudo itself removed a WireGuard tunnel just now
         CrlWindow     = Join-Path $state 'crl-window.json'                 # SSTP revocation check: TCP 80 briefly allowed
         RasCoId       = Join-Path $state 'ras-coid.json'                   # connection id of the connect VeroScudo saw (System log)
         OnRefused     = Join-Path $state 'on-refused.json'                 # On refused: another VPN is connected (the tray says so)

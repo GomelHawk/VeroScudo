@@ -506,8 +506,12 @@ function Sync-VeroKillSwitch {
        12 s after a reconnect, all traffic blocked meanwhile). One sync at a time (watchdog and event tasks run in parallel). #>
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Force, [switch]$NoRefresh, [switch]$ForceDown)
     # -ForceDown: apply the set without the tunnel even while it is still up (Reconnect: block first, then hang up)
-    $again = Invoke-VeroLocked { param($c, $a, $f, $n, $d) Sync-VeroKillSwitchCore -Config $c -Action $a -Force:$f -NoRefresh:$n -ForceDown:$d } -Arguments @($Config, $Action, $Force.IsPresent, $NoRefresh.IsPresent, $ForceDown.IsPresent)
-    if ($again -and -not $ForceDown) { Sync-VeroKillSwitch -Config $Config -Action $Action -NoRefresh }
+    $due = Invoke-VeroLocked { param($c, $a, $f, $n, $d) Sync-VeroKillSwitchCore -Config $c -Action $a -Force:$f -NoRefresh:$n -ForceDown:$d } -Arguments @($Config, $Action, $Force.IsPresent, $NoRefresh.IsPresent, $ForceDown.IsPresent)
+    # the server lookup after the lock is released: it can hang for many seconds, and Off must never wait for it
+    if ($due -and $due.PSObject.Properties['Ips'] -and -not $ForceDown) {
+        $fresh = @(& (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ResolveIps $Config)
+        if (($fresh -join ',') -ne (@($due.Ips) -join ',')) { Sync-VeroKillSwitch -Config $Config -Action $Action -NoRefresh }
+    }
 }
 
 function Invoke-VeroLocked([scriptblock]$Script, [object[]]$Arguments = @()) {
@@ -562,7 +566,7 @@ function Sync-VeroKillSwitchCore {
     if (-not (Test-VeroArmed)) { return $false }
     try {
         $plan = Get-VeroSyncPlan -Config $Config -Action $Action -ForceDown:$ForceDown
-        $type = $plan.Type; $th = $plan.Handler; $ForceDown = $plan.ForceDown; $tun = $plan.Tunnel
+        $type = $plan.Type; $ForceDown = $plan.ForceDown; $tun = $plan.Tunnel
         $ips = @($plan.Ips); $dns = @($plan.Dns); $vm = $plan.Vm; $wsl = $plan.Wsl; $sw = $plan.Switch; $specs = @($plan.Specs)
         $fp = Get-VeroSpecFingerprint $specs
         $prev = Get-VeroAppliedState
@@ -611,7 +615,11 @@ function Sync-VeroKillSwitchCore {
             }
         } catch { Write-VeroLog "ERROR: could not tell whether the tunnel carries traffic again ($($_.Exception.Message)) - Hyper-V VMs stay blocked for now" $Action }
     }
-    $aclWant = ((-not [bool]$tun) -or [bool]$suspect) -and [bool]$Config.Vm
+    # a split-tunnel profile: the VMs and WSL stay blocked even while it is up (they would reach the rest past the tunnel)
+    $full = if ($tun -and $Config.Vm) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
+    if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "'$($Config.Profile)' routes only part of the traffic into the tunnel (split tunnel) - VMs and WSL stay blocked" $Action }
+    $script:SplitLogged = -not $full
+    $aclWant = ((-not [bool]$tun) -or [bool]$suspect -or -not $full) -and [bool]$Config.Vm
     if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {
         try { $null = Set-VeroVmBlock -Block $aclWant -Action $Action; $script:AclBlocked = $aclWant }
         catch { Write-VeroLog "ERROR: Hyper-V port ACLs: $($_.Exception.Message)" $Action }
@@ -621,23 +629,22 @@ function Sync-VeroKillSwitchCore {
     # what this long-lived process remembers about the Windows VPN entries is looked up again now and then: an entry changed
     # from SSTP to IKEv2 would otherwise keep its old ports here while every short task computes the new ones
     if ($script:SyncCount % 20 -eq 0) { $script:TunnelTypes = @{} }
-    $wslAllow = [bool]$tun -and -not [bool]$suspect                        # like the VMs: blocked after a network drop until proven
+    $wslAllow = [bool]$tun -and -not [bool]$suspect -and $full             # like the VMs: blocked after a drop until proven, and with a split tunnel
     if ($vm -and ($applied -or $script:VmAllowed -ne $wslAllow -or $script:SyncCount % 20 -eq 0)) {
         try { Set-VeroVmAccess -Allow $wslAllow -Action $Action; $script:VmAllowed = $wslAllow }
         catch { Write-VeroLog "ERROR: WSL (Hyper-V firewall): $($_.Exception.Message) - tried again on the next pass" $Action; $script:VmAllowed = $null }
     }
     # the emergency block of an earlier failure goes last: the real filters and the VM / WSL steps are in force by now
     if ($liftEmergency) { try { Remove-VeroLegacyFirewall -Action $Action } catch { Write-VeroLog "ERROR: the emergency block could not be lifted ($($_.Exception.Message)) - tried again on the next pass" $Action } }
-    # refresh the server addresses only now - through the tunnel, after the filters let it through
-    if ($tun -and -not $NoRefresh -and @($Config.ServerIps).Count -eq 0) {
-        $fresh = @(& $th.ResolveIps $Config)
-        return (($fresh -join ',') -ne ($ips -join ','))
-    }
+    # the server addresses are refreshed only now - through the tunnel, after the filters let it through - by the caller,
+    # outside the lock: here only what is in force
+    if ($tun -and -not $NoRefresh -and @($Config.ServerIps).Count -eq 0) { return [pscustomobject]@{ Ips = @($ips) } }
     $false
 }
 $script:SyncCount = 0
 $script:NoDnsLogged = $false
 $script:VmAllowed = $null
+$script:SplitLogged = $false
 $script:AclBlocked = $null
 
 function Disable-VeroKillSwitch {

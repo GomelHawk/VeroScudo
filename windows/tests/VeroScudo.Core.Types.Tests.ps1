@@ -167,11 +167,13 @@ Describe 'WireGuard health and transitions' {
         @{ prev = 'missing'; cur = 'running'; armed = $false; active = $false; lock = $false; want = 'arm' }      # activated in the WireGuard app
         @{ prev = 'missing'; cur = 'running'; armed = $true;  active = $true;  lock = $false; want = 'none' }     # our own (re)dial
         @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $false; want = 'disarm' }   # deactivated in the app
-        @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $true;  want = 'none' }     # our own Reconnect
+        @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $true;  want = 'disarm' }   # deactivated in the app during a redial
+        @{ prev = 'running'; cur = 'missing'; armed = $true;  active = $true;  lock = $true;  own = $true; want = 'none' }   # our own Reconnect
+        @{ prev = 'missing'; cur = 'running'; armed = $false; active = $false; lock = $true;  want = 'none' }     # our own dial after your Off
         @{ prev = 'running'; cur = 'missing'; armed = $false; active = $true;  lock = $false; want = 'none' }     # after our Off
         @{ prev = 'running'; cur = 'stopped'; armed = $true;  active = $true;  lock = $false; want = 'none' }     # crash: a failure, redial
         @{ prev = $null;     cur = 'running'; armed = $false; active = $false; lock = $false; want = 'none' }     # first look after start
-    ) { Get-VeroWgTransition -Previous $prev -Current $cur -Armed $armed -Active $active -LockAlive $lock | Should -Be $want }
+    ) { Get-VeroWgTransition -Previous $prev -Current $cur -Armed $armed -Active $active -LockAlive $lock -OwnRemoval ([bool]$own) | Should -Be $want }
 }
 
 Describe 'Test-VeroWireGuardConf (add check)' {

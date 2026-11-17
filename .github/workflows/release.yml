@@ -20,6 +20,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: The tagged commit is on main
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD || { echo "the tagged commit $GITHUB_SHA is not on main" >&2; exit 1; }
       - name: The tag is the version in the code (Windows and Linux/macOS)
         shell: bash
         run: |
@@ -57,7 +62,6 @@ jobs:
           New-Item -ItemType Directory -Path "$d/icons" -Force | Out-Null
           Copy-Item windows/*.ps1, windows/*.psm1, windows/*.cs, windows/run.vbs, windows/config.example.json $d
           Copy-Item windows/Core $d -Recurse
-          Copy-Item windows/tests-local $d -Recurse
           Copy-Item assets/icons/png, assets/icons/badge, assets/icons/app "$d/icons" -Recurse
           Copy-Item README.md, LICENSE, docs/ARCHITECTURE.md, docs/TESTING.md, docs/SECURITY.md $d
           Compress-Archive -Path $d -DestinationPath "dist/VeroScudo-$v-windows.zip"
@@ -94,6 +98,7 @@ jobs:
         run: |
           mkdir -p dist/VeroScudo-linux/assets/icons
           cp -r linux/. dist/VeroScudo-linux/
+          rm -rf dist/VeroScudo-linux/tests dist/VeroScudo-linux/tests-local   # test scripts are not part of a release
           cp -r assets/icons/png assets/icons/app dist/VeroScudo-linux/assets/icons/
           cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-linux/
           (cd dist && tar -czf "VeroScudo-$VERSION-linux.tar.gz" VeroScudo-linux)
@@ -104,6 +109,7 @@ jobs:
           mkdir -p dist/VeroScudo-macos/assets/icons
           cp -r macos dist/VeroScudo-macos/macos
           cp -r linux dist/VeroScudo-macos/linux
+          rm -rf dist/VeroScudo-macos/linux/tests dist/VeroScudo-macos/linux/tests-local
           cp -r assets/icons/png assets/icons/app dist/VeroScudo-macos/assets/icons/
           cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-macos/
           (cd dist && tar -czf "VeroScudo-$VERSION-macos-alpha.tar.gz" VeroScudo-macos)

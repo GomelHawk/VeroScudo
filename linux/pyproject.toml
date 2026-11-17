@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==80.9.0"]     # exact: what builds the package in CI
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,7 +13,7 @@ authors = [{ name = "Dmitry Koshelenko (GomelHawk)" }]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff==0.17.4"]     # ruff pinned: its default rules change between releases (Dependabot bumps it)
+dev = ["pytest==8.3.5", "ruff==0.17.4"]     # ruff pinned: its default rules change between releases (Dependabot bumps it)
 
 [project.scripts]
 veroscudo = "veroscudo.cli:run"

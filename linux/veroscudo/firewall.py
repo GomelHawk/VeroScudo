@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import pwd
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -107,8 +108,8 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     lines += [
         f"    ct state established,related ct mark {MARK} accept",      # only flows VeroScudo allowed itself
         *([] if tun_iface else [f"    ct state established,related ct mark {MARK_DNS} accept"]),   # DNS: only while down
-        f"    udp sport 68 udp dport 67 {keep}",                         # DHCP
-        f"    udp sport 546 udp dport 547 {keep}",                       # DHCPv6
+        f"    meta skuid {dhcp_uids()} udp sport 68 udp dport 67 {keep}",      # DHCP: only the DHCP clients
+        f"    meta skuid {dhcp_uids()} udp sport 546 udp dport 547 {keep}",    # DHCPv6
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, mld-listener-report } accept",
     ]
     if not tun_iface:
@@ -203,6 +204,18 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     return "\n".join(lines)
 
 
+def dhcp_uids() -> str:
+    """Who may send DHCP: root (NetworkManager, dhclient) and the users DHCP clients drop to where they exist
+    (systemd-networkd, dhcpcd) - no other program may use the DHCP permit to reach a server outside the tunnel."""
+    uids = [0]
+    for name in ("systemd-network", "dhcpcd", "_dhcpcd"):
+        try:
+            uids.append(pwd.getpwnam(name).pw_uid)
+        except KeyError:
+            pass
+    return "{ " + ", ".join(str(u) for u in sorted(set(uids))) + " }"
+
+
 def render_lockdown() -> str:
     """Fail closed without a usable config.json: loopback, DHCP and neighbour discovery only (the machine can get an
     address, nothing else leaves it). Applied by `boot`/`daemon` when the machine is armed but the config cannot be read."""
@@ -213,8 +226,8 @@ def render_lockdown() -> str:
         "  chain output {",
         "    type filter hook output priority 0; policy drop;",
         "    oifname lo accept",
-        "    udp sport 68 udp dport 67 accept",
-        "    udp sport 546 udp dport 547 accept",
+        f"    meta skuid {dhcp_uids()} udp sport 68 udp dport 67 accept",
+        f"    meta skuid {dhcp_uids()} udp sport 546 udp dport 547 accept",
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept",
         "  }",
         "  chain input {",

@@ -218,6 +218,12 @@ Describe 'fix B: the network dropped - Hyper-V VMs stay blocked until the tunnel
         Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 1 -Exactly -ParameterFilter { $Block -eq $false }
         Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
     }
+    It 'a split-tunnel profile: VMs stay blocked although the tunnel is up and carries traffic' {
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelHoldsDefault { $false }
+        Sync-VeroKillSwitch -Config $script:cfgB -Action test -NoRefresh
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -Times 0 -Exactly -ParameterFilter { $Block -eq $false }
+        Should -Invoke -ModuleName VeroScudo.Core Set-VeroVmBlock -ParameterFilter { $Block -eq $true }
+    }
     It 'a new tunnel (a redial) counts as proven without a check' {
         Invoke-VeroAction -Action netdown -Config $script:cfgB
         Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]777 }

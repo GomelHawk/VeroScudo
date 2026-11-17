@@ -37,11 +37,12 @@ function Get-VeroWgTransition {
        'disarm' - the active profile's service was REMOVED (deactivated in the WireGuard app) while armed and VeroScudo was
                   not reconnecting it itself: the user's Off;
        'none'   - anything else (a crash or a stop leaves the service installed: that is a failure, the redial handles it). #>
-    [CmdletBinding()] param([string]$Previous, [string]$Current, [bool]$Armed, [bool]$Active, [bool]$LockAlive, [bool]$RecentOff = $false)
-    if (-not $Previous -or $Previous -eq $Current -or $LockAlive) { return 'none' }
-    # right after your Off nothing arms by itself (a tunnel VeroScudo was still starting may come up now) - like the other types
-    if ($Current -eq 'running' -and -not ($Armed -and $Active)) { return $(if ($RecentOff) { 'none' } else { 'arm' }) }
-    if ($Previous -eq 'running' -and $Current -eq 'missing' -and $Armed -and $Active) { return 'disarm' }
+    [CmdletBinding()] param([string]$Previous, [string]$Current, [bool]$Armed, [bool]$Active, [bool]$LockAlive, [bool]$RecentOff = $false, [bool]$OwnRemoval = $false)
+    if (-not $Previous -or $Previous -eq $Current) { return 'none' }
+    # right after your Off, or while VeroScudo's own (re)dial runs, nothing arms by itself - like the other types
+    if ($Current -eq 'running' -and -not ($Armed -and $Active)) { return $(if ($RecentOff -or $LockAlive) { 'none' } else { 'arm' }) }
+    # removed and not by VeroScudo (its own removal leaves a note): your Off - also while a redial runs
+    if ($Previous -eq 'running' -and $Current -eq 'missing' -and $Armed -and $Active -and -not $OwnRemoval) { return 'disarm' }
     'none'
 }
 
@@ -70,7 +71,7 @@ function Update-VeroWgWatch {
     }
     foreach ($x in @($seen | Where-Object { $started -notcontains $_ })) {
         $active = (Get-VeroConfig).Profile
-        $d = Get-VeroWgTransition -Previous $x.Prev -Current $x.Cur -Armed (Test-VeroArmed) -Active ($x.Name -eq $active) -LockAlive (Test-VeroLockAlive)
+        $d = Get-VeroWgTransition -Previous $x.Prev -Current $x.Cur -Armed (Test-VeroArmed) -Active ($x.Name -eq $active) -LockAlive (Test-VeroLockAlive) -OwnRemoval (Test-VeroWgOwnRemoval $x.Name)
         if ($d -eq 'disarm') {
             Write-VeroLog "WireGuard tunnel '$($x.Name)' was deactivated in the WireGuard app - treated as your Off (decision source: WireGuard service removed, not by VeroScudo)" $Action
             Exit-VeroArmed -Action $Action
@@ -160,11 +161,20 @@ function Invoke-VeroWgDial {
     while (((Get-Date) - $t).TotalSeconds -lt 15) { Start-Sleep -Seconds 1; if ((Get-VeroWgHealthNow $name) -eq 'up') { return }; if (Get-VeroPendingSwitch) { return } }
 }
 
+function Test-VeroWgOwnRemoval([string]$Name) {
+    <# VeroScudo itself removed this tunnel within the last minute (Invoke-VeroWgHangUp left the note). #>
+    $f = (Get-VeroPath).WgOwnRemoval
+    try { $j = Get-Content -LiteralPath $f -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return $false }
+    [string]$j.Profile -eq $Name -and ((Get-Date) - [datetime]::Parse([string]$j.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds -lt 60
+}
+
 function Invoke-VeroWgHangUp {
     <# Deactivates the tunnel exactly like the WireGuard app does (removes its service), so the app shows it inactive too. #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName)
     if ((Get-VeroWgState $ProfileName) -eq 'missing') { return }
     $exe = Join-Path (Get-VeroWgDir) 'wireguard.exe'
+    # the note first: the watchdog must not take this removal for your Off in the WireGuard app
+    try { Write-VeroStateFile -Path (Get-VeroPath).WgOwnRemoval -Text (@{ Profile = $ProfileName; Time = (Get-Date).ToString('o') } | ConvertTo-Json) } catch { Write-Verbose 'own-removal note not written' }
     $null = (Start-VeroCleanProcess -FilePath $exe -ArgumentList ('/uninstalltunnelservice {0}' -f $ProfileName)).WaitForExit(60000)
     $t = Get-Date
     while ((Get-VeroWgState $ProfileName) -ne 'missing' -and ((Get-Date) - $t).TotalSeconds -lt 10) { Start-Sleep -Milliseconds 500 }

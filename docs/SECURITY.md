@@ -95,10 +95,10 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
 - **Another filter layer of VeroScudo's own top priority (Windows).** WFP evaluates sublayers of equal weight in no
   defined order; a *hard permit* there (another program's, installed with administrator rights) can win before
   VeroScudo's block is seen - only a kernel callout could veto it. VeroScudo detects such layers and shows *Attention*.
-- **Split-tunnel VPNs and VMs/WSL (Windows).** Their traffic is translated below WFP and follows Windows' routing table:
-  while the tunnel is up, destinations the VPN does not route into the tunnel - and the local network - are reached
-  directly. Use a profile that routes everything (default gateway, `redirect-gateway`, `AllowedIPs = 0.0.0.0/0`) when
-  VMs and WSL must be covered.
+- **VMs/WSL and the local network (Windows).** Their traffic is translated below WFP and follows Windows' routing table:
+  while the tunnel is up, the local network is reached directly. With a split-tunnel profile (the route to the internet
+  does not lead into the tunnel) VeroScudo keeps VMs and WSL blocked even while it is up, and logs why; if the route
+  cannot be looked up it lets them through as before.
 - **Mobile Hotspot, Internet Connection Sharing and custom NAT (Windows).** What Windows forwards for other devices is
   not filtered.
 - **Another local account turning it off (Linux).** NetworkManager lets local users disconnect a VPN by default
