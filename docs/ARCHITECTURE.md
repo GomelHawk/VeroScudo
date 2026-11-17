@@ -151,7 +151,7 @@ notification). Nothing is ever disconnected or imported without the user's choic
 self-repair and the watchdog's redial are paused and the tray shows *Attention*. A signed release DLL is the real fix.
 
 **Conflicts.** About once a minute the watchdog lists what else tunnels or filters next to VeroScudo (`state\conflicts.json`):
-`openvpn.exe` it did not start, an `.ovpn` with the same server in OpenVPN GUI's or the OpenVPN service's folders, other
+`openvpn.exe` it did not start, other
 active WireGuard tunnels, any other up tunnel adapter (vendor VPN apps), and WFP providers of known VPN apps. Read-only;
 the tray shows *Attention* while armed and protected.
 
