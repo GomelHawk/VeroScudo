@@ -26,14 +26,14 @@ def test_up_minute_without_checks_and_flush(tmp_path):
 def test_profile_names_are_escaped_as_ascii_json():
     line = stats.format_line(5, "aaa", 'Офис "VPN"', 2, 0)
     assert line == '{"m":5,"id":"aaa","p":"\\u041e\\u0444\\u0438\\u0441 \\"VPN\\"","sent":2,"lost":0}'
-    assert stats.parse(line) == ({"aaa": {5: (2, 0, False, 0)}}, {"aaa": 'Офис "VPN"'})
+    assert stats.parse(line) == ({"aaa": {5: (2, 0, False, 0, False)}}, {"aaa": 'Офис "VPN"'})
 
 
 def test_parse_adds_repeats_skips_garbage_caps_lost_and_keeps_the_last_name():
     d, names = stats.parse('{"m":605,"id":"w","p":"W","sent":3,"lost":1}\n{"m":605,"id":"w","p":"W2","sent":2,"lost":0}\n'
                            'garbage\n{"m":606,"id":"w","p":"W2"}\n{"m":1500,"id":"w","p":"W"}\n'
                            '{"m":7,"id":"w","p":"W2","sent":1,"lost":9}\n{"m":8,"p":"old build"}\n{"m":9,"id":"h","p":"H"}\n')
-    assert d == {"w": {605: (5, 1, False, 0), 606: (0, 0, False, 0), 7: (1, 1, False, 0)}, "h": {9: (0, 0, False, 0)}}
+    assert d == {"w": {605: (5, 1, False, 0, False), 606: (0, 0, False, 0, False), 7: (1, 1, False, 0, False)}, "h": {9: (0, 0, False, 0, False)}}
     assert names == {"w": "W2", "h": "H"}
 
 
@@ -115,7 +115,7 @@ def test_parse_up_line_wins_over_a_down_line():
     d, _ = stats.parse('{"m":5,"id":"w","p":"W","down":1}\n{"m":5,"id":"w","p":"W","sent":3,"lost":0}\n'
                        '{"m":6,"id":"w","p":"W","down":1}\n{"m":6,"id":"w","p":"W","down":1}\n'
                        '{"m":7,"id":"w","p":"W"}\n{"m":7,"id":"w","p":"W","down":1}\n')
-    assert d == {"w": {5: (3, 0, False, 0), 6: (0, 0, True, 0), 7: (0, 0, False, 0)}}
+    assert d == {"w": {5: (3, 0, False, 0, False), 6: (0, 0, True, 0, False), 7: (0, 0, False, 0, False)}}
 
 
 def test_two_down_minutes_make_a_bar_bad_and_count_against_good():
@@ -146,14 +146,14 @@ def test_slow_answers_are_recorded_and_make_a_bar_unstable_never_bad():
     assert stats.format_line(5, "w", "W", 6, 0, slow=6) == '{"m":5,"id":"w","p":"W","sent":6,"lost":0,"slow":6}'
     assert stats.format_line(5, "w", "W", 6, 1) == '{"m":5,"id":"w","p":"W","sent":6,"lost":1}'
     data, _ = stats.parse('{"m":5,"id":"w","p":"W","sent":6,"lost":2,"slow":9}\n{"m":5,"id":"w","p":"W","sent":6,"lost":0,"slow":1}')
-    assert data["w"][5] == (12, 2, False, 5)                 # 9 capped at 6 - 2
+    assert data["w"][5] == (12, 2, False, 5, False)                 # 9 capped at 6 - 2
     assert stats.bar_state(10, 60, 0, 60) == "unstable"
     assert stats.bar_state(10, 60, 0, 5) == "good"
     assert stats.bar_state(10, 60, 2, 4) == "unstable"
     assert stats.bar_state(10, 60, 40, 20) == "bad"
     day = stats.day_row({m: (6, 0, False, 6) for m in range(10)})
     assert day.bars[0].state == "unstable" and day.bars[0].slow == 60
-    assert stats.bar_text(day.bars[0]) == "00:00-00:10  unstable – 0 % lost (0 of 60 checks), 60 slow (over 1 s), connected 10 of 10 min"
+    assert stats.bar_text(day.bars[0]) == "00:00-00:10  unstable – 00:00-00:01: 0 of 6 checks lost, 6 slow (over 1 s); all 10 min: 0 % lost (0 of 60 checks), 60 slow (over 1 s), connected 10 of 10 min"
 
 
 def test_recorder_writes_slow(tmp_path):

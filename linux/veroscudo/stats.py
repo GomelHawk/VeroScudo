@@ -3,7 +3,8 @@
 The daemon notes, minute by minute, which VeroScudo profile was up and - when the connection check is on - how many of its
 checks were sent, lost and slow (answered, but over 1 s per round trip) in that minute. One file per local day, <state>/stats/yyyy-mm-dd.jsonl, one line per minute and
 profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1 (+ ,"slow":2 when any);
-a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing).
+a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing);
+a minute the connected profile was lost (VeroScudo on, the same profile, then redialed): + ,"drop":1 (its bar is bad).
 Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
 profile's lasting id (config.profile_id), so a renamed profile keeps its history; "p" is its name at that minute, so a
 removed profile is still shown by its last name. A minute without a line = VPN off, the computer asleep or VeroScudo
@@ -25,16 +26,18 @@ BUCKET_MINUTES = 10
 _FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 
 
-def format_line(minute: int, pid: str, name: str, sent: int = 0, lost: int = 0, down: bool = False, slow: int = 0) -> str:
+def format_line(minute: int, pid: str, name: str, sent: int = 0, lost: int = 0, down: bool = False, slow: int = 0,
+                drop: bool = False) -> str:
     head = f'{{"m":{minute},"id":{json.dumps(pid)},"p":{json.dumps(name, ensure_ascii=True)}'
+    tail = ',"drop":1}' if drop else "}"
     if down:
-        return head + ',"down":1}'
+        return head + ',"down":1' + tail
     if sent <= 0:
-        return head + "}"
-    return f'{head},"sent":{sent},"lost":{lost}' + (f',"slow":{slow}' if slow > 0 else "") + "}"
+        return head + tail
+    return f'{head},"sent":{sent},"lost":{lost}' + (f',"slow":{slow}' if slow > 0 else "") + tail
 
 
-Minutes = dict[int, tuple[int, int, bool, int]]  # minute -> (sent, lost, down, slow); down: on, but not connected all minute
+Minutes = dict[int, tuple]  # minute -> (sent, lost, down, slow, drop); down: on, but not connected all minute; drop: the connection was lost
 
 
 def parse(text: str) -> tuple[dict[str, Minutes], dict[str, str]]:
@@ -51,14 +54,15 @@ def parse(text: str) -> tuple[dict[str, Minutes], dict[str, str]]:
             lost = min(int(j.get("lost", 0)), sent)
             slow = min(int(j.get("slow", 0)), sent - lost)
             down = j.get("down") == 1
+            drop = j.get("drop") == 1
         except (ValueError, KeyError, TypeError):
             continue
         if not (isinstance(pid, str) and pid and isinstance(name, str) and 0 <= minute < 1440 and sent >= 0 and lost >= 0
                 and slow >= 0):
             continue
         day = out.setdefault(pid, {})
-        s0, l0, d0, w0 = day.get(minute, (0, 0, True, 0))
-        day[minute] = (s0 + sent, l0 + lost, d0 and down, w0 + slow)
+        s0, l0, d0, w0, x0 = day.get(minute, (0, 0, True, 0, False))
+        day[minute] = (s0 + sent, l0 + lost, d0 and down, w0 + slow, x0 or drop)
         names[pid] = name
     return out, names
 
@@ -82,6 +86,12 @@ class Bar:
     lost: int
     down_minutes: int = 0             # VeroScudo on, the profile not connected
     slow: int = 0                     # answered, but over 1 s per round trip
+    worst_start: int = 0              # the worst rating window in the bar (worst_end 0: none had checks)
+    worst_end: int = 0
+    worst_sent: int = 0
+    worst_lost: int = 0
+    worst_slow: int = 0
+    drop_at: int = -1                 # the bar's first minute the connection was lost (VeroScudo redialed); -1: none
 
 
 DOWN_BAD = 2                          # a bar with this many minutes on-but-not-connected is bad (a redial that keeps failing)
@@ -95,17 +105,47 @@ class Day:
     down_minutes: int = 0             # on, but not connected
 
 
-def day_row(minutes: Minutes, bucket: int = BUCKET_MINUTES, until: int = 1440) -> Day:
-    """A day's minutes -> its bars and totals. good_pct: the share of good minutes ('up' counts as good: the VPN worked
-    and nothing was measured) out of the connected and the could-not-connect minutes. A bar with DOWN_BAD or more
-    could-not-connect minutes is bad. until: today - later empty bars are 'future'. Pure."""
+_RANK = {"good": 0, "unstable": 1, "bad": 2}
+
+
+def _worst_window(minutes: Minutes, start: int, end: int, window: int) -> tuple[int, int, int, int, int] | None:
+    """The bar start..end cut into rating windows of `window` minutes (Settings > "Rate the last"; a shorter rest joins the
+    last one) -> (start, end, sent, lost, slow) of the worst rated one (the earliest of equals), None: no checks. Pure."""
+    w = max(1, min(window, end - start))
+    n = (end - start) // w
+    worst, best_key = None, None
+    for k in range(n):
+        a, b = start + k * w, start + (k + 1) * w if k < n - 1 else end
+        sent = lost = slow = 0
+        for m in range(a, b):
+            v = minutes.get(m)
+            if v is None or (len(v) > 2 and v[2]):
+                continue
+            sent += v[0]
+            lost += v[1]
+            slow += v[3] if len(v) > 3 else 0
+        if sent > 0:
+            key = (_RANK[quality.rating(lost, slow, sent)], lost / sent, (lost + slow) / sent)
+            if best_key is None or key > best_key:
+                worst, best_key = (a, b, sent, lost, slow), key
+    return worst
+
+
+def day_row(minutes: Minutes, bucket: int = BUCKET_MINUTES, until: int = 1440, window: int = 1) -> Day:
+    """A day's minutes -> its bars and totals. A bar is as good as its worst rating window of `window` minutes (Settings >
+    "Rate the last"): one bad minute in ten makes the bar bad. good_pct: the share of good minutes ('up' counts as good:
+    the VPN worked and nothing was measured) out of the connected and the could-not-connect minutes. A bar with DOWN_BAD
+    or more could-not-connect minutes is bad. until: today - later empty bars are 'future'. Pure."""
     bars, vpn, good, down_all = [], 0, 0, 0
     for start in range(0, 1440, bucket):
         up = down = sent = lost = slow = 0
+        drop_at = -1
         for m in range(start, min(start + bucket, 1440)):
             v = minutes.get(m)
             if v is None:
                 continue
+            if len(v) > 4 and v[4] and drop_at < 0:
+                drop_at = m
             if len(v) > 2 and v[2]:
                 down += 1
             else:
@@ -113,13 +153,14 @@ def day_row(minutes: Minutes, bucket: int = BUCKET_MINUTES, until: int = 1440) -
                 sent += v[0]
                 lost += v[1]
                 slow += v[3] if len(v) > 3 else 0
-        state = ("future" if start >= until and up == 0 and down == 0 else "bad" if down >= DOWN_BAD
-                 else bar_state(up, sent, lost, slow))
+        worst = _worst_window(minutes, start, min(start + bucket, 1440), window)
+        state = ("future" if start >= until and up == 0 and down == 0 else "bad" if down >= DOWN_BAD or drop_at >= 0
+                 else bar_state(up, *worst[2:]) if worst else bar_state(up, sent, lost, slow))
         vpn += up
         down_all += down
         if state in ("good", "up"):
             good += up
-        bars.append(Bar(start, state, up, sent, lost, down, slow))
+        bars.append(Bar(start, state, up, sent, lost, down, slow, *(worst or (0, 0, 0, 0, 0)), drop_at))
     total = vpn + down_all
     return Day(bars, vpn, round(100.0 * good / total) if total else None, down_all)
 
@@ -132,17 +173,24 @@ def bar_text(bar: Bar, bucket: int = BUCKET_MINUTES) -> str:
     span = f"{_hm(bar.start)}-{_hm(min(bar.start + bucket, 1440))}"
     if bar.down_minutes >= DOWN_BAD:
         text = f"{span}  could not connect {bar.down_minutes} of {bucket} min (VeroScudo on)"
+        text += f"; connection lost at {_hm(bar.drop_at)}" if bar.drop_at >= 0 else ""
         return text + (f"; connected {bar.up_minutes} of {bucket} min" if bar.up_minutes > 0 else "")
     if bar.state == "future":
         return span
+    if bar.drop_at >= 0:
+        text = f"{span}  bad – connection lost at {_hm(bar.drop_at)}, VeroScudo redialed; connected {bar.up_minutes} of {bucket} min"
+        return text + (f"; {round(100.0 * bar.lost / bar.sent)} % of checks lost ({bar.lost} of {bar.sent})" if bar.sent else "")
     if bar.state == "off":
         return f"{span}  not connected"
     if bar.state == "up":
         return f"{span}  connected {bar.up_minutes} of {bucket} min – not rated (connection check off)"
     pct = round(100.0 * bar.lost / bar.sent)
-    return (f"{span}  {bar.state} – {pct} % lost ({bar.lost} of {bar.sent} checks), "
-            + (f"{bar.slow} slow (over 1 s), " if bar.slow else "")
-            + f"connected {bar.up_minutes} of {bucket} min")
+    whole = (f"{pct} % lost ({bar.lost} of {bar.sent} checks), " + (f"{bar.slow} slow (over 1 s), " if bar.slow else "")
+             + f"connected {bar.up_minutes} of {bucket} min")
+    if bar.state in ("unstable", "bad") and bar.worst_end and bar.worst_end - bar.worst_start < min(bar.start + bucket, 1440) - bar.start:
+        return (f"{span}  {bar.state} – {_hm(bar.worst_start)}-{_hm(bar.worst_end)}: {bar.worst_lost} of {bar.worst_sent} checks lost"
+                + (f", {bar.worst_slow} slow (over 1 s)" if bar.worst_slow else "") + f"; all {bucket} min: {whole}")
+    return f"{span}  {bar.state} – {whole}"
 
 
 def _dur(minutes: int) -> str:
@@ -191,14 +239,14 @@ def profiles_seen(state_dir: Path, now: datetime | None = None) -> list[tuple[st
     return [(pid, names[pid]) for pid in sorted(last, key=lambda n: last[n], reverse=True)]
 
 
-def week(state_dir: Path, pid: str, now: datetime | None = None) -> list[tuple[str, Day]]:
-    """The window's 7 rows for one profile (by id), today first."""
+def week(state_dir: Path, pid: str, now: datetime | None = None, window: int = 1) -> list[tuple[str, Day]]:
+    """The window's 7 rows for one profile (by id), today first. window: Settings > "Rate the last" (minutes)."""
     now = now or datetime.now()
     out = []
     for i in range(7):
         d = now.date() - timedelta(days=i)
         until = now.hour * 60 + now.minute + 1 if i == 0 else 1440
-        out.append((day_label(d, now.date()), day_row(read_day(state_dir, d)[0].get(pid, {}), until=until)))
+        out.append((day_label(d, now.date()), day_row(read_day(state_dir, d)[0].get(pid, {}), until=until, window=window)))
     return out
 
 
@@ -220,8 +268,9 @@ class Recorder:
     def __init__(self, state_dir: Path) -> None:
         self.dir = stats_dir(state_dir)
         self._lock = threading.Lock()
-        self._cur: dict | None = None            # {date, m, p: {id: [up, sent, lost, name, down, slow]}}
+        self._cur: dict | None = None            # {date, m, p: {id: [up, sent, lost, name, down, slow, drop]}}
         self._pruned = ""
+        self._was_up = ""                        # the profile seen connected since VeroScudo was last off: a down pass for it = a drop
 
     def _select(self, now: datetime) -> dict:
         d, m = now.date().isoformat(), now.hour * 60 + now.minute
@@ -232,7 +281,7 @@ class Recorder:
 
     def _save(self) -> None:
         c = self._cur
-        lines = [format_line(c["m"], pid, v[3], v[1], v[2], down=not v[0], slow=v[5]) for pid, v in c["p"].items() if v[0] or v[4]] \
+        lines = [format_line(c["m"], pid, v[3], v[1], v[2], down=not v[0], slow=v[5], drop=v[6]) for pid, v in c["p"].items() if v[0] or v[4]] \
             if c else []
         if not lines:
             return
@@ -241,17 +290,20 @@ class Recorder:
             f.write("".join(ln + "\n" for ln in lines))
 
     def tick(self, up: bool, pid: str, name: str, now: datetime | None = None, down: bool = False) -> None:
-        """up: the profile is connected (and VeroScudo on); down: VeroScudo is on, but the profile is not connected."""
+        """up: the profile is connected (and VeroScudo on); down: VeroScudo is on, but the profile is not connected - after it
+        was connected (the same profile, VeroScudo not off in between) that is a drop. Neither: VeroScudo off."""
         now = now or datetime.now()
         with self._lock:
             c = self._select(now)
             if (up or down) and pid:
-                v = c["p"].setdefault(pid, [False, 0, 0, name, False, 0])
+                v = c["p"].setdefault(pid, [False, 0, 0, name, False, 0, False])
                 v[3] = name
                 if up:
                     v[0] = True
                 else:
                     v[4] = True
+                    v[6] = v[6] or self._was_up == pid
+            self._was_up = pid if up else self._was_up if down else ""
             if self._pruned != c["date"]:
                 self.prune(now)
                 self._pruned = c["date"]
@@ -260,7 +312,7 @@ class Recorder:
         if not pid:
             return
         with self._lock:
-            v = self._select(now or datetime.now())["p"].setdefault(pid, [False, 0, 0, name, False, 0])
+            v = self._select(now or datetime.now())["p"].setdefault(pid, [False, 0, 0, name, False, 0, False])
             v[0], v[3] = True, name
             v[1] += sent
             v[2] += lost

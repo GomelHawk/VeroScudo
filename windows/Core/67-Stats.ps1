@@ -3,7 +3,8 @@
 # its checks were sent, lost and slow (answered, but over 1 s per round trip) in that minute. One file per local day,
 # state\stats\yyyy-MM-dd.jsonl, one line per minute and profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"}
 # (up, check off) or the same with "sent":3,"lost":1 (+ ,"slow":2 when any);
-# a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing).
+# a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing);
+# a minute the connected profile was lost (VeroScudo on, the same profile, then redialed): + ,"drop":1 (its bar is bad).
 # Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
 # profile's lasting id (Get-VeroProfileId), so a renamed profile keeps its history; "p" is its name at that minute, so a
 # removed profile is still shown by its last name. A minute without a line = VPN off, PC asleep or VeroScudo off. JSON with
@@ -13,6 +14,7 @@
 $script:StatsKeepDays = 8                                                # 7 full days + today
 $script:StatsMinute = $null                                              # the minute being collected: @{ Date; M; P = @{ id = @{ Up; Sent; Lost; Name } } }
 $script:StatsPruned = ''                                                 # the date old files were last removed
+$script:StatsWasUp = ''                                                  # the profile seen connected since VeroScudo was last off: a down pass for it = a drop
 
 function Get-VeroStatsDir { Join-Path (Get-VeroPath).State 'stats' }
 
@@ -35,11 +37,12 @@ function ConvertTo-VeroJsonString([string]$Text) {
 
 function Format-VeroStatsLine {
     <# One minute of one profile -> its line. Pure. #>
-    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0, [switch]$Down, [int]$Slow = 0)
+    [CmdletBinding()] param([Parameter(Mandatory)][int]$Minute, [Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][AllowEmptyString()][string]$Name, [int]$Sent = 0, [int]$Lost = 0, [switch]$Down, [int]$Slow = 0, [switch]$Drop)
     $head = '{{"m":{0},"id":{1},"p":{2}' -f $Minute, (ConvertTo-VeroJsonString $Id), (ConvertTo-VeroJsonString $Name)
-    if ($Down) { return $head + ',"down":1}' }
-    if ($Sent -le 0) { return $head + '}' }
-    ('{0},"sent":{1},"lost":{2}' -f $head, $Sent, $Lost) + $(if ($Slow -gt 0) { ',"slow":' + $Slow } else { '' }) + '}'
+    $tail = if ($Drop) { ',"drop":1}' } else { '}' }
+    if ($Down) { return $head + ',"down":1' + $tail }
+    if ($Sent -le 0) { return $head + $tail }
+    ('{0},"sent":{1},"lost":{2}' -f $head, $Sent, $Lost) + $(if ($Slow -gt 0) { ',"slow":' + $Slow } else { '' }) + $tail
 }
 
 function Save-VeroStatsMinute {
@@ -48,8 +51,8 @@ function Save-VeroStatsMinute {
     if (-not $s) { return }
     $lines = @(foreach ($id in $s.P.Keys) {
         $v = $s.P[$id]
-        if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost -Slow $v.Slow }
-        elseif ($v.Down) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Down }      # on, but no tunnel all minute
+        if ($v.Up) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Sent $v.Sent -Lost $v.Lost -Slow $v.Slow -Drop:$v.Drop }
+        elseif ($v.Down) { Format-VeroStatsLine -Minute $s.M -Id $id -Name $v.Name -Down -Drop:$v.Drop }      # on, but no tunnel all minute
     })
     if ($lines.Count -eq 0) { return }
     $dir = Get-VeroStatsDir
@@ -70,17 +73,22 @@ function Select-VeroStatsMinute([datetime]$Now) {
 }
 
 function Get-VeroStatsSlot($Minute, [string]$Id, [string]$Name) {
-    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Down = $false; Sent = 0; Lost = 0; Slow = 0; Name = $Name } }
+    if (-not $Minute.P.Contains($Id)) { $Minute.P[$Id] = @{ Up = $false; Down = $false; Sent = 0; Lost = 0; Slow = 0; Drop = $false; Name = $Name } }
     $Minute.P[$Id].Name = $Name
     $Minute.P[$Id]
 }
 
 function Update-VeroStats {
-    <# The watchdog's 15-second pass: was VeroScudo's VPN up right now, on which profile? Also removes old files once a day. #>
+    <# The watchdog's 15-second pass: was VeroScudo's VPN up right now, on which profile? -Down after the same profile was up
+       (VeroScudo not off in between) is a drop. Also removes old files once a day. #>
     [CmdletBinding()] param([Parameter(Mandatory)][bool]$Up, [string]$Id = '', [string]$Name = '', [bool]$Down = $false, [datetime]$Now = (Get-Date))
     $s = Select-VeroStatsMinute $Now
     if ($Up -and $Id) { (Get-VeroStatsSlot $s $Id $Name).Up = $true }
-    elseif ($Down -and $Id) { (Get-VeroStatsSlot $s $Id $Name).Down = $true }     # on, but the active profile is not connected
+    elseif ($Down -and $Id) {                                                       # on, but the active profile is not connected
+        $v = Get-VeroStatsSlot $s $Id $Name; $v.Down = $true
+        if ($script:StatsWasUp -eq $Id) { $v.Drop = $true }
+    }
+    $script:StatsWasUp = if ($Up) { $Id } elseif ($Down) { $script:StatsWasUp } else { '' }
     if ($script:StatsPruned -ne $s.Date) { Remove-VeroOldStats -Now $Now; $script:StatsPruned = $s.Date }
 }
 
@@ -105,9 +113,9 @@ function Remove-VeroOldStats {
     }
 }
 
-$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+)(?:,"slow":(\d+))?)?(,"down":1)?\}\s*$'
+$script:StatsLine = [regex]'^\s*\{"m":(\d{1,4}),"id":"([0-9A-Za-z_-]{1,64})","p":"((?:[^"\\]|\\.)*)"(?:,"sent":(\d+),"lost":(\d+)(?:,"slow":(\d+))?)?(,"down":1)?(,"drop":1)?\}\s*$'
 function ConvertFrom-VeroStatsText {
-    <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost; Down; Slow } } }; Names = @{ <id> = its last name } }. Several
+    <# A day file's text -> @{ Data = @{ <id> = @{ <minute> = @{ Sent; Lost; Down; Slow; Drop } } }; Names = @{ <id> = its last name } }. Several
        lines for one minute (the watchdog restarted) are added up; a broken line or one without an id is skipped. Pure. #>
     [CmdletBinding()] param([string]$Text)
     $data = @{}; $names = @{}; $decoded = @{}
@@ -124,10 +132,12 @@ function ConvertFrom-VeroStatsText {
         if (-not $data.ContainsKey($id)) { $data[$id] = @{} }
         $day = $data[$id]
         $down = $mt.Groups[7].Success                                    # on, not connected - an up line for the minute wins
+        $drop = $mt.Groups[8].Success                                    # the connection was lost in this minute
         if ($day.ContainsKey($m)) {
             $day[$m].Sent += $sent; $day[$m].Lost += $lost; $day[$m].Slow += $slow
             if (-not $down) { $day[$m].Down = $false }
-        } else { $day[$m] = @{ Sent = $sent; Lost = $lost; Down = $down; Slow = $slow } }
+            if ($drop) { $day[$m].Drop = $true }
+        } else { $day[$m] = @{ Sent = $sent; Lost = $lost; Down = $down; Slow = $slow; Drop = $drop } }
         $names[$id] = $decoded[$raw]
     }
     @{ Data = $data; Names = $names }
@@ -171,28 +181,60 @@ function Get-VeroStatsState {
     Get-VeroQualityRating $Lost $Slow $Sent
 }
 
+function Get-VeroStatsWorstWindow([hashtable]$Minutes, [int]$Start, [int]$End, [int]$WindowMinutes) {
+    <# The bar Start..End cut into rating windows of -WindowMinutes (Settings > "Rate the last"; a shorter rest joins the last
+       one) -> @{ Start; End; Sent; Lost; Slow } of the worst rated one (the earliest of equals), $null: no checks. Pure (= stats._worst_window). #>
+    $rank = @{ good = 0; unstable = 1; bad = 2 }
+    $w = [Math]::Max(1, [Math]::Min($WindowMinutes, $End - $Start))
+    $n = [int][Math]::Floor(($End - $Start) / $w)
+    $worst = $null; $best = $null
+    for ($k = 0; $k -lt $n; $k++) {
+        $a = $Start + $k * $w; $b = if ($k -lt $n - 1) { $a + $w } else { $End }
+        $sent = 0; $lost = 0; $slow = 0
+        for ($m = $a; $m -lt $b; $m++) {
+            if (-not $Minutes.ContainsKey($m)) { continue }
+            $x = $Minutes[$m]
+            if ($x.ContainsKey('Down') -and $x.Down) { continue }
+            $sent += $x.Sent; $lost += $x.Lost; if ($x.ContainsKey('Slow')) { $slow += $x.Slow }
+        }
+        if ($sent -le 0) { continue }
+        $key = @($rank[(Get-VeroQualityRating $lost $slow $sent)], ($lost / $sent), (($lost + $slow) / $sent))
+        $better = $null -eq $best
+        if (-not $better) { for ($i = 0; $i -lt 3; $i++) { if ($key[$i] -ne $best[$i]) { $better = $key[$i] -gt $best[$i]; break } } }
+        if ($better) { $best = $key; $worst = @{ Start = $a; End = $b; Sent = $sent; Lost = $lost; Slow = $slow } }
+    }
+    $worst
+}
+
 function ConvertTo-VeroStatsDay {
-    <# One day's minutes -> its row: bars of -BucketMinutes each (State, Start minute, UpMinutes, DownMinutes, Sent, Lost) and
+    <# One day's minutes -> its row: bars of -BucketMinutes each (State, Start minute, UpMinutes, DownMinutes, Sent, Lost, Worst*) and
        the day's totals: VpnMinutes (connected), DownMinutes (on but not connected) and GoodPct (good bars' connected minutes
-       out of connected + not connected - 'up' bars count as good: the VPN worked and nothing was measured). A bar with 2 or
-       more minutes on but not connected is bad (a redial that keeps failing). -UntilMinute: today - later bars are 'future'.
-       Pure. #>
-    [CmdletBinding()] param([hashtable]$Minutes = @{}, [ValidateRange(1, 60)][int]$BucketMinutes = 10, [int]$UntilMinute = 1440)
+       out of connected + not connected - 'up' bars count as good: the VPN worked and nothing was measured). A bar is as good
+       as its worst rating window of -WindowMinutes (Settings > "Rate the last"): one bad minute in ten makes the bar bad. A bar
+       with 2 or more minutes on but not connected is bad (a redial that keeps failing). -UntilMinute: today - later bars are
+       'future'. Pure. #>
+    [CmdletBinding()] param([hashtable]$Minutes = @{}, [ValidateRange(1, 60)][int]$BucketMinutes = 10, [int]$UntilMinute = 1440,
+        [ValidateRange(1, 60)][int]$WindowMinutes = 1)
     $bars = New-Object System.Collections.Generic.List[object]
     $vpn = 0; $good = 0; $downAll = 0
     for ($start = 0; $start -lt 1440; $start += $BucketMinutes) {
-        $up = 0; $down = 0; $sent = 0; $lost = 0; $slow = 0
+        $up = 0; $down = 0; $sent = 0; $lost = 0; $slow = 0; $dropAt = -1
         for ($m = $start; $m -lt [Math]::Min($start + $BucketMinutes, 1440); $m++) {
             if (-not $Minutes.ContainsKey($m)) { continue }
             $x = $Minutes[$m]
+            if ($x.ContainsKey('Drop') -and $x.Drop -and $dropAt -lt 0) { $dropAt = $m }
             if ($x.ContainsKey('Down') -and $x.Down) { $down++ } else { $up++; $sent += $x.Sent; $lost += $x.Lost; if ($x.ContainsKey('Slow')) { $slow += $x.Slow } }
         }
+        $worst = Get-VeroStatsWorstWindow $Minutes $start ([Math]::Min($start + $BucketMinutes, 1440)) $WindowMinutes
         $state = if ($start -ge $UntilMinute -and $up -eq 0 -and $down -eq 0) { 'future' }
-                 elseif ($down -ge 2) { 'bad' }
+                 elseif ($down -ge 2 -or $dropAt -ge 0) { 'bad' }
+                 elseif ($worst) { Get-VeroStatsState -UpMinutes $up -Sent $worst.Sent -Lost $worst.Lost -Slow $worst.Slow }
                  else { Get-VeroStatsState -UpMinutes $up -Sent $sent -Lost $lost -Slow $slow }
         $vpn += $up; $downAll += $down
         if ($state -eq 'good' -or $state -eq 'up') { $good += $up }
-        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; DownMinutes = $down; Sent = $sent; Lost = $lost; Slow = $slow })
+        $bars.Add([pscustomobject]@{ Start = $start; State = $state; UpMinutes = $up; DownMinutes = $down; Sent = $sent; Lost = $lost; Slow = $slow
+            WorstStart = $(if ($worst) { $worst.Start } else { 0 }); WorstEnd = $(if ($worst) { $worst.End } else { 0 })
+            WorstSent = $(if ($worst) { $worst.Sent } else { 0 }); WorstLost = $(if ($worst) { $worst.Lost } else { 0 }); WorstSlow = $(if ($worst) { $worst.Slow } else { 0 }); DropAt = $dropAt })
     }
     $all = $vpn + $downAll
     [pscustomobject]@{
@@ -212,7 +254,13 @@ function Format-VeroStatsBar {
     $dn = if ($Bar.PSObject.Properties['DownMinutes']) { [int]$Bar.DownMinutes } else { 0 }
     if ($dn -ge 2) {
         $txt = "$span  could not connect $dn of $BucketMinutes min (VeroScudo on)"
+        if ($Bar.PSObject.Properties['DropAt'] -and [int]$Bar.DropAt -ge 0) { $txt += "; connection lost at $(& $t $Bar.DropAt)" }
         if ($Bar.UpMinutes -gt 0) { $txt += "; connected $($Bar.UpMinutes) of $BucketMinutes min" }
+        return $txt
+    }
+    if ($Bar.State -ne 'future' -and $Bar.PSObject.Properties['DropAt'] -and [int]$Bar.DropAt -ge 0) {
+        $txt = "$span  bad $dash connection lost at $(& $t $Bar.DropAt), VeroScudo redialed; connected $($Bar.UpMinutes) of $BucketMinutes min"
+        if ($Bar.Sent -gt 0) { $txt += "; $(([Math]::Round(100.0 * $Bar.Lost / $Bar.Sent, 0)).ToString([Globalization.CultureInfo]::InvariantCulture)) % of checks lost ($($Bar.Lost) of $($Bar.Sent))" }
         return $txt
     }
     switch ($Bar.State) {
@@ -222,7 +270,13 @@ function Format-VeroStatsBar {
         default {
             $pct = ([Math]::Round(100.0 * $Bar.Lost / $Bar.Sent, 0)).ToString([Globalization.CultureInfo]::InvariantCulture)
             $sl = if ($Bar.PSObject.Properties['Slow'] -and [int]$Bar.Slow -gt 0) { "$($Bar.Slow) slow (over 1 s), " } else { '' }
-            "$span  $($Bar.State) $dash $pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), ${sl}connected $($Bar.UpMinutes) of $BucketMinutes min"
+            $whole = "$pct % lost ($($Bar.Lost) of $($Bar.Sent) checks), ${sl}connected $($Bar.UpMinutes) of $BucketMinutes min"
+            if ($Bar.State -in 'unstable', 'bad' -and $Bar.PSObject.Properties['WorstEnd'] -and [int]$Bar.WorstEnd -gt 0 -and
+                ([int]$Bar.WorstEnd - [int]$Bar.WorstStart) -lt ([Math]::Min($Bar.Start + $BucketMinutes, 1440) - $Bar.Start)) {
+                $ws = if ([int]$Bar.WorstSlow -gt 0) { ", $($Bar.WorstSlow) slow (over 1 s)" } else { '' }
+                return "$span  $($Bar.State) $dash $(& $t $Bar.WorstStart)-$(& $t $Bar.WorstEnd): $($Bar.WorstLost) of $($Bar.WorstSent) checks lost$ws; all $BucketMinutes min: $whole"
+            }
+            "$span  $($Bar.State) $dash $whole"
         }
     }
 }

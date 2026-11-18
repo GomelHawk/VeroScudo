@@ -378,7 +378,7 @@ Describe 'Connection check: slow answers (over 1 s per round trip)' {
         $m = @{}; foreach ($i in 0..9) { $m[$i] = @{ Sent = 6; Lost = 0; Down = $false; Slow = 6 } }
         $day = ConvertTo-VeroStatsDay -Minutes $m
         $day.Bars[0].State | Should -Be 'unstable'; $day.Bars[0].Slow | Should -Be 60
-        Format-VeroStatsBar -Bar $day.Bars[0] | Should -Be ("00:00-00:10  unstable {0} 0 % lost (0 of 60 checks), 60 slow (over 1 s), connected 10 of 10 min" -f [char]0x2013)
+        Format-VeroStatsBar -Bar $day.Bars[0] | Should -Be ("00:00-00:10  unstable {0} 00:00-00:01: 0 of 6 checks lost, 6 slow (over 1 s); all 10 min: 0 % lost (0 of 60 checks), 60 slow (over 1 s), connected 10 of 10 min" -f [char]0x2013)
     }
 }
 

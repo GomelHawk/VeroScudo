@@ -5,6 +5,14 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Statistics: a 10-minute bar shows its worst moment
+- A bar is rated per Settings > *Rate the last* window (1 min: 10 windows per bar) and takes the worst window's colour:
+  one unstable minute makes the bar amber, one bad minute brown. Before, the whole 10 minutes were averaged and a short
+  outage stayed green. The tooltip names the worst window.
+- A lost connection (VeroScudo still on, the same profile, then redialed) makes its bar brown ("connection lost at
+  14:23"), even when the redial took less than a minute. Recorded as `"drop":1` in the day file; turning on, a profile
+  switch and Off do not count. Windows, Linux and macOS alike.
+
 ### Security: review of every platform
 - **Windows, OpenVPN:** `setenv "opt" <option>` (quoted or escaped) passed the config check and OpenVPN read it as that
   option - any option, `plugin` included, in a process run as administrator. `setenv` is now accepted only for

@@ -25,8 +25,8 @@ boot), the tray autostart `/etc/xdg/autostart/veroscudo-tray.desktop` and the me
 `/etc/veroscudo/config.json`, the log `/var/log/veroscudo.log` (readable by the `adm` group).
 
 **Tray** (top bar): Turn VPN on / off, Reconnect VPN, VPN profile ▸, Status… (middle-click too), Open log, Statistics… (7
-days of VPN time and connection quality, one bar per 10 minutes on a 24-hour grid; minutes VeroScudo was on but could
-not connect count as bad), Settings…
+days of VPN time and connection quality, one bar per 10 minutes on a 24-hour grid, coloured by its worst rating window; a lost
+connection or minutes VeroScudo was on but could not connect count as bad), Settings…
 (import a NetworkManager connection, remove, default, update check, containers/VMs - each change asks for your password;
 *Show exit location* and the service status page are your own settings and are saved at once; the connection check
 can use ping, a TCP port or HTTPS - a TLS handshake and a HEAD request, any answer counts, no account or key), Keep awake (a green ring on the icon while on), Check for

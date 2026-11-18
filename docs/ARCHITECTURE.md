@@ -431,13 +431,18 @@ how long the profile was connected that day and *good %* (the share of that time
   with the VPN up: `{"m":605,"id":"3f2a9c0d1e2b","p":"Work"}` (up, check off) or the same with `"sent":3,"lost":1`;
   `p` is the profile's name at that minute (JSON, ASCII escapes). A minute VeroScudo was **on but could not connect** (the
   active profile redialing, or Hiddify not connected) is recorded as `{"m":...,"id":...,"p":...,"down":1}`; an up line for
-  the same minute wins. A minute without a line: VPN off, the computer asleep
+  the same minute wins. A minute the connected profile was **lost** (VeroScudo still on, the same profile; turning on,
+  a profile switch and Off are not losses) gets `,"drop":1` until it is connected again. A minute without a line: VPN off, the computer asleep
   or VeroScudo off. Raw counts rather than colours, so the window can group them into any bar width and a later change of
   the thresholds re-rates old days. About 30 KB a day; files older than 8 days are removed by the guard.
-- **Colours:** the connection check's thresholds per bar - green under 10 % lost, amber 10-50 %, brown over 50 %; grey =
-  this profile not connected. With the check off there is nothing to rate: connected time is green. A bar with **2 or more
-  minutes on but not connected** is brown too ("could not connect N of 10 min"); the day's line adds *· no connection
-  42 min*, and *good %* is counted over connected + not-connected time.
+- **Colours:** a bar is cut into rating windows of Settings > *Rate the last* minutes (1 min: 10 windows, 2 min: 5; a
+  shorter rest joins the last window), each rated with the connection check's thresholds - green under 10 % lost, amber
+  10-50 %, brown over 50 % - and the bar takes the **worst** window's colour; its tooltip names that window ("14:23-14:24:
+  1 of 3 checks lost; all 10 min: ..."). Grey = this profile not connected. With the check off there is nothing to rate:
+  connected time is green. A bar with a **lost connection** (VeroScudo redialed) is brown ("connection lost at 14:23"),
+  and so is a bar with **2 or more minutes on but not connected** ("could not connect N of 10 min"); the day's line adds
+  *· no connection 42 min*, and *good %* is counted over connected + not-connected time. A later change of *Rate the
+  last* re-rates old days.
 
 ## Service status page
 

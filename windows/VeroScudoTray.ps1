@@ -1118,13 +1118,14 @@ function Get-StatsChoices([object[]]$raw) {
     @(Get-VeroStatsChoices -Days $raw -Profiles $(if ($cfg) { @($cfg.Profiles) } else { @() }) -ActiveId $(if ($cfg) { [string]$cfg.ProfileId } else { '' }))
 }
 function Get-StatsDays([object[]]$raw, [string]$id) {
-    <# The 7 rows of one profile (by its lasting id), today first. #>
+    <# The 7 rows of one profile (by its lasting id), today first; rated per Settings > "Rate the last". #>
     $now = Get-Date
+    $win = if ($global:Config -and $global:Config.ConnectionCheck) { [int]$global:Config.ConnectionCheck.WindowMinutes } else { 1 }
     foreach ($i in 0..6) {
         $d = $now.Date.AddDays(-$i)
         $mins = if ($id -and $raw[$i].Data.ContainsKey($id)) { $raw[$i].Data[$id] } else { @{} }
         $until = if ($i -eq 0) { $now.Hour * 60 + $now.Minute + 1 } else { 1440 }
-        $row = ConvertTo-VeroStatsDay -Minutes $mins -BucketMinutes 10 -UntilMinute $until
+        $row = ConvertTo-VeroStatsDay -Minutes $mins -BucketMinutes 10 -UntilMinute $until -WindowMinutes $win
         $name = if ($i -eq 0) { 'Today' } elseif ($i -eq 1) { 'Yesterday' } else { $d.ToString('dddd', [Globalization.CultureInfo]::InvariantCulture) }
         [pscustomobject]@{ Label = '{0}, {1}' -f $name, $d.ToString('d MMM', [Globalization.CultureInfo]::InvariantCulture); Row = $row }
     }

@@ -749,7 +749,7 @@ class TrayController:
         self.ui.update_status()
 
     def stats_week(self, pid: str) -> list:
-        return stats.week(self.store.state, pid)
+        return stats.week(self.store.state, pid, window=self.cfg.check.window_minutes if self.cfg else 1)
 
     def stats_choices(self) -> list[tuple[str, str]]:
         cfg = self.cfg
