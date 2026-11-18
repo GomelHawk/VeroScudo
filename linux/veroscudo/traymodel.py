@@ -45,6 +45,7 @@ BEHAVIOUR_NOTE = ("The exit location switch is saved at once (your account only)
 CHECK_HTTPS_HINT = ("HTTPS checks the real way to a web service (any answer counts) - e.g. api.anthropic.com. No account or "
                     "key is used.")
 REPO_URL = "https://github.com/GomelHawk/VeroScudo"
+COPYRIGHT = "Copyright © 2026 Dmitry Koshelenko"
 EXPECT_SECONDS = 120          # "Connecting" may last this long; then the tray says plainly that it is not connected yet
 STATES = ("protected", "blocked", "off", "attention")
 

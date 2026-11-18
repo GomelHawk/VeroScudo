@@ -1239,13 +1239,14 @@ function Show-Stats {
 }
 
 function Show-About {
-    $f = New-Form 'About VeroScudo' 400 250
+    $f = New-Form 'About VeroScudo' 400 280
     $pic = New-Object System.Windows.Forms.PictureBox; $pic.Location = (P 24 24); $pic.Size = (Z 64 64); $pic.SizeMode = 'Zoom'; $pic.Image = Get-AppImage 128; $f.Controls.Add($pic)
     New-Label $f "VeroScudo $(Get-VeroVersion)" 104 24 260 30 $FontBig | Out-Null
     New-Label $f 'Master the switch.' 104 58 260 22 $FontUI $global:Theme.Sub | Out-Null
     New-Label $f 'VPN on + connection lost = no network until the VPN is back or you turn it off. Two actions, no backdoor.' 24 104 352 48 $FontSmall $global:Theme.Sub | Out-Null
     $link = New-Object System.Windows.Forms.LinkLabel; $link.Text = 'github.com/GomelHawk/VeroScudo'; $link.Location = (P 24 160); $link.Size = (Z 300 22); $link.LinkColor = $global:Theme.Accent; $link.ActiveLinkColor = $global:Theme.Accent; $link.BackColor = 'Transparent'; $link.Add_LinkClicked({ Start-Process 'https://github.com/GomelHawk/VeroScudo' }); $f.Controls.Add($link)
-    (New-Button $f 'Close' 266 196 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())
+    New-Label $f "Copyright $([char]0xA9) 2026 Dmitry Koshelenko" 24 190 352 20 $FontSmall $global:Theme.Sub | Out-Null
+    (New-Button $f 'Close' 266 226 110 $true).Add_Click(({ $f.Close() }).GetNewClosure())
     $f.Show(); $f.Activate(); $f
 }
 

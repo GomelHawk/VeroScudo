@@ -757,6 +757,7 @@ class Windows:
         link = Gtk.LinkButton(uri=traymodel.REPO_URL, label="github.com/GomelHawk/VeroScudo")
         link.set_halign(Gtk.Align.START)
         box.pack_start(link, False, False, 0)
+        box.pack_start(self._label(traymodel.COPYRIGHT, dim=True), False, False, 0)
         self._buttons(box, ("Uninstall…", self.confirm_uninstall, False), ("Close", lambda: w.destroy(), True))
         self.about = w
         w.connect("destroy", lambda *_: setattr(self, "about", None))

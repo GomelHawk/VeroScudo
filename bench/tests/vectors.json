@@ -1,0 +1,196 @@
+{
+ "servers": [
+  "203.0.113.1"
+ ],
+ "vectors": [
+  {
+   "name": "udp to the VPN server",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040110000c0a80114cb0071019c40ca6c00080000",
+   "expect": {
+    "ver": 4,
+    "src": "192.168.1.20",
+    "dst": "203.0.113.1",
+    "proto": 17,
+    "sport": 40000,
+    "dport": 51820,
+    "cls": "server"
+   }
+  },
+  {
+   "name": "tcp 443 leak",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff0800450000280000000040060000c0a80114c6336407c35001bb00000000000000005002000000000000",
+   "expect": {
+    "ver": 4,
+    "dst": "198.51.100.7",
+    "proto": 6,
+    "sport": 50000,
+    "dport": 443,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "dns to the LAN router",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040110000c0a80114c0a80101cf08003500080000",
+   "expect": {
+    "ver": 4,
+    "dst": "192.168.1.1",
+    "proto": 17,
+    "dport": 53,
+    "cls": "dns"
+   }
+  },
+  {
+   "name": "dns over tls",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff0800450000280000000040060000c0a8011409090909c351035500000000000000005002000000000000",
+   "expect": {
+    "dst": "9.9.9.9",
+    "dport": 853,
+    "cls": "dns"
+   }
+  },
+  {
+   "name": "dhcp discover",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c000000004011000000000000ffffffff0044004300080000",
+   "expect": {
+    "dst": "255.255.255.255",
+    "dport": 67,
+    "cls": "ignore"
+   }
+  },
+  {
+   "name": "mdns to multicast",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040110000c0a80114e00000fb14e914e900080000",
+   "expect": {
+    "dst": "224.0.0.251",
+    "cls": "lan"
+   }
+  },
+  {
+   "name": "ping leak",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040010000c0a80114c633640e0800000000000000",
+   "expect": {
+    "proto": 1,
+    "itype": 8,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "ipv4 later fragment: no ports",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c000000b940110000c0a80114c63364070000000000000000",
+   "expect": {
+    "proto": 17,
+    "sport": null,
+    "dport": null,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "cgnat counts as lan",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c000000004011000064400005644000010001000200080000",
+   "expect": {
+    "cls": "lan"
+   }
+  },
+  {
+   "name": "ipv6 udp leak",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff86dd60000000000811403fff000100000000000000000000000220010db80000000000000000000000079c4101bb00080000",
+   "expect": {
+    "ver": 6,
+    "src": "3fff:1::2",
+    "dst": "2001:db8::7",
+    "proto": 17,
+    "dport": 443,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "ipv6 neighbour solicitation",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff86dd6000000000083a40fe800000000000000000000000000001ff0200000000000000000001ff0000018700000000000000",
+   "expect": {
+    "ver": 6,
+    "proto": 58,
+    "itype": 135,
+    "cls": "ignore"
+   }
+  },
+  {
+   "name": "ipv6 hop-by-hop then MLD",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff86dd6000000000100040fe800000000000000000000000000001ff0200000000000000000000000000163a000000000000008f00000000000000",
+   "expect": {
+    "proto": 58,
+    "itype": 143,
+    "cls": "ignore"
+   }
+  },
+  {
+   "name": "ipv6 fragment header, first fragment",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff86dd6000000000102c403fff000100000000000000000000000220010db8000000000000000000000007110000010000000703e801bb00080000",
+   "expect": {
+    "proto": 17,
+    "dport": 443,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "vlan tagged",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff8100000508004500001c0000000040110000c0a80114c6336407000101bb00080000",
+   "expect": {
+    "dst": "198.51.100.7",
+    "dport": 443,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "arp is ignored",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff080600000000000000000000000000000000000000000000000000000000",
+   "expect": null
+  },
+  {
+   "name": "raw ip link type",
+   "linktype": 101,
+   "hex": "4500001c00000000401100000a000002c6336407000101bb00080000",
+   "expect": {
+    "dst": "198.51.100.7",
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "linux cooked",
+   "linktype": 113,
+   "hex": "000400010006aabbccddeeff000008004500002800000000400600000a000002c63364070001005000000000000000005002000000000000",
+   "expect": {
+    "dport": 80,
+    "cls": "leak"
+   }
+  }
+ ],
+ "pcapng": {
+  "mac": "aabbccddeeff",
+  "hex": "0a0d0d0a1c0000004d3c2b1a01000000ffffffffffffffff1c0000000100000020000000010000000000000009000100090000000000000020000000060000004c00000000000000fe9c971700002a362a0000002a000000001122334455aabbccddeeff08004500001c0000000040110000c0a80114c6336407000101bb0008000000004c000000060000004c00000000000000fe9c97170065f7532a0000002a00000000112233445501020304050608004500001c0000000040110000c0a8011ec6336408000101bb0008000000004c000000060000004c00000000000000fe9c9717807cab802a0000002a000000001122334455aabbccddeeff08004500001c0000000040110000c0a80114cb0071010001ca6c0008000000004c000000",
+  "expect": [
+   [
+    1700000000,
+    "198.51.100.7"
+   ],
+   [
+    1700000001.25,
+    "203.0.113.1"
+   ]
+  ]
+ }
+}

@@ -5,6 +5,13 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### ksbench: test any VPN kill-switch
+- New `bench/` folder: `ksbench.ps1` (Windows) and `ksbench.py` (Linux, macOS), one file each, nothing to install.
+  It watches the physical adapter while the VPN is up, while it breaks the VPN on purpose (server blocked, tunnel
+  down, adapter off, client killed) and while it tries to get around the kill-switch, then gives a score from 0 to 100
+  with a verdict (STRONG / FAIR / POOR). About 2 minutes; every change is undone, also after Ctrl-C (`--restore`).
+  Rules and weights: `bench/SCENARIOS.md`.
+
 ### Statistics: a 10-minute bar shows its worst moment
 - A bar is rated per Settings > *Rate the last* window (1 min: 10 windows per bar) and takes the worst window's colour:
   one unstable minute makes the bar amber, one bad minute brown. Before, the whole 10 minutes were averaged and a short

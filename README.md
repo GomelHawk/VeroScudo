@@ -30,6 +30,24 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 | Linux (Ubuntu 22.04+, NetworkManager) | **stable** - verified with the live leak tests (SSTP, OpenVPN, WireGuard, Hiddify), the tray, a reboot while on and uninstall on a real machine |
 | macOS (pf + scutil) | **alpha** - unit-tested, install/uninstall checked in CI, never run with a real VPN |
 
+## Is your current kill-switch good enough? Check it first
+
+Already use a VPN with a kill-switch? Test it before you change anything: [**ksbench**](bench/README.md) is one
+file, nothing to install, about 2 minutes. It breaks the VPN on purpose (server blocked, tunnel down, Wi-Fi off,
+client killed), watches your network adapter for anything that gets out, and ends with a score from 0 to 100 and a
+plain verdict - **STRONG**, **FAIR** or **POOR**. Every change it makes is undone, also on Ctrl-C.
+
+```powershell
+# Windows, PowerShell as administrator, VPN connected
+powershell -ExecutionPolicy Bypass -File .\ksbench.ps1
+```
+```bash
+# Linux / macOS, VPN connected
+sudo python3 ksbench.py
+```
+
+What each test does and how it is scored: [`bench/SCENARIOS.md`](bench/SCENARIOS.md).
+
 ## What you get
 
 - **A real kill-switch.** Default-block with a short, scoped allow-list (the tunnel, the VPN

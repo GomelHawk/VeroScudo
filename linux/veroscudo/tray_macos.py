@@ -1041,7 +1041,7 @@ class Tray(NSObject):
     def about_(self, _):
         r = self.alert(f"VeroScudo {__version__}",
                        "Master the switch.\n\nVPN on + connection lost = no network until the VPN is back or you turn it off. "
-                       f"Two actions, no backdoor.\n\n{traymodel.REPO_URL}", buttons=("Close", "Open website", "Uninstall…"), icon="app")
+                       f"Two actions, no backdoor.\n\n{traymodel.REPO_URL}\n\n{traymodel.COPYRIGHT}", buttons=("Close", "Open website", "Uninstall…"), icon="app")
         if r == NSAlertSecondButtonReturn:
             _popen(["open", traymodel.REPO_URL])
         elif r == NSAlertThirdButtonReturn and self.confirm(
