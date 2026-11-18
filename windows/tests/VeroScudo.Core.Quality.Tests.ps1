@@ -206,7 +206,7 @@ Describe 'Connection check: TLS for Hiddify (its TUN answers TCP and ping itself
 
 Describe 'Statistics: minutes per profile, day rows, bar texts' {
     BeforeEach {
-        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
+        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = ''; $script:StatsWasUp = '' }
         $script:statsDir = Join-Path (Get-VeroPath).State 'stats'
         if (Test-Path $script:statsDir) { Remove-TestFile @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object FullName) }
     }
@@ -313,7 +313,7 @@ Describe 'Profile ids: statistics follow a profile across a rename' {
 
 Describe 'Statistics: VeroScudo on but no connection counts as bad' {
     BeforeEach {
-        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = '' }
+        InModuleScope VeroScudo.Core { $script:StatsMinute = $null; $script:StatsPruned = ''; $script:StatsWasUp = '' }
         $script:statsDir = Join-Path (Get-VeroPath).State 'stats'
         if (Test-Path $script:statsDir) { Remove-TestFile @(Get-ChildItem -LiteralPath $script:statsDir -File | ForEach-Object FullName) }
     }
