@@ -238,6 +238,56 @@ function Enter-VeroLock {
     $false
 }
 
+$script:DnsFirstSeconds = 3                                              # the redial's DNS window: at most this long
+$script:DnsWindow = $false
+$script:DnsFresh = @{}
+
+function Get-VeroDialName {
+    <# The names a dial of this profile has to resolve: the server (Windows VPN, WireGuard) or the .ovpn's remotes (OpenVPN).
+       None for an address, pinned serverIps, or a type VeroScudo does not dial (Hiddify). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config)
+    $type = Get-VeroConfigType $Config
+    if (-not (Get-VeroTypeHandler $type).Dials -or @($Config.ServerIps).Count -gt 0) { return @() }
+    $hosts = if ($type -eq 'openvpn') { @(try { Get-VeroOpenVpnRemote -ProfileName $Config.Profile | ForEach-Object { [string]$_.Host } } catch { @() }) } else { @([string]$Config.Server) }
+    @($hosts | Where-Object { $_ -and -not ((Test-VeroCidr $_) -and $_ -notmatch '/') } | Select-Object -Unique)
+}
+
+function Start-VeroDnsLookup([string]$Name) { [System.Net.Dns]::GetHostAddressesAsync($Name) }   # a task (tests replace it)
+
+function Invoke-VeroDnsFirst {
+    <# Blocked, right before a dial: the redial's own lookup of its server is the one DNS request that gets out. The DNS
+       permit for Windows' DNS client opens, the server's names are looked up (the DNS client keeps the answers, the dial
+       finds them there; a moved server's new address is cached and allowed for this dial), and the permit closes again -
+       once the answers are in, after DnsFirstSeconds at most. Linux lets only the server's name out (nftables); macOS does
+       the same as this (daemon.prime_dns). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
+    $names = @(Get-VeroDialName -Config $Config)
+    if ($names.Count -eq 0) { return }
+    $tasks = @{}
+    $script:DnsWindow = $true
+    try {
+        Sync-VeroKillSwitch -Config $Config -Action $Action
+        foreach ($n in $names) { $tasks[$n] = Start-VeroDnsLookup $n }
+        try { $null = [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($tasks.Values), $script:DnsFirstSeconds * 1000) }
+        catch { Write-Verbose "DNS lookup of the server failed: $($_.Exception.Message)" }        # a name that does not resolve
+    } finally {
+        $script:DnsWindow = $false
+        Sync-VeroKillSwitch -Config $Config -Action $Action
+    }
+    $script:DnsFresh = @{}
+    foreach ($n in $tasks.Keys) {
+        $t = $tasks[$n]
+        if ([string]$t.Status -eq 'RanToCompletion') {
+            $script:DnsFresh[$n] = @($t.Result | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString })
+        }
+    }
+    if ($script:DnsFresh.Count -eq 0) { return }
+    try {
+        $null = & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ResolveIps $Config      # into the cache, from the answers above
+    } finally { $script:DnsFresh = @{} }
+    Sync-VeroKillSwitch -Config $Config -Action $Action                                       # a moved server: allowed for this dial
+}
+
 function Start-VeroRedial {
     <# Three levels: Invoke-VeroReconnect is the redial loop (one at a time, by the reconnect lock); the 'redial' action
        is the Redial task's way into it; this function is how everybody else gets it going - the watchdog, the Terminated
@@ -256,7 +306,7 @@ function Invoke-VeroReconnect {
        -Renew (the user's Reconnect): first block - the kill-switch is applied without the tunnel while it is still up -,
        then hang up, then the normal loop; traffic flows again only once the new tunnel is up. All of it under the
        reconnect lock, so the watchdog never reads our own hang-up as a failure or as the user turning the VPN off. #>
-    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Renew)
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core', [switch]$Renew, [switch]$Dead)
     if (-not (Enter-VeroLock)) { Write-VeroLog $(if ($Renew) { 'reconnect requested, but a reconnect is already running - it continues' } else { 'reconnect loop already running' }) $Action; return }
     $p = Get-VeroPath
     $attempt = 0
@@ -265,7 +315,8 @@ function Invoke-VeroReconnect {
     try {
         if ($Renew) {
             $type = Get-VeroConfigType $Config
-            Write-VeroLog "RECONNECT requested by you: traffic blocked, hanging up '$($Config.Profile)' ($(Get-VeroTypeLabel $type)), redialing" $Action
+            $who = if ($Dead) { 'by VeroScudo (no traffic through the tunnel)' } else { 'by you' }
+            Write-VeroLog "RECONNECT requested ${who}: traffic blocked, hanging up '$($Config.Profile)' ($(Get-VeroTypeLabel $type)), redialing" $Action
             Set-VeroRenewMarker -ProfileName $Config.Profile
             Sync-VeroKillSwitch -Config $Config -Action $Action -ForceDown -Force
             Invoke-VeroHangUp -ProfileName $Config.Profile -Type $type
@@ -300,6 +351,7 @@ function Invoke-VeroReconnect {
                 continue
             }
             $h = Get-VeroTypeHandler (Get-VeroConfigType $Config)             # this attempt's profile (the config is re-read below)
+            Invoke-VeroDnsFirst -Config $Config -Action $Action               # the one DNS request while blocked: the server's name
             Invoke-VeroDial -Config $Config -Action $Action
             if (Test-VeroVpnConnected $Config.Profile) {
                 if (-not $h.Dials) { Write-VeroLog "$($h.Label) connected again - traffic goes through it" $Action }   # nothing was dialed
@@ -310,16 +362,7 @@ function Invoke-VeroReconnect {
             if (-not (Test-VeroArmed)) { break }              # you turned the VPN off during the dial: not a failure
             # Hiddify: nothing is dialed - VeroScudo waits for you to connect it there; once, then every ~5 minutes
             if ($h.Dials -or $attempt -eq 1 -or $attempt % 30 -eq 0) { Write-VeroLog "attempt $attempt failed ($(Get-VeroDialFailure $Config))" $Action }
-            # the server may have moved: look it up again (the redial's DNS permit is in force while down) and let the new
-            # address through before the next attempt - the cache alone would refuse it forever
-            if (@($Config.ServerIps).Count -eq 0 -and $h.RelookupOnFail) {
-                $cached = @(Resolve-VeroServerIp -Config $Config -CacheOnly)
-                $fresh = @(Resolve-VeroServerIp -Config $Config)
-                if (($fresh -join ',') -ne ($cached -join ',')) {
-                    Write-VeroLog ("server '{0}' now resolves to {1} - allowed for the next attempt" -f $Config.Server, ($fresh -join ',')) $Action
-                    Sync-VeroKillSwitch -Config $Config -Action $Action
-                }
-            }
+            # a server that moved is looked up again before the next dial (Invoke-VeroDnsFirst), not here: DNS is closed
             Start-Sleep -Seconds $Config.RetrySeconds
             $Config = Get-VeroConfig
         }

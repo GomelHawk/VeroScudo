@@ -79,8 +79,10 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   *Attention*. OpenVPN (run by VeroScudo itself) and the WireGuard app's tunnels are supported profile types (beta).
 - **WireGuard: the first 1-3 minutes of a silent drop** - traffic goes into the dead tunnel and is lost (not leaked)
   until the handshake age shows the drop; then the redial starts.
-- **DNS while blocked** is the one documented side channel: the OS resolver may query the
-  network's DNS servers (needed to find the VPN server).
+- **DNS while blocked** is the one documented side channel: the redial looks up the VPN server's name. Linux lets out
+  only a query for exactly that name (nftables matches the name in the packet). Windows and macOS cannot filter by name:
+  the system resolver may query the network's DNS servers right before each dial, until the answer is in (3 s at most) -
+  another app's lookup in those seconds can get out too.
 - **macOS (alpha)**: the boot window before launchd starts the daemon; VM filtering (pf, vmnet bridges) written but not yet seen on a real Mac.
   A DNS connection opened while blocked can go on after the tunnel is up for as long as pf keeps its state (Linux ends
   such connections; the pf of macOS has no way to pick them out).

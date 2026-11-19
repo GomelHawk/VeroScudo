@@ -191,8 +191,9 @@ Describe 'Reconnect (the user action)' {
     BeforeEach { $script:steps.Clear(); $script:tunnel.Up = $true; Remove-TestFile (Get-VeroPath).Renew, (Get-VeroPath).Lock }
     It 'blocks first, then hangs up, redials, and lets traffic through only once the tunnel is back' {
         Set-VeroArmed $true 'test'
+        Mock -ModuleName VeroScudo.Core Invoke-VeroDnsFirst { [void]$script:steps.Add('dns') }
         Invoke-VeroAction -Action reconnect -Config $script:cfgR
-        @($script:steps) | Should -Be @('block', 'hangup', 'sync', 'dial', 'sync')
+        @($script:steps) | Should -Be @('block', 'hangup', 'sync', 'dns', 'dial', 'sync')
         Test-VeroArmed | Should -BeTrue
         (Get-VeroRenewMarker).HungUp | Should -Not -BeNullOrEmpty
     }

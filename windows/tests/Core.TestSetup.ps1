@@ -41,6 +41,8 @@
         Mock -ModuleName VeroScudo.Core $cmd { }
     }
     # Hyper-V port ACLs (62-HyperVAcl.ps1): no VM is ever seen or changed by this file unless a test says so
+    # the redial's DNS window (Invoke-VeroDnsFirst): never a real DNS query from a test - "no answer" at once
+    Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@()) }
     Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { }
     Mock -ModuleName VeroScudo.Core Get-VeroVmAdapterAcl { }
     Mock -ModuleName VeroScudo.Core Add-VeroVmAdapterAcl { }

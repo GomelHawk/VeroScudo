@@ -64,8 +64,9 @@ More profiles: tray > Settings > *Import…*, `sudo veroscudo import <connection
 `/etc/veroscudo/config.json` (see `../docs/ARCHITECTURE.md`); the guard picks a change up within 15 s.
 
 What it guarantees: an nftables table with `policy drop` output and forward chains - a drop
-there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel is down and only
-from `systemd-resolved` (or only to the resolvers in `resolv.conf`); the tunnel is allowed only by
+there is final whatever ufw/docker/firewalld accept. DNS only while the tunnel is down, only a
+UDP query for exactly the VPN server's name, and only from `systemd-resolved` (or only to the
+resolvers in `resolv.conf`); the tunnel is allowed only by
 its own virtual interface, never the Wi-Fi/Ethernet card; the ruleset is re-checked every 15 s.
 
 Containers and VMs (Docker, libvirt, LXD, podman) follow the same rule when *Protect VMs and containers* is on (`"vm": true`,

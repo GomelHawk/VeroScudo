@@ -33,7 +33,7 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 ## Is your current kill-switch good enough? Check it first
 
 Already use a VPN with a kill-switch? Test it before you change anything: [**ksbench**](bench/README.md) is one
-file, nothing to install, about 2 minutes. It breaks the VPN on purpose (server blocked, tunnel down, Wi-Fi off,
+file, nothing to install, about 3 minutes. It breaks the VPN on purpose (server blocked, tunnel down, Wi-Fi off,
 client killed), watches your network adapter for anything that gets out, and ends with a score from 0 to 100 and a
 plain verdict - **STRONG**, **FAIR** or **POOR**. Every change it makes is undone, also on Ctrl-C.
 
@@ -51,7 +51,7 @@ What each test does and how it is scored: [`bench/SCENARIOS.md`](bench/SCENARIOS
 ## What you get
 
 - **A real kill-switch.** Default-block with a short, scoped allow-list (the tunnel, the VPN
-  server, DHCP; DNS only while redialing). On Windows these are WFP filters in VeroScudo's own
+  server, DHCP; DNS only for the redial's lookup of the VPN server). On Windows these are WFP filters in VeroScudo's own
   sublayer, so no app's firewall *allow* rule can punch through. Covers TCP, UDP/QUIC, ICMP,
   IPv4 and IPv6, inbound and outbound, and traffic from WSL, Docker or NAT-mode VMs.
 - **No DNS leak.** While the VPN is up, names are resolved through the tunnel only.
@@ -215,7 +215,10 @@ addresses through the tunnel every 10-100 s - ping, or a TCP connection to a por
 the last 1-10 minutes: under 10 % lost **good**, 10-50 % **unstable**, over 50 % **bad**; answers slower than 1 s count like partial loss (**unstable**, never bad). The first rating comes one full
 period after each connect or settings change (*checking…* until then). The rating shows in the tooltip
 (*VeroScudo - Protected, connection good*), the menu header and the status window's **CONNECTION** card, which shows the
-redial instead while the VPN is not connected. It only reports - it never reconnects or switches profiles by itself.
+redial instead while the VPN is not connected. When **every** check fails 3 rounds in a row, the tunnel is up but carries
+nothing (a server gone silent - SSTP and OpenVPN notice that only minutes later): VeroScudo then does what *Reconnect VPN*
+does - traffic blocked, hang up, redial the same profile - at most once per 10 minutes; *Last drop* says
+*no traffic through the tunnel*. It never switches profiles, and never redials Hiddify (connect it in Hiddify).
 
 Command line (Windows): `powershell -File "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action status`
 (also `on`, `off`, and elevated `switch -VpnProfile <name>`). Log: `%ProgramData%\VeroScudo\state\veroscudo.log`.
@@ -231,12 +234,17 @@ the platform details.
 ### What is allowed while blocked
 
 Only: the tunnel itself, the VPN server's address on the profile's protocol and port (on Windows
-only from the VPN service), DHCP (on Windows only from the DHCP client service), and - only while
-redialing - DNS from the system resolver to the network's DNS servers (none known: no DNS at all).
+only from the VPN service), DHCP (on Windows only from the DHCP client service), and the redial's
+lookup of the VPN server's name. **Linux:** only a DNS query for exactly that name gets out (nftables
+reads the name in the packet); every other name stays inside. **Windows and macOS** cannot filter by
+name: DNS from the system resolver to the network's DNS servers is open only right before each dial,
+for that lookup, and closed again once the answer is in (3 s at most). A server given as an address
+needs no DNS at all; no DNS server known: no DNS at all.
 On Windows, the SSTP certificate-revocation check (HTTP) is allowed for 2 minutes only after a
 dial failed on exactly that check. On Linux nothing reaches the machine from outside either: only
-replies to the flows above, the tunnel, DHCP replies and neighbour discovery. DNS while redialing is the one documented side-channel - it is needed to resolve the
-VPN server. Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
+replies to the flows above, the tunnel, DHCP replies and neighbour discovery. The redial's DNS lookup is the one documented
+side-channel - it is needed to find the VPN server (on Windows and macOS another app's lookup in those seconds can get
+out too). Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
 ping, no IPv6, and no app gets through on the strength of its own firewall rule.
 
 ## Profile types
@@ -270,8 +278,8 @@ protocol and port with the NetworkManager connection.
 
 Unit tests run in CI on every change (Pester for the Windows core, pytest for Linux and macOS)
 and pin what must never regress: the decision table (631 ⇒ disarm, anything else ⇒ reconnect,
-never "unblock"), the allow-list (every rule scoped, never a blanket accept, DNS only while
-down), forged-event handling, profile switching and config validation.
+never "unblock"), the allow-list (every rule scoped, never a blanket accept, DNS only for the
+server's name while down), forged-event handling, profile switching and config validation.
 
 The real proof is local: `windows/tests-local/Test-Live.ps1` drives the installed guard through
 its scheduled tasks - DNS-leak and forged-event checks while protected; server made unreachable,

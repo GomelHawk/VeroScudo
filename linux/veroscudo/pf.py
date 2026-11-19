@@ -29,6 +29,11 @@ _BASE = [
 ]
 
 
+def matches_dns_names() -> bool:
+    """pf cannot let out DNS for one name only (firewall.matches_dns_names): the guard pins and looks up itself."""
+    return False
+
+
 def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm_allowed: bool,
                    dns: DnsPolicy | None = None, bridges: tuple[str, ...] = (), vms_free: bool = False,
                    endpoints: tuple = (), cgroup: tuple[str, int] | None = None) -> str:
@@ -63,10 +68,14 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
             lines.append(f"pass quick on {bl} all {kb}")
     if not tun_iface:
         # macOS resolves through mDNSResponder; DNS only while blocked (redial), only to the network's resolvers
-        # none known: no DNS permit at all (never "port 53 to anywhere")
+        # none known: no DNS permit at all (never "port 53 to anywhere"). pf cannot look at the name asked for: with the
+        # server's name known (dns.names) DNS is open only for the redial's own lookup of it, right before each dial
+        # (dns.window, daemon.prime_dns: a few seconds at most) - not for the whole outage
         d4, d6 = split_families(dns.servers)
         for fam, lst in (("inet", d4), ("inet6", d6)):
-            if lst:
+            if not lst:
+                continue
+            if dns.names is None or (dns.window and dns.names):
                 lines.append(f"pass out quick {fam} proto {{ udp tcp }} to {{ {', '.join(lst)} }} port 53 {kb}")
     for fam, lst in (("inet", srv4), ("inet6", srv6)):
         if not lst:

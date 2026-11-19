@@ -170,6 +170,66 @@ Describe 'Connection check: the watchdog (mocked checks)' {
     }
 }
 
+Describe 'Connection check: a tunnel that carries nothing is reconnected by the watchdog' {
+    BeforeAll {
+        $script:cfg = Get-VeroConfig -Raw '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}]}'
+        $script:fail = @([pscustomobject]@{ Ok = $false }, [pscustomobject]@{ Ok = $false })
+        $script:t0 = Get-Date '2026-01-01T10:00:00'
+    }
+    BeforeEach {
+        InModuleScope VeroScudo.Core { $script:DeadCount = 0; $script:DeadNext = [datetime]::MinValue; $script:DeadSaid = '' }
+        $script:started = 0
+        $script:start = { $script:started++; $true }
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { }
+        Remove-TestFile @((Get-VeroPath).Dead)
+    }
+    AfterAll { Remove-TestFile @((Get-VeroPath).Dead) }
+    It 'three rounds without any answer start the Reconnect task once and leave the marker' {
+        Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask $script:start | Should -BeFalse
+        Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask $script:start | Should -BeFalse
+        Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask $script:start | Should -BeTrue
+        $script:started | Should -Be 1
+        Test-VeroDeadMarker -ProfileName 'Work' -Now $script:t0.AddSeconds(30) | Should -BeTrue
+        Test-VeroDeadMarker -ProfileName 'Backup' -Now $script:t0.AddSeconds(30) | Should -BeFalse
+        Test-VeroDeadMarker -ProfileName 'Work' -Now $script:t0.AddMinutes(5) | Should -BeFalse     # an old marker is not this Reconnect's
+    }
+    It 'the Reconnect task takes the marker once: a Reconnect of yours right after is yours again' {
+        for ($i = 0; $i -lt 3; $i++) { Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask $script:start | Out-Null }
+        Test-VeroDeadMarker -ProfileName 'Work' -Now $script:t0.AddSeconds(5) -Take | Should -BeTrue
+        Test-VeroDeadMarker -ProfileName 'Work' -Now $script:t0.AddSeconds(20) -Take | Should -BeFalse
+        Test-VeroDeadMarker -ProfileName 'Work' -Now $script:t0.AddSeconds(20) | Should -BeTrue       # the tray's label still reads it
+    }
+    It 'one answer starts the count over' {
+        $ok = @([pscustomobject]@{ Ok = $false }, [pscustomobject]@{ Ok = $true })
+        foreach ($r in @($script:fail, $script:fail, $ok, $script:fail, $script:fail)) {
+            Test-VeroDeadTunnel -Config $script:cfg -Round $r -Now $script:t0 -StartTask $script:start | Out-Null
+        }
+        $script:started | Should -Be 0
+    }
+    It 'at most one such reconnect per 10 minutes, the pause logged once' {
+        for ($i = 0; $i -lt 9; $i++) { Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0.AddSeconds(10 * $i) -StartTask $script:start | Out-Null }
+        $script:started | Should -Be 1
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like 'still no answer*' }
+        for ($i = 0; $i -lt 3; $i++) { Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0.AddMinutes(11) -StartTask $script:start | Out-Null }
+        $script:started | Should -Be 2
+    }
+    It 'a type VeroScudo does not dial (Hiddify) is never reconnected' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTypeHandler { @{ Dials = $false } }
+        for ($i = 0; $i -lt 6; $i++) { Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask $script:start | Out-Null }
+        $script:started | Should -Be 0
+        Test-Path (Get-VeroPath).Dead | Should -BeFalse
+    }
+    It 'a Reconnect task that cannot be started is said, not run inline' {
+        for ($i = 0; $i -lt 3; $i++) { $r = Test-VeroDeadTunnel -Config $script:cfg -Round $script:fail -Now $script:t0 -StartTask { $false } }
+        $r | Should -BeFalse
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -ParameterFilter { $Message -like '*could not be started*' }
+    }
+    It 'no checks (an empty round) count as nothing' {
+        for ($i = 0; $i -lt 5; $i++) { Test-VeroDeadTunnel -Config $script:cfg -Round @() -Now $script:t0 -StartTask $script:start | Out-Null }
+        $script:started | Should -Be 0
+    }
+}
+
 Describe 'Connection check: a real TCP check against a local listener' {
     It 'answered while listening, not after' {
         $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $l.Start()

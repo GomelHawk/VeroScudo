@@ -37,6 +37,25 @@ Describe 'pcapng reader' {
     }
 }
 
+Describe 'Wi-Fi frames (pktmon records raw 802.11 on a Wi-Fi adapter)' {
+    BeforeAll { $script:Mine = [string[]]@('02aabbccddee') }
+    It 'reads a data frame we sent to the access point' {
+        # ToDS data frame: AP 02aabbcc0001, we 02aabbccddee, router 02aabbcc0002; LLC/SNAP; IPv4 192.168.100.26 > 203.0.113.5 TCP 443
+        $hex = '0801008002aabbcc000102aabbccddee02aabbcc00020000aaaa030000000800450000280000400040060000c0a8641acb007105d55401bb00000000000000005002000000000000'
+        $p = [KsBench.Parse]::HexOut($hex, $script:Mine)
+        $p.Dst | Should -Be '203.0.113.5'
+        $p.DPort | Should -Be 443
+    }
+    It 'ignores a frame the access point sent to us' {
+        $hex = '08422c0002aabbccddee02aabbcc000102aabbcc0002e0a1aaaa030000000800450000280000400040060000cb007105c0a8641a01bbd55400000000000000005002000000000000'
+        [KsBench.Parse]::HexOut($hex, $script:Mine) | Should -BeNullOrEmpty
+    }
+    It 'still reads an Ethernet frame from our MAC' {
+        $hex = '001122334455' + '02aabbccddee' + '0800' + '4500001c00004000401100000a000002c633640700350035000800000000'
+        ([KsBench.Parse]::HexOut($hex, $script:Mine)).Dst | Should -Be '198.51.100.7'
+    }
+}
+
 Describe 'verdict' {
     It '<s> with <f> -> <level>' -ForEach @(
         @{ s = 100; f = @(); t = 135; level = 'STRONG' },

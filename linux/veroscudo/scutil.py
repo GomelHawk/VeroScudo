@@ -72,6 +72,10 @@ def down(profile: str) -> bool:
     return r.returncode == 0
 
 
+def reset_resolver() -> None:
+    """Nothing to reset on macOS (Linux: systemd-resolved, nm.reset_resolver)."""
+
+
 def resolver_uid() -> int | None:
     return None                               # pf matches users only on local sockets; DNS is scoped by destination instead
 

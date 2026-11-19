@@ -24,9 +24,39 @@ TABLE = "inet veroscudo"
 @dataclass(frozen=True)
 class DnsPolicy:
     """Who may send DNS while blocked (redial needs to resolve the server): the system resolver's uid, else only the
-    configured upstream resolvers; with neither known there is no DNS permit."""
+    configured upstream resolvers; with neither known there is no DNS permit.
+    names: the VPN server's host names - then only a UDP query for exactly one of them gets out (qname_match): the names of
+    the sites you visit stay inside while the VPN redials. () = a server given as an address: no DNS at all. None = not
+    narrowed (Hiddify: its core resolves its servers itself)."""
     uid: int | None = None
     servers: tuple[str, ...] = field(default_factory=tuple)
+    names: tuple[str, ...] | None = None
+    window: bool = False           # pf only: the redial's own lookup of the server is running (daemon.prime_dns)
+
+
+def matches_dns_names() -> bool:
+    """nftables can let out a DNS query for one name only (qname_match); pf cannot - there DNS is open only for the
+    redial's own lookup of the server, right before each dial (daemon.prime_dns)."""
+    return True
+
+
+_LABEL = re.compile(r"^[A-Za-z0-9_-]{1,63}\Z")
+
+
+def qname_match(name: str) -> str:
+    """An nft match for a DNS query of exactly `name`: over UDP the question's name starts 20 bytes into the transport header
+    (8 of UDP, 12 of the DNS header), in the wire form (length-prefixed labels, ending in a zero byte - so "vpn.example.com"
+    never matches "vpn.example.com.other"). Compared in pieces of at most 16 bytes, nft's widest raw-payload match."""
+    labels = name.rstrip(".").split(".")
+    if not all(_LABEL.match(x) for x in labels) or len(name) > 253:
+        raise ValueError(f"refusing DNS name {name!r}")
+    wire = b"".join(bytes([len(x)]) + x.encode("ascii") for x in labels) + b"\0"
+    parts, bit = [], 160
+    for i in range(0, len(wire), 16):
+        chunk = wire[i:i + 16]
+        parts.append(f"@th,{bit},{len(chunk) * 8} 0x{chunk.hex()}")
+        bit += len(chunk) * 8
+    return " ".join(parts)
 
 
 def split_families(addrs) -> tuple[list[str], list[str]]:
@@ -115,7 +145,14 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
     if not tun_iface:
         # DNS only while down (to find the VPN server): the system resolver's user, else only the known resolvers -
         # with neither known there is NO DNS permit (never "port 53 to anywhere"); the redial then uses cached addresses
-        if dns.uid is not None:
+        who = [f"meta skuid {dns.uid}"] if dns.uid is not None else [
+            f"{fam} daddr {{ {', '.join(lst)} }}" for fam, lst in zip(("ip", "ip6"), split_families(dns.servers)) if lst]
+        if dns.names is not None:
+            # only the VPN server's own name, UDP, in the case it is written and in lower case (the resolver passes the
+            # name on as it got it)
+            for n in sorted({n.rstrip(".") for n in dns.names} | {n.rstrip(".").lower() for n in dns.names}):
+                lines += [f"    {w} udp dport 53 {qname_match(n)} {keep_dns}" for w in who]
+        elif dns.uid is not None:
             lines += [f"    meta skuid {dns.uid} udp dport 53 {keep_dns}", f"    meta skuid {dns.uid} tcp dport 53 {keep_dns}"]
         elif dns.servers:
             d4, d6 = split_families(dns.servers)

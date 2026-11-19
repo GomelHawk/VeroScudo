@@ -7,7 +7,7 @@ traffic when the VPN fails, and gives a score from 0 to 100 with a plain verdict
 - **FAIR** (70-89) - acceptable for everyday use, with gaps.
 - **POOR** (below 70) - your real traffic got out; change your kill-switch.
 
-It takes about 2 minutes. Every step is printed as it happens, and every result as PASS or FAIL.
+It takes about 2-3 minutes. Every step is printed as it happens, and every result as PASS or FAIL.
 
 ## How it works
 

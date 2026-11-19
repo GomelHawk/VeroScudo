@@ -39,8 +39,13 @@ def main(kind: str, out: Path) -> int:
     n = 0
     for name, cfg in configs():
         for state, t in (("up", tun), ("down", None)):
-            for dname, dns in (("uid", DnsPolicy(uid=101)), ("servers", DnsPolicy(servers=("192.0.2.53", "2001:db8::53"))), ("none", DnsPolicy())):
-                if kind == "pf" and dname == "uid":
+            srv = ("192.0.2.53", "2001:db8::53")
+            hosts = ("vpn.example.com", "Long-Label-Name.vpn-gateway.corp.example.com")  # more than 16 bytes: in pieces
+            for dname, dns in (("uid", DnsPolicy(uid=101)), ("servers", DnsPolicy(servers=srv)), ("none", DnsPolicy()),
+                               ("name-uid", DnsPolicy(uid=101, names=hosts)), ("name-servers", DnsPolicy(servers=srv, names=hosts)),
+                               ("name-window", DnsPolicy(servers=srv, names=hosts, window=True)),
+                               ("address-server", DnsPolicy(uid=101, servers=srv, names=()))):
+                if kind == "pf" and dname in ("uid", "name-uid"):
                     continue                       # pf scopes DNS by destination only
                 hid = cfg.current.vpn_type == "hiddify"
                 rs = mod.render_ruleset(cfg, [] if hid else ["203.0.113.5", "2001:db8::5"], t, vm_allowed=bool(t), dns=dns,

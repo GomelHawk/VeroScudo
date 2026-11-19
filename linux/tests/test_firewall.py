@@ -35,6 +35,36 @@ def test_dns_while_blocked_only_to_the_resolvers_without_systemd_resolved():
     assert "\n    udp dport 53 accept" not in rs
 
 
+def test_dns_while_blocked_only_for_the_vpn_servers_name():
+    rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(uid=101, names=("vpn.example.com",)))
+    dns = [ln for ln in rs.splitlines() if "dport 53" in ln]
+    # 3 vpn 7 example 3 com 0 - the whole name with its end, from the question's first byte (UDP 8 + DNS header 12 = bit 160)
+    assert dns == ["    meta skuid 101 udp dport 53 @th,160,128 0x0376706e076578616d706c6503636f6d @th,288,8 0x00 ct mark set 0x5654 accept"]
+    assert "tcp dport 53" not in rs                      # a TCP query cannot be read at a fixed place: none at all
+
+
+def test_dns_name_match_in_the_case_given_and_in_lower_case():
+    rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False,
+                        dns=DnsPolicy(servers=("192.168.1.1", "fd00::1"), names=("VPN.Example.com",)))
+    dns = [ln for ln in rs.splitlines() if "dport 53" in ln]
+    assert len(dns) == 4                                  # 2 spellings x IPv4 / IPv6 resolvers
+    assert all(ln.startswith(("    ip daddr { 192.168.1.1 } udp dport 53 @th,160,", "    ip6 daddr { fd00::1 } udp dport 53 @th,160,"))
+               for ln in dns)
+    assert any("0x0356504e" in ln for ln in dns) and any("0x0376706e" in ln for ln in dns)
+
+
+def test_no_dns_at_all_while_blocked_when_the_server_is_an_address():
+    rs = render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(uid=101, servers=("192.168.1.1",), names=()))
+    assert "dport 53" not in rs
+
+
+def test_qname_match_refuses_what_is_not_a_host_name():
+    from veroscudo.firewall import qname_match
+    for bad in ("", "a..b", "x" * 64 + ".com", "vpn.example.com;drop", "vpn example.com"):
+        with pytest.raises(ValueError):
+            qname_match(bad)
+
+
 def test_no_server_rule_without_resolved_ips():
     rs = render_ruleset(CFG, [], None, vm_allowed=False)
     assert "dport 443" not in rs

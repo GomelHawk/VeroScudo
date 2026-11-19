@@ -255,6 +255,79 @@ def test_guard_does_nothing_when_the_check_is_off(tmp_path, monkeypatch):
     assert g.quality_tick() == 5.0
 
 
+# ---------------------------------------------------------------- dead tunnel: every check fails -> the guard's own Reconnect
+class _Now:
+    """Runs the thread's target at once (the reconnect would otherwise outlive the fakes)."""
+    def __init__(self, target, kwargs=None, **_):
+        self.target, self.kwargs = target, kwargs or {}
+
+    def start(self):
+        self.target(**self.kwargs)
+
+
+def _dead_cfg(kind="vpn"):
+    from types import SimpleNamespace
+    return SimpleNamespace(profile="Work", current=SimpleNamespace(vpn_type=kind))
+
+
+@pytest.fixture
+def dead(tmp_path, monkeypatch):
+    g = daemon.Guard(cfg('{"enabled":true,"intervalSeconds":10}'), StateStore(tmp_path / "run", tmp_path / "lib"))
+    renews = []
+    monkeypatch.setattr(g, "renew", lambda dead=False: renews.append(dead))
+    monkeypatch.setattr(daemon.threading, "Thread", _Now)
+    return g, renews
+
+
+def test_three_rounds_without_any_answer_reconnect_once(dead):
+    g, renews = dead
+    for _ in range(daemon.DEAD_ROUNDS - 1):
+        g.dead_check(_dead_cfg(), [(False, None), (False, None)])
+    assert renews == []
+    g.dead_check(_dead_cfg(), [(False, None), (False, None)])
+    assert renews == [True]
+
+
+def test_one_answer_starts_the_count_over(dead):
+    g, renews = dead
+    g.dead_check(_dead_cfg(), [(False, None)])
+    g.dead_check(_dead_cfg(), [(False, None)])
+    g.dead_check(_dead_cfg(), [(False, None), (True, 30)])           # one address still answers: the tunnel works
+    g.dead_check(_dead_cfg(), [(False, None)])
+    g.dead_check(_dead_cfg(), [(False, None)])
+    assert renews == []
+
+
+def test_at_most_one_dead_tunnel_reconnect_per_pause(dead, monkeypatch):
+    g, renews = dead
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: clock["t"])
+    for _ in range(daemon.DEAD_ROUNDS * 3):                           # an address that is always down: no redial loop
+        g.dead_check(_dead_cfg(), [(False, None)])
+    assert renews == [True]
+    clock["t"] += daemon.DEAD_PAUSE_SECONDS + 1
+    for _ in range(daemon.DEAD_ROUNDS):
+        g.dead_check(_dead_cfg(), [(False, None)])
+    assert renews == [True, True]
+
+
+def test_hiddify_is_never_reconnected_by_the_guard(dead, caplog):
+    g, renews = dead
+    for _ in range(daemon.DEAD_ROUNDS * 2):
+        g.dead_check(_dead_cfg("hiddify"), [(False, None)])
+    assert renews == []
+    assert sum("does not dial Hiddify" in r.getMessage() for r in caplog.records) == 1     # said once, not every round
+
+
+def test_the_guard_runs_the_dead_check_after_each_round(guard, monkeypatch):
+    g, _, _ = guard
+    g.store.set_armed(True)
+    seen = []
+    monkeypatch.setattr(g, "dead_check", lambda c, results: seen.append(results))
+    g.quality_tick()
+    assert seen == [[(True, 20)]]
+
+
 # ---------------------------------------------------------------- what the tray shows
 P = tm.Facts(name="Work", kind="vpn", armed=True, up=True)
 

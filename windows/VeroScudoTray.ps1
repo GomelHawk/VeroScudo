@@ -337,7 +337,7 @@ function Get-LastEvents([int]$n = 6, [string]$After = '') {
 }
 function Get-LastDrop {
     if ($global:Config -and $global:Config.Type -ne 'ras') { return (& (Get-VeroTypeHandler $global:Config.Type).StatusDetail $global:Config) }   # the client's own state, as the status line shows it
-    try { $e = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='RasClient'; Id=20226 } -MaxEvents 1 -ErrorAction Stop; if ($e.Properties[2].Value -eq $global:Config.Profile) { $c = $e.Properties[3].Value; return ('{0:HH:mm} - {1}' -f $e.TimeCreated, $(if ($c -eq 631) { 'you disconnected' } elseif ($c -eq 829) { 'link failure (829)' } else { "code $c" })) } } catch { Write-Verbose 'no RAS event' }; '-' }
+    try { $e = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='RasClient'; Id=20226 } -MaxEvents 1 -ErrorAction Stop; if ($e.Properties[2].Value -eq $global:Config.Profile) { $c = $e.Properties[3].Value; return ('{0:HH:mm} - {1}' -f $e.TimeCreated, $(if ($c -eq 631 -and (Test-VeroDeadMarker -ProfileName $global:Config.Profile -Now $e.TimeCreated)) { 'no traffic through the tunnel' } elseif ($c -eq 631) { 'you disconnected' } elseif ($c -eq 829) { 'link failure (829)' } else { "code $c" })) } } catch { Write-Verbose 'no RAS event' }; '-' }
 
 # ---------------------------------------------------------------- UI building blocks
 function New-Form([string]$title, [int]$w, [int]$h) {

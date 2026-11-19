@@ -18,13 +18,13 @@ by definition. The DNS probes look up random names under `example.com`.
 | S2 | steady | 10 | IPv6 stays in the tunnel | No IPv6 leak during UDP, TCP and ping over IPv6. N/A when the network has no IPv6. |
 | S3 | steady | 15 | A program bound to the physical adapter cannot get out | No leak from UDP/TCP sockets bound to the physical adapter (`SO_BINDTODEVICE`, `IP_BOUND_IF`, `IP_UNICAST_IF`). Route-only kill-switches fail this. |
 | S4 | steady | 5 | UDP/QUIC, STUN and ping stay in the tunnel | No leak of a QUIC-sized UDP packet, a STUN request or a ping. |
-| D1 | outage | 20 | VPN server unreachable | A firewall rule blocks the VPN server for the hold time; no leak until the VPN is back. |
+| D1 | outage | 20 | VPN server unreachable | A firewall rule blocks the VPN server until the tunnel goes down (+5 s, at most 60 s); no leak until the VPN is back. |
 | D2 | outage | 15 | VPN client process killed | The process that owns the VPN connection is killed; no leak until the VPN is back. N/A when the VPN runs in the kernel or inside the OS. |
 | D3 | outage | 15 | Tunnel adapter goes down | The tunnel adapter is taken down; no leak until the VPN is back. N/A for Windows' own VPN client. |
 | D4 | outage | 20 | Physical link drops and comes back | The physical adapter is taken down for up to 10 s and brought back; no leak until the VPN is back. |
 | D5 | outage | 10 | No DNS leak during any outage | No DNS packet on the physical adapter during any of D1-D4, T1, T2. |
-| T1 | tamper | 15 | Another program adds a firewall allow rule | A firewall allow rule for the probe addresses is added, then the VPN server is blocked; no leak. |
-| T2 | tamper | 10 | The kill-switch app is killed | The process you name is killed, then the VPN server is blocked; no leak. Skipped when you name no process. |
+| T1 | tamper | 15 | Another program adds a firewall allow rule | A firewall allow rule for the probe addresses is added, then the physical adapter is taken down for 10 s; no leak until the VPN is back (the rule stays until then). |
+| T2 | tamper | 10 | The kill-switch app is killed | The process you name is killed, then the physical adapter is taken down for 10 s; no leak until the VPN is back. Skipped when you name no process. |
 
 During every outage test the bench sends, every 250 ms, UDP and TCP to `198.51.100.7:443` (and
 `2001:db8::7` with IPv6), and every 2 s a DNS look-up of a random name. Background traffic of any app
@@ -47,9 +47,9 @@ server is unreachable) makes the test **N/A**: nothing could leak, so the kill-s
 
 ## Time
 
-The steady tests take about 15 s. The outage and tamper tests have a 150 s budget together; a test that
+The steady tests take about 15 s. The outage and tamper tests have a 240 s budget together; a test that
 would not fit is reported as *not run*. They run in this order, most important first: D1, D3, D4, T1,
-D2, T2. A typical run takes about 2 minutes.
+D2, T2. A typical run takes about 2-3 minutes: a VPN that notices a blocked server slowly (SSTP) makes D1 longer.
 
 ## Online check (optional)
 

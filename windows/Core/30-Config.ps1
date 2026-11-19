@@ -39,6 +39,7 @@ function Get-VeroPath {
         NetSuspect    = Join-Path $state 'net-suspect.json'                # the network dropped: VMs stay blocked until the tunnel is proven
         Log           = Join-Path $state 'veroscudo.log'
         Renew         = Join-Path $state 'renew.json'
+        Dead          = Join-Path $state 'dead.json'                       # the watchdog's own Reconnect of a tunnel that carries nothing
         Conflicts     = Join-Path $state 'conflicts.json'
         NativeBlocked = Join-Path $state 'native-blocked.json'             # Windows refused to load VeroScudo.Native.dll
         OffAt         = Join-Path $state 'off-at.txt'                      # when you last pressed Off

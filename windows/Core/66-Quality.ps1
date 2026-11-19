@@ -12,6 +12,15 @@
 # The checks run only while armed and connected, so they go through the tunnel; nothing in the kill-switch is opened.
 
 $script:CheckDefaultHost = '1.1.1.1'
+# Every check failed this many rounds in a row: the tunnel is up but carries nothing (a server gone silent - SSTP and OpenVPN
+# notice it only when their own keepalive gives up, minutes later). The watchdog then starts the Reconnect task, as the tray's
+# Reconnect does - at most once per DeadPauseSeconds, so a check address that is always down cannot make it redial in a loop.
+# Same numbers on Linux/macOS (daemon.py DEAD_ROUNDS, DEAD_PAUSE_SECONDS).
+$script:DeadRounds = 3
+$script:DeadPauseSeconds = 600
+$script:DeadCount = 0
+$script:DeadNext = [datetime]::MinValue
+$script:DeadSaid = ''
 $script:CheckMinChecks = 3
 $script:CheckSlowMs = 1000                                              # per round trip: a slower answer is "slow"
 
@@ -268,6 +277,62 @@ function Test-VeroSlowResult($Result) {
 
 function Get-VeroEpoch { ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) / 1000.0 }
 
+function Write-VeroDeadOnce([string]$Text, [string]$Action) {
+    if ($Text -and $Text -ne $script:DeadSaid) { Write-VeroLog $Text $Action }
+    $script:DeadSaid = $Text
+}
+
+function Test-VeroDeadTunnel {
+    <# Counts the rounds in which every check failed; at DeadRounds in a row it writes the dead marker and starts the Reconnect
+       task (block, hang up, redial - the task, never inline: the watchdog keeps checking). Never for a type VeroScudo does
+       not dial (Hiddify), at most once per DeadPauseSeconds; both are logged once. $true when it started a reconnect.
+       -StartTask: how the task is started (tests). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [object[]]$Round = @(), [string]$Action = 'watchdog',
+                            [datetime]$Now = (Get-Date), [scriptblock]$StartTask = { Start-VeroTask 'Reconnect' })
+    if ($Round.Count -eq 0 -or @($Round | Where-Object { $_.Ok }).Count -gt 0) {
+        $script:DeadCount = 0; $script:DeadSaid = ''; return $false
+    }
+    $script:DeadCount++
+    if ($script:DeadCount -lt $script:DeadRounds) { return $false }
+    $script:DeadCount = 0
+    if (-not (Get-VeroTypeHandler ([string]$Config.Type)).Dials) {
+        Write-VeroDeadOnce ("no answer through '{0}' for {1} connection-check rounds in a row - VeroScudo does not dial it: connect and reconnect in Hiddify" -f $Config.Profile, $script:DeadRounds) $Action
+        return $false
+    }
+    if ($Now -lt $script:DeadNext) {
+        Write-VeroDeadOnce ("still no answer through '{0}' after VeroScudo reconnected it - check the addresses in Settings > Connection (next automatic reconnect in at most 10 minutes)" -f $Config.Profile) $Action
+        return $false
+    }
+    $script:DeadNext = $Now.AddSeconds($script:DeadPauseSeconds)
+    Write-VeroLog ("no answer through '{0}' for {1} connection-check rounds in a row - reconnecting it" -f $Config.Profile, $script:DeadRounds) $Action
+    Write-VeroStateFile -Path (Get-VeroPath).Dead -Text ([ordered]@{ Profile = [string]$Config.Profile; Start = $Now.ToString('o') } | ConvertTo-Json)
+    if (-not (& $StartTask)) {
+        Write-VeroLog 'WARNING: the Reconnect task could not be started - run Install.ps1 again; use Reconnect VPN in the tray meanwhile' $Action
+        return $false
+    }
+    $true
+}
+
+function Test-VeroDeadMarker {
+    <# The dead marker of $ProfileName written within $MaxSeconds before $Now: the Reconnect is the watchdog's own (dead
+       tunnel), not yours. Pure but for reading the file. #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProfileName, [datetime]$Now = (Get-Date), [int]$MaxSeconds = 120, [switch]$Take)
+    $p = (Get-VeroPath).Dead
+    if (-not (Test-Path -LiteralPath $p)) { return $false }
+    try {
+        $m = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+        $t = [datetime]::Parse([string]$m.Start, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        $ok = [string]$m.Profile -eq $ProfileName -and ($Now - $t).TotalSeconds -ge -5 -and ($Now - $t).TotalSeconds -le $MaxSeconds
+        if ($Take) {
+            # the Reconnect task takes it once: a Reconnect of yours right after is yours again (the tray keeps reading it
+            # for its "Last drop" label)
+            if (-not $ok -or ($m.PSObject.Properties['Taken'] -and $m.Taken)) { return $false }
+            Write-VeroStateFile -Path $p -Text ([ordered]@{ Profile = [string]$m.Profile; Start = [string]$m.Start; Taken = $true } | ConvertTo-Json)
+        }
+        return $ok
+    } catch { return $false }
+}
+
 function Update-VeroQuality {
     <# The watchdog's side: one round of checks when they are wanted and the VPN is on and connected; otherwise the samples
        are dropped (a new connection starts a new rating). Writes quality.json for the tray; logs only a change of the
@@ -290,6 +355,7 @@ function Update-VeroQuality {
     $round = @(Invoke-VeroProbeRound -Targets $chk.Targets -Tls:$hid -TimeoutMs $(if ($hid) { 5000 } else { 3000 }))
     for ($ti = 0; $ti -lt $round.Count; $ti++) { $r = $round[$ti]; $script:QualitySamples.Add(@{ T = $now; Ok = [bool]$r.Ok; Rtt = $r.RttMs; Ti = $ti; Slow = (Test-VeroSlowResult $r) }) }
     try { Add-VeroStatsChecks -Sent $round.Count -Lost @($round | Where-Object { -not $_.Ok }).Count -Slow @($round | Where-Object { Test-VeroSlowResult $_ }).Count -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }
+    $null = Test-VeroDeadTunnel -Config $cfg -Round $round -Action $Action
     $win = Get-VeroCheckWindow $chk
     $keep = @($script:QualitySamples.ToArray() | Where-Object { ($now - [double]$_.T) -le ($win + 1) })   # .ToArray(): @(<List>) throws on PowerShell 5.1
     $script:QualitySamples.Clear(); foreach ($s in $keep) { $script:QualitySamples.Add($s) }

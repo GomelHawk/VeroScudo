@@ -161,6 +161,13 @@ function Test-VeroUsableServerIp {
     -not ($b[0] -eq 0xfc -and $b[1] -eq 0 -and ($b[2] -band 0xc0) -eq 0)
 }
 
+function Get-VeroHostAddress([string]$Name) {
+    <# The addresses of $Name: the answer of the redial's DNS window when it gave one (Invoke-VeroDnsFirst - no second lookup,
+       which would wait for a DNS that is closed again), else a lookup through Windows' DNS client. #>
+    if ($script:DnsFresh -and $script:DnsFresh.Count -gt 0) { return @($script:DnsFresh[$Name] | Where-Object { $_ }) }   # no answer: none
+    @([System.Net.Dns]::GetHostAddresses($Name) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString })
+}
+
 function Resolve-VeroServerIp {
     <# Pinned serverIps win. Otherwise resolve and merge with the cache (newest first, at most 8): a VPN host that moves
        keeps working, and a lookup that fails while blocked still leaves the last known addresses.
@@ -173,8 +180,7 @@ function Resolve-VeroServerIp {
     if ($CacheOnly) { return $cached }
     $fresh = @()
     try {
-        $fresh = @([System.Net.Dns]::GetHostAddresses($Config.Server) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } |
-                   ForEach-Object { $_.IPAddressToString } | Where-Object { Test-VeroUsableServerIp $_ })
+        $fresh = @(Get-VeroHostAddress $Config.Server | Where-Object { Test-VeroUsableServerIp $_ })
     } catch { Write-Verbose "DNS lookup of $($Config.Server) failed: $($_.Exception.Message)" }
     $all = @(@($fresh) + @($cached) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
     if ($all.Count -gt 0 -and (($all -join ',') -ne ($cached -join ','))) { Write-VeroStateFile -Path $p.ServerIp -Text ($all -join "`r`n") }
@@ -478,7 +484,7 @@ function Resolve-VeroEndpoint {
             $cached = @($cache[$r.Host] | Where-Object { $_ -and (Test-VeroUsableServerIp ([string]$_)) })
             if ($CacheOnly) { $cached } else {
                 $fresh = @()
-                try { $fresh = @([System.Net.Dns]::GetHostAddresses($r.Host) | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString } | Where-Object { Test-VeroUsableServerIp $_ }) }
+                try { $fresh = @(Get-VeroHostAddress ([string]$r.Host) | Where-Object { Test-VeroUsableServerIp $_ }) }
                 catch { Write-Verbose "DNS lookup of $($r.Host) failed: $($_.Exception.Message)" }
                 $all = @(@($fresh) + @($cached) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 8)
                 if (($all -join ',') -ne ($cached -join ',')) { $cache[$r.Host] = $all; $changed = $true }
@@ -546,10 +552,14 @@ function Get-VeroSyncPlan {
     $vm = Test-VeroVmWanted $Config
     $wsl = if ($vm) { Get-VeroWslLuid } else { [uint64]0 }
     $sw = Get-VeroSwitchLuid                                               # Get-VeroFilterSpec decides when it is open
-    $dns = @(if (-not $tun) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
+    # DNS while down: a type VeroScudo dials gets it only for the redial's own lookup of its server, right before each
+    # dial (Invoke-VeroDnsFirst) - the names of the sites you visit stay inside. Hiddify (not dialed): as before
+    # the SSTP revocation window (Open-VeroCrlWindow) needs DNS too: the CRL/OCSP servers are known by name
+    $wantDns = (-not $tun) -and ((-not $th.Dials) -or $script:DnsWindow -or [bool](& $th.CrlWindow))
+    $dns = @(if ($wantDns) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
     $rasType = & $th.RasTunnelType $Config.Profile                        # the built-in client's protocol (its ports); 'Automatic' for the others
     $crl = [bool](& $th.CrlWindow)
-    $noDns = (-not $tun) -and @($dns).Count -eq 0
+    $noDns = $wantDns -and @($dns).Count -eq 0
     if ($noDns -and -not $script:NoDnsLogged) { Write-VeroLog 'no DNS server known for the network yet - no DNS permit (redial uses cached server addresses)' $Action }
     $script:NoDnsLogged = $noDns                                              # once per change, not every 15 s
     $specs = Get-VeroFilterSpec -Config $Config -ServerIps $ips -TunnelLuid $tun -WslLuid $wsl -SwitchLuid $sw -DnsServers $dns -TunnelType $rasType -Endpoints $eps -EndpointApp $app -CrlWindow $crl -PermitKind $srv.Kind -ProgramApps $apps

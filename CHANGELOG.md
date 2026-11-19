@@ -5,6 +5,26 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### DNS while redialing: only the VPN server's name
+- **Linux:** while blocked, only a DNS query for exactly the VPN server's name gets out (nftables reads the name in the
+  packet). The names of the sites you visit no longer reach the network's DNS while VeroScudo redials.
+- **Windows and macOS:** their firewalls cannot filter by name. DNS for the system resolver is now open only right before
+  each dial, for the redial's own lookup of the server, and closed again once the answer is in (3 s at most) - not for
+  the whole outage.
+- A server given as an address: no DNS at all while blocked. Hiddify profiles are unchanged.
+
+### A tunnel that carries nothing is reconnected
+- With the connection check on, every check failing 3 rounds in a row (the tunnel is up but nothing gets through, e.g. a
+  server gone silent) makes VeroScudo do what *Reconnect VPN* does: blocked, hang up, redial the same profile. At most
+  once per 10 minutes, never a profile switch, never Hiddify. *Last drop* says *no traffic through the tunnel*.
+  Windows, Linux and macOS.
+
+### ksbench: faults that fit every VPN
+- A blocked server or a killed client stays so until the tunnel really goes down (at most 60 s), so a VPN that notices a
+  dead server slowly (SSTP) is tested instead of reported as N/A. T1 and T2 take the adapter down for 10 s. The time
+  limit is checked before any question; each test undoes its own changes right after it. Windows: Wi-Fi adapters
+  (pktmon records raw 802.11) and non-English Windows work.
+
 ### ksbench: test any VPN kill-switch
 - New `bench/` folder: `ksbench.ps1` (Windows) and `ksbench.py` (Linux, macOS), one file each, nothing to install.
   It watches the physical adapter while the VPN is up, while it breaks the VPN on purpose (server blocked, tunnel

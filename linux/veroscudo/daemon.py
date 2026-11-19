@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import subprocess
 import threading
@@ -22,6 +23,16 @@ WATCHDOG_SECONDS = 15
 # its records differently - see docs/ARCHITECTURE.md, "Timing windows". Both markers are consumed on first use.
 OFF_MARKER_SECONDS = 60.0
 RENEW_MARKER_SECONDS = 120.0
+
+# The connection check (Settings > Connection) saw every check fail this many rounds in a row: the tunnel is up but carries
+# nothing (a server gone silent - SSTP and OpenVPN notice it only when their own keepalive gives up, minutes later). The guard
+# then does what the user's Reconnect does - at most once per DEAD_PAUSE_SECONDS, so a check address that is always down
+# cannot make it redial in a loop. Same numbers on Windows (Core/66-Quality.ps1).
+# pf (macOS) cannot let out DNS for one name only: while blocked the system resolver gets no DNS, except for the redial's
+# own lookup of the server right before each dial - at most this long (Windows: the same, Core/70-Dial.ps1)
+DNS_FIRST_SECONDS = 3.0
+DEAD_ROUNDS = 3
+DEAD_PAUSE_SECONDS = 600.0
 
 OFF_STAMP = "off.at"            # when Off last ran (a redial in flight must not undo it); in the run folder
 
@@ -53,6 +64,7 @@ class Guard:
         self.store = store or StateStore()
         self.off_marker = self.store.home / "off.marker"     # set by `veroscudo off` so a polling backend knows it was deliberate
         self.renew_marker = self.store.home / "renew.marker"  # set by `veroscudo reconnect`: its own take-down is not your Off
+        self.dead_marker = self.store.home / "dead.marker"    # set with it when the reconnect is the guard's own (dead tunnel)
         self.off_stamp = self.store.home / OFF_STAMP         # when `veroscudo off` last ran (a redial in flight must not undo it)
         self._events = threading.RLock()                     # one VPN event at a time: read the markers, decide, act
         self._loop_thread: threading.Thread | None = None
@@ -69,6 +81,8 @@ class Guard:
         self._hiddify_said: dict = {}            # what was logged last per topic - each problem is logged once
         self._lookup_next = False                # look the server name up after the next block (a redial failed)
         self._cgroup_ok = True                   # False once nftables refused the cgroup rule (kernel without nft_socket)
+        self.dead_rounds = 0                     # connection-check rounds in a row with every check failed
+        self._dead_next = 0.0                    # monotonic time before which no dead-tunnel reconnect starts
 
     @staticmethod
     def _stamp() -> tuple[float, int]:
@@ -190,17 +204,31 @@ class Guard:
         except OSError:
             return []
 
-    def desired_ruleset(self, tunnel_up: bool) -> tuple[str, str | None]:
+    def desired_ruleset(self, tunnel_up: bool, window: bool = False) -> tuple[str, str | None]:
         """The ruleset for the current state and the tunnel interface it allows (None: blocked - the tunnel is down, or up
         without an interface the backend will trust)."""
         cfg = self.cfg
         tun = nm.iface(cfg.profile) if tunnel_up else None
-        dns = None if tun else firewall.DnsPolicy(nm.resolver_uid(), tuple(nm.nameservers() or nm.nm_dns()))
+        dns = None if tun else firewall.DnsPolicy(nm.resolver_uid(), tuple(nm.nameservers() or nm.nm_dns()),
+                                                  names=self.dns_names(cfg), window=window)
         vm = self.vm_wanted()
         bridges = tuple(nm.vm_bridges())                       # re-read on every pass: a bridge created later is picked up within 15 s
         return firewall.render_ruleset(cfg, self.server_ips(cfg), tun, vm_allowed=bool(tun) and vm, dns=dns, bridges=bridges,
                                        vms_free=not vm, endpoints=self.hiddify_endpoints(cfg),
                                        cgroup=self.hiddify_cgroup(cfg)), tun
+
+    @staticmethod
+    def dns_names(cfg: Config) -> tuple[str, ...] | None:
+        """The only names the redial may look up while blocked: the VPN server's (none when it is an address). None for
+        Hiddify - its core resolves its servers itself (its own DNS permits), VeroScudo does not dial it."""
+        if cfg.current.vpn_type == hiddify.KIND:
+            return None
+        server = cfg.server.strip()
+        try:
+            ipaddress.ip_address(server.strip("[]"))
+            return ()
+        except ValueError:
+            return (server,) if server else ()
 
     def hiddify_cgroup(self, cfg: Config) -> tuple[str, int] | None:
         """A Hiddify profile: Hiddify's root service, let out by its cgroup like the Windows guard lets its programs out -
@@ -218,7 +246,9 @@ class Guard:
         with self.store.firewall_lock():
             tun = self._apply(tunnel_up, force, plan)
         cfg = self.cfg
-        if not (tun or self._lookup_next) or not self._looks_up(cfg):
+        # blocked, after a failed redial: Linux looks the server up again here (only its name gets out); pf does it in
+        # prime_dns, the only moment it has DNS
+        if not (tun or (self._lookup_next and firewall.matches_dns_names())) or not self._looks_up(cfg):
             return
         self._lookup_next = False
         before = self.cached_server_ips(cfg)
@@ -227,16 +257,45 @@ class Guard:
             with self.store.firewall_lock():
                 self._apply(tunnel_up, False, plan)
 
+    def prime_dns(self) -> None:
+        """pf only, right before a dial: the redial's own lookup of the server is the one DNS request that gets out while
+        blocked. The rules open DNS to the network's resolvers, the server's name is looked up (the system resolver keeps
+        the answer, the dial finds it there; a moved server's new address is cached and allowed), and DNS is closed again -
+        once the answer is in, after DNS_FIRST_SECONDS at most. Linux needs none of it: only that name ever gets out there."""
+        cfg = self.cfg
+        if firewall.matches_dns_names() or not self.dns_names(cfg) or not self._looks_up(cfg):
+            return
+        try:
+            plan = self._plan(False, window=True)
+            with self.store.firewall_lock():
+                self._apply(False, False, plan)
+            found: list = []
+            t = threading.Thread(target=lambda: found.extend(nm.resolve(cfg.server)), daemon=True)
+            t.start()
+            t.join(DNS_FIRST_SECONDS)
+        finally:
+            plan = self._plan(False)
+            with self.store.firewall_lock():
+                self._apply(False, False, plan)
+        self._lookup_next = False
+        cached = self.cached_server_ips(cfg)
+        merged = list(dict.fromkeys([ip for ip in found if usable_server_ip(ip)] + cached))[:8]
+        if merged != cached:
+            write_atomic(self.store.server_cache(cfg.profile), "\n".join(merged))
+            log.info("server '%s' now resolves to %s - allowed for this attempt", cfg.server, ", ".join(merged))
+            self.enable_killswitch(tunnel_up=False)
+
     @staticmethod
     def _looks_up(cfg: Config) -> bool:
         """The profile's server is known by name (not pinned with serverIps, not Hiddify's endpoints)."""
         return bool(cfg.server) and not cfg.server_ips and cfg.current.vpn_type != hiddify.KIND
 
-    def _plan(self, tunnel_up: bool):
+    def _plan(self, tunnel_up: bool, window: bool = False):
         """The ruleset for this state and the tunnel it allows - or the error that kept it from being built, which
-        _apply then handles under the lock like a refused ruleset."""
+        _apply then handles under the lock like a refused ruleset. window: only prime_dns asks for its DNS window - never
+        the watchdog's thread, so a plan of its own can never open DNS (at worst it closes the window early)."""
         try:
-            return self.desired_ruleset(tunnel_up)
+            return self.desired_ruleset(tunnel_up, window=True) if window else self.desired_ruleset(tunnel_up)
         except Exception as e:  # noqa: BLE001 - whatever it was, _apply fails closed on it
             return e
 
@@ -366,10 +425,11 @@ class Guard:
         if not nm.is_connected(self.cfg.profile):
             self.reconnect()
 
-    def renew(self) -> None:
+    def renew(self, dead: bool = False) -> None:
         """The user's Reconnect: block first (the ruleset without the tunnel while it is still up), take the connection down,
         redial; traffic flows again only once the tunnel is back. NetworkManager reports our own take-down as
-        'user-requested' - the renew marker makes the daemon read it as a failure (stay armed), not as your Off."""
+        'user-requested' - the renew marker makes the daemon read it as a failure (stay armed), not as your Off.
+        dead: the guard's own Reconnect of a tunnel that carries nothing (see DEAD_ROUNDS) - a stored-password pause stays."""
         if not self.store.armed:
             log.info("Reconnect: the VPN is off - use `veroscudo on`")
             return
@@ -380,8 +440,13 @@ class Guard:
         if cfg.current.vpn_type == hiddify.KIND:
             log.info("Reconnect: '%s' is a Hiddify profile - %s", cfg.profile, hiddify.RECONNECT_HINT)
             return
-        self.resume_after_password()
-        log.info("RECONNECT requested by you: traffic blocked, taking down '%s', redialing", cfg.profile)
+        if dead:
+            log.warning("no answer through '%s' for %d connection-check rounds in a row - reconnecting it: traffic blocked, "
+                        "taking it down, redialing", cfg.profile, DEAD_ROUNDS)
+            self.dead_marker.write_text(str(time.time()))
+        else:
+            self.resume_after_password()
+            log.info("RECONNECT requested by you: traffic blocked, taking down '%s', redialing", cfg.profile)
         self.renew_marker.write_text(str(time.time()))
         self.enable_killswitch(tunnel_up=False, force=True)
         if nm.is_connected(cfg.profile) or nm.is_stale(cfg.profile):
@@ -503,6 +568,7 @@ class Guard:
             return
         off = self._take_off_marker()
         renewing = self._take_renew_marker()
+        dead = self._take_marker(self.dead_marker, RENEW_MARKER_SECONDS) and renewing
         deliberate = off or (user_requested and not renewing)
         if renewing and not off:
             log.info("VPN '%s' went down by VeroScudo's own Reconnect - not your Off", profile)
@@ -511,8 +577,8 @@ class Guard:
         log.info("VPN '%s' terminated (user_requested=%s) -> %s (decision source: %s)", profile, deliberate, d.value,
                  "veroscudo off" if off else "NetworkManager reason")
         # the status window's "Last drop": why, in the words the Windows tray uses for its RAS event
-        self.store.record_drop(profile, "turned off" if off else "Reconnect" if renewing else
-                               "you disconnected" if deliberate else "connection lost")
+        self.store.record_drop(profile, "turned off" if off else "no traffic through the tunnel" if dead else
+                               "Reconnect" if renewing else "you disconnected" if deliberate else "connection lost")
         if d is Decision.DISARM:
             self.disarm()
         elif d is Decision.RECONNECT:
@@ -551,6 +617,8 @@ class Guard:
                     # reading as your Off
                     self.renew_marker.write_text(str(time.time()))
                     nm.down(self.cfg.profile)
+                nm.reset_resolver()                          # Linux: resolved forgets the timeouts of the blocked queries
+                self.prime_dns()
                 if nm.up(self.cfg.profile):
                     self.enable_killswitch(tunnel_up=False)    # WireGuard: allow the address it just looked up itself
                     nm.wait_connected(self.cfg.profile)
@@ -618,12 +686,36 @@ class Guard:
                               slow=sum(1 for r in results if r[0] and len(r) > 2 and r[2]))
         except OSError:
             log.exception("statistics")
+        self.dead_check(cfg, results)
         q = self.quality.add_round(chk, cfg.profile, results, down_at=self.store.last_down())
         if q.state != "checking" and q.state != self.quality.last_state:
             log.info("connection quality: %s (%s of %s checks lost, %s slow, %s)", q.state, q.lost, q.checks, q.slow,
                      f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")
             self.quality.last_state = q.state
         return float(chk.interval_seconds)
+
+    def dead_check(self, cfg: Config, results) -> None:
+        """Counts the rounds in which every check failed; at DEAD_ROUNDS in a row the guard reconnects the profile itself (in
+        a thread: the redial must not stop the checks). Never for Hiddify - VeroScudo does not dial it - and at most once per
+        DEAD_PAUSE_SECONDS; both cases are logged once."""
+        if not results or any(r[0] for r in results):
+            self.dead_rounds = 0
+            self._say_once("dead", None)
+            return
+        self.dead_rounds += 1
+        if self.dead_rounds < DEAD_ROUNDS:
+            return
+        self.dead_rounds = 0
+        if cfg.current.vpn_type == hiddify.KIND:
+            self._say_once("dead", f"no answer through '{cfg.profile}' for {DEAD_ROUNDS} connection-check rounds in a row - "
+                           f"VeroScudo does not dial Hiddify: {hiddify.RECONNECT_HINT}")
+            return
+        if time.monotonic() < self._dead_next:
+            self._say_once("dead", f"still no answer through '{cfg.profile}' after VeroScudo reconnected it - check the "
+                           "addresses in Settings > Connection (next automatic reconnect in at most 10 minutes)")
+            return
+        self._dead_next = time.monotonic() + DEAD_PAUSE_SECONDS
+        threading.Thread(target=self.renew, kwargs={"dead": True}, daemon=True, name="dead-tunnel").start()
 
     def quality_loop(self) -> None:
         while True:

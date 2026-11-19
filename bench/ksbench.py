@@ -311,6 +311,11 @@ class Journal:
                 self._undo(it)
                 return
 
+    def undo_since(self, mark):
+        for it in reversed(self.items[mark:]):
+            if not it["done"]:
+                self._undo(it)
+
     def undo_all(self):
         for it in reversed(self.items):
             if not it["done"]:
@@ -758,7 +763,9 @@ class Bench:
                 self.keep.pop(0)[1].close()
             if until is not None and now - last_check >= 1:
                 last_check = now
-                if until():
+                if until != self.tunnel_up and until():
+                    return True
+                if until == self.tunnel_up and until():
                     ok_since = ok_since or now
                     if now - ok_since >= 3:
                         return True
@@ -805,8 +812,12 @@ class Bench:
         return {"packets": len(items), "first_ms": int((items[0][0] - t0) * 1000),
                 "last_ms": int((items[-1][0] - t0) * 1000), "to": [f"{d} ({n})" for d, n in top]}
 
-    def outage(self, sid, inject, restore, hold):
-        if time.time() + hold + 15 > self.deadline:
+    def fits(self, seconds):
+        return time.time() + seconds <= self.deadline
+
+    def outage(self, sid, inject, restore, hold, until_down=False):
+        """until_down: the fault stays until the tunnel goes down (+5 s), at most `hold` s; else exactly `hold` s."""
+        if not self.fits(min(hold, FAULT) + 20):
             self.set(sid, "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
             return
         if not self.tunnel_up():
@@ -815,28 +826,36 @@ class Bench:
                 self.set(sid, "not run", "the VPN was not connected when the test started")
                 return
         self.say(f"  {sid}  running... {self.title(sid)}")
+        mark = len(self.j)
         t0 = time.time()
         try:
             why = inject()
         except (RuntimeError, OSError) as e:
             why = f"the bench could not make the change ({e})"
         if why:
-            self.j.undo_all()
+            self.j.undo_since(mark)
             self.set(sid, "n/a", why)
             return
-        self.say(f"      fault active for {hold} s - sending test traffic, watching {', '.join(sorted(self.phys_names))}")
-        went_down = [False]
+        watching = ", ".join(sorted(self.phys_names))
+        if until_down:
+            self.say(f"      fault active until the tunnel goes down (at most {hold} s) - sending test traffic, watching {watching}")
+        else:
+            self.say(f"      fault active for {hold} s - sending test traffic, watching {watching}")
+        went_down = [None]
 
         def watch():
-            if not self.tunnel_up():
-                went_down[0] = True
-            return False
+            if went_down[0] is None and not self.tunnel_up():
+                went_down[0] = time.time()
+                self.say(f"      the tunnel went down after {went_down[0] - t0:.0f} s")
+            return until_down and went_down[0] is not None and time.time() - went_down[0] >= 5
         self.probe_until(t0 + hold, sid, until=watch)
+        went_down[0] = went_down[0] is not None
         restore()
         self.say(f"      waiting for the VPN to come back (up to {self.a.recover} s), still watching for leaks...")
         t_wait = time.time()
         back = self.wait_recovery(sid)
         self.say(f"      VPN is back after {time.time() - t_wait:.0f} s" if back else "      the VPN did not come back")
+        self.j.undo_since(mark)             # whatever this test still holds (T1's allow rule) goes now, not at the end
         t1 = time.time()
         self.outage_windows.append((t0, t1))
         leak, dns = self.leaks(t0, t1)
@@ -844,7 +863,7 @@ class Bench:
         ev = {"tunnel_went_down": went_down[0], "recovered": back, "leak": self.evidence(leak, t0),
               "dns": self.evidence(dns, t0), "online": hits}
         if not leak and not went_down[0]:
-            self.set(sid, "n/a", f"the fault did not take the tunnel down within {hold} s, so the kill-switch was not "
+            self.set(sid, "n/a", f"the tunnel stayed up for all {hold} s of the fault, so the kill-switch was not "
                      "tested (nothing could leak); a longer --hold may help", **ev)
         elif leak:
             e = ev["leak"]
@@ -925,65 +944,80 @@ class Bench:
                      f"{ev['packets']} packets bypassed the tunnel" if leak else "", leak=ev)
         self.say(f"  (tunnel adapter: {tun})")
 
+    def adapter_ok(self, sid, name):
+        """Over SSH, taking the adapter down may cut the session: ask once (no = skip D4, T1, T2)."""
+        if not os.environ.get("SSH_CONNECTION"):
+            return True
+        if self.ssh_ok is None:
+            self.ssh_ok = ask(f"  You are connected over SSH: D4, T1 and T2 take {name} down for {FAULT} s and this "
+                              "session may drop. Run them anyway? [y/N] ", False, self.interactive)
+        if not self.ssh_ok:
+            self.set(sid, "skipped", "running over SSH - taking the adapter down could cut the session")
+        return self.ssh_ok
+
     def disruptive(self):
         hold = self.a.hold
         self.deadline = time.time() + BUDGET
+        self.ssh_ok = None
         servers = set(self.servers)
+        name = self.phys[0]["name"]
+
+        def adapter_off():
+            return self.p.link(self.j, name, False)
         if self.wanted("D1") and not self.stopped:
-            self.outage("D1", lambda: self.p.block_servers(self.j, servers), self.j.undo_last, hold)
+            self.outage("D1", lambda: self.p.block_servers(self.j, servers), self.j.undo_last, hold, until_down=True)
         if self.wanted("D3") and not self.stopped:
             tun = self.tunnel_iface() or "none"
-            self.outage("D3", lambda: self.p.link(self.j, tun, False), self.j.undo_last, hold)
-        if self.wanted("D4") and not self.stopped:
-            name = self.phys[0]["name"]
-            if os.environ.get("SSH_CONNECTION") and not ask(
-                    f"  You are connected over SSH: D4 takes {name} down for 10 s and this session may drop. "
-                    "Run D4 anyway? [y/N] ", False, self.interactive):
-                self.set("D4", "skipped", "running over SSH - taking the adapter down could cut the session")
-            else:
-                self.outage("D4", lambda: self.p.link(self.j, name, False), lambda: self.link_up(name), min(hold, 10))
-        if self.wanted("T1") and not self.stopped:
+            self.outage("D3", lambda: self.p.link(self.j, tun, False), self.j.undo_last, FAULT)
+        if self.wanted("D4") and not self.stopped and self.adapter_ok("D4", name):
+            self.outage("D4", adapter_off, lambda: self.link_up(name), FAULT)
+        if self.wanted("T1") and not self.stopped and self.adapter_ok("T1", name):
             def inject():
-                why = self.p.allow_probes(self.j)
-                return why or self.p.block_servers(self.j, servers)
+                return self.p.allow_probes(self.j) or adapter_off()
 
             def restore():
-                self.j.undo_last()
-                self.j.undo_last()
-            self.outage("T1", inject, restore, hold)
+                self.link_up(name)          # the adapter first, the allow rule stays while the VPN comes back
+            self.outage("T1", inject, restore, FAULT)
         if self.wanted("D2") and not self.stopped:
             pids = {p: n for p, n in self.p.conn_pids(servers, self.outer_lports()).items()
                     if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL}
             if not pids:
                 self.set("D2", "n/a", "no user process owns the VPN connection (the VPN runs in the kernel "
                          "or in a system service) - nothing to kill safely")
+            elif not self.fits(FAULT + 20):
+                self.set("D2", "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
             else:
                 desc = ", ".join(f"{n} (pid {p})" for p, n in sorted(pids.items()))
                 if ask(f"  D2 will kill the VPN client process {desc}. OK? [y/N] ", False, self.interactive) \
                         or self.a.yes:
-                    self.outage("D2", lambda: self._kill(pids), lambda: None, hold)
+                    self.outage("D2", lambda: self._kill(pids), lambda: None, hold, until_down=True)
                 else:
                     self.set("D2", "skipped", "you chose not to kill " + desc)
         if self.wanted("T2") and not self.stopped:
-            name = self.a.app_process
-            if name is None and self.interactive:
+            pname = self.a.app_process
+            if not self.fits(FAULT + 20):
+                self.set("T2", "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
+                pname = False
+            elif pname is None and self.interactive:
                 try:
-                    name = input("  T2: name of the kill-switch app's process to kill (Enter = skip T2): ").strip()
+                    pname = input("  T2: name of the kill-switch app's process to kill (Enter = skip T2): ").strip()
                 except EOFError:
-                    name = ""
-            if not name:
+                    pname = ""
+            if pname is False:
+                pass
+            elif not pname:
                 self.set("T2", "skipped", "no kill-switch process named (--app-process)")
             else:
-                pids = {int(x): name for x in run(["pgrep", "-x", name]).stdout.split()}
+                pids = {int(x): pname for x in run(["pgrep", "-x", pname]).stdout.split()}
                 pids = {p: n for p, n in pids.items() if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL}
                 if not pids:
-                    self.set("T2", "skipped", f"no running process named {name}")
-                else:
-                    def inject():
+                    self.set("T2", "skipped", f"no running process named {pname}")
+                elif self.adapter_ok("T2", name):
+                    def inject2():
                         self._kill(pids)
                         time.sleep(1)
-                        return self.p.block_servers(self.j, servers)
-                    self.outage("T2", inject, self.j.undo_last, hold)
+                        return adapter_off()
+                    self.outage("T2", inject2, lambda: self.link_up(name), FAULT)
         windows = self.outage_windows
         if self.wanted("D5"):
             if not windows:
@@ -1167,7 +1201,8 @@ class Bench:
         return doc
 
 
-BUDGET = 150                                # seconds for all outage and tamper tests together
+BUDGET = 240                                # seconds for all outage and tamper tests together
+FAULT = 10                                  # seconds an adapter stays down (D3, D4, T1, T2)
 CAP = 40
 CRITICAL = {"S1", "S2", "S3", "D1", "D2", "D3", "D4", "T1", "T2"}
 MEANING = {
@@ -1210,15 +1245,15 @@ which IP address they see you coming from. If a leak happens, Cloudflare sees yo
 It does not change the score - it only shows the leaked address and checks the bench itself.
 Run the online check? [Y/n] """
 
-DISRUPT_TEXT = """The next tests break the VPN on purpose - about 2 minutes, 2.5 at most. Each fault lasts %d s, then
-the bench waits up to %d s for the VPN to come back. Each change is undone at once (also on Ctrl-C;
-'sudo python3 ksbench.py --restore' if the run dies):
+DISRUPT_TEXT = """The next tests break the VPN on purpose - about 3 minutes, 4 at most. A blocked server or a killed client
+stays so until the tunnel goes down (at most %d s); the bench then waits up to %d s for the VPN to come back.
+Each change is undone at once (also on Ctrl-C; 'sudo python3 ksbench.py --restore' if the run dies):
   D1  a firewall rule blocks the VPN server
-  D3  the tunnel adapter is taken down
+  D3  the tunnel adapter is taken down for 10 s
   D4  the physical network adapter is taken down for 10 s - you are offline meanwhile
-  T1  a firewall allow rule for the test addresses + the VPN server blocked
+  T1  a firewall allow rule for the test addresses + the physical adapter down for 10 s
   D2  the VPN client process is killed (asks first; skipped if the VPN runs in the kernel/system)
-  T2  the kill-switch app's process is killed + the VPN server blocked (only if you name the process)
+  T2  the kill-switch app's process is killed + the physical adapter down for 10 s (only if you name the process)
 Nothing is installed, nothing is rebooted, no files are deleted."""
 
 
@@ -1234,13 +1269,13 @@ def main(argv=None):
     ap.add_argument("--yes", action="store_true", help="run the outage and tamper tests without asking")
     ap.add_argument("--app-process", help="kill-switch app process for T2")
     ap.add_argument("--only", type=lambda s: [x.strip().upper() for x in s.split(",")], help="e.g. S1,D1")
-    ap.add_argument("--hold", type=int, default=10, help="seconds each fault lasts (default 10)")
+    ap.add_argument("--hold", type=int, default=60, help="longest a blocked server / killed client waits for the tunnel to go down (default 60)")
     ap.add_argument("--recover", type=int, default=30, help="seconds to wait for the VPN to come back (default 30)")
     ap.add_argument("--out", help="report file (JSON)")
     ap.add_argument("--list", action="store_true", help="list the scenarios and exit")
     ap.add_argument("--restore", action="store_true", help="undo the changes of an interrupted run")
     a = ap.parse_args(argv)
-    a.hold, a.recover = min(max(a.hold, 5), 60), min(max(a.recover, 10), 120)
+    a.hold, a.recover = min(max(a.hold, 10), 120), min(max(a.recover, 10), 120)
     if a.list:
         for s, g_, w, t in SCENARIOS:
             print(f"{s:<3} {g_:<7} {w:>3}  {t}")

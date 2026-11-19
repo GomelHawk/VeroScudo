@@ -20,7 +20,7 @@ param(
     [switch]$Yes,
     [string]$AppProcess,
     [string[]]$Only,
-    [ValidateRange(5, 60)][int]$Hold = 10,
+    [ValidateRange(10, 120)][int]$Hold = 60,
     [ValidateRange(10, 120)][int]$Recover = 30,
     [string]$Out,
     [switch]$List,
@@ -44,7 +44,8 @@ $Scenarios = @(
     @('T1', 'tamper', 15, 'Another program adds a firewall allow rule'),
     @('T2', 'tamper', 10, 'The kill-switch app is killed')
 )
-$Budget = 150     # seconds for all outage and tamper tests together
+$Budget = 240     # seconds for all outage and tamper tests together
+$Fault = 10       # seconds an adapter stays down (D3, D4, T1, T2)
 $Cap = 40
 $Critical = @('S1', 'S2', 'S3', 'D1', 'D2', 'D3', 'D4', 'T1', 'T2')
 $Meaning = @{
@@ -66,15 +67,15 @@ $Recommend = "Recommendation: change your kill-switch to one that blocks at the 
 $NeverKill = @('system', 'idle', 'svchost', 'lsass', 'csrss', 'wininit', 'winlogon', 'services', 'smss', 'registry',
     'explorer', 'powershell', 'pwsh', 'dwm', 'msmpeng', 'conhost')
 $DisruptText = @"
-The next tests break the VPN on purpose - about 2 minutes, 2.5 at most. Each fault lasts {0} s, then
-the bench waits up to {1} s for the VPN to come back. Each change is undone at once (also on Ctrl-C;
-'.\ksbench.ps1 -Restore' if the window was closed during the run):
+The next tests break the VPN on purpose - about 3 minutes, 4 at most. A blocked server or a killed client
+stays so until the tunnel goes down (at most {0} s); the bench then waits up to {1} s for the VPN to come back.
+Each change is undone at once (also on Ctrl-C; '.\ksbench.ps1 -Restore' if the window was closed during the run):
   D1  a Windows Firewall rule blocks the VPN server
-  D3  the tunnel adapter is disabled (skipped for Windows' own VPN client: it has no adapter to disable)
-  D4  the physical network adapter is disabled for up to 10 s - you are offline meanwhile
-  T1  a Windows Firewall allow rule for the test addresses + the VPN server blocked
+  D3  the tunnel adapter is disabled for 10 s (skipped for Windows' own VPN client: it has no adapter to disable)
+  D4  the physical network adapter is disabled for 10 s - you are offline meanwhile
+  T1  a Windows Firewall allow rule for the test addresses + the physical adapter disabled for 10 s
   D2  the VPN client process is killed (asks first; skipped if the VPN runs inside Windows)
-  T2  the kill-switch app's process is killed + the VPN server blocked (only if you name the process)
+  T2  the kill-switch app's process is killed + the physical adapter disabled for 10 s (only if you name the process)
 Nothing is installed, nothing is rebooted, no files are deleted.
 "@
 $OnlinePrompt = @'
@@ -277,17 +278,40 @@ namespace KsBench
                     int cap = (int)U32(f, pos + 20, le), d = pos + 28;
                     if (ifid < lts.Count && d + cap <= pos + blen && lts[ifid] == 1 && cap >= 14)
                     {
-                        string mac = BitConverter.ToString(f, d + 6, 6).Replace("-", "").ToLowerInvariant();
-                        if (macs.Contains(mac))
-                        {
-                            Pkt p = Frame(f, d, cap, 1);
-                            if (p != null) { p.Ts = ts * rs[ifid]; res.Add(p); }
-                        }
+                        Pkt p = Outbound(f, d, cap, macs);
+                        if (p != null) { p.Ts = ts * rs[ifid]; res.Add(p); }
                     }
                 }
                 pos += blen;
             }
             return res;
+        }
+
+        static string Mac(byte[] f, int o) { return BitConverter.ToString(f, o, 6).Replace("-", "").ToLowerInvariant(); }
+
+        // A frame we sent: Ethernet with our MAC as sender, or (Wi-Fi adapters, where pktmon records raw 802.11) a data
+        // frame to the access point (ToDS) with our MAC as transmitter and an LLC/SNAP header in front of the IP packet.
+        public static Pkt Outbound(byte[] f, int d, int cap, ICollection<string> macs)
+        {
+            if (cap >= 32 && (f[d] & 0x0C) == 0x08)
+            {
+                int hl = 24 + ((f[d] & 0x80) != 0 ? 2 : 0) + ((f[d + 1] & 0x80) != 0 ? 4 : 0);
+                if (cap >= hl + 8 && f[d + hl] == 0xAA && f[d + hl + 1] == 0xAA && f[d + hl + 2] == 0x03
+                    && f[d + hl + 3] == 0 && f[d + hl + 4] == 0 && f[d + hl + 5] == 0)
+                {
+                    if ((f[d + 1] & 0x03) != 0x01 || !macs.Contains(Mac(f, d + 10))) return null;
+                    int et = (f[d + hl + 6] << 8) | f[d + hl + 7];
+                    return (et == 0x0800 || et == 0x86DD) ? Ip(f, d + hl + 8, cap - hl - 8) : null;
+                }
+            }
+            return macs.Contains(Mac(f, d + 6)) ? Frame(f, d, cap, 1) : null;
+        }
+
+        public static Pkt HexOut(string hex, ICollection<string> macs)
+        {
+            byte[] b = new byte[hex.Length / 2];
+            for (int i = 0; i < b.Length; i++) b[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+            return Outbound(b, 0, b.Length, macs);
         }
 
         public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls)
@@ -307,6 +331,7 @@ namespace KsBench
 
         public static HashSet<int> Phys = new HashSet<int>();
         public static bool Online, V6, WentDown;
+        public static double DownAt;
         public static string Label;
         public static HashSet<string> VpnIps = new HashSet<string>();
         public static List<string[]> Hits = new List<string[]>();
@@ -430,7 +455,8 @@ namespace KsBench
             });
         }
 
-        // mode 0: probe only; 1: also note whether the tunnel went down; 2: return true once the tunnel is up for 3 s
+        // mode 0: probe only; 1: also note whether the tunnel went down; 2: return true once the tunnel is up for 3 s;
+        // 3: like 1, and return true 5 s after the tunnel went down
         public static bool ProbeFor(double seconds, int mode)
         {
             double end = Now() + seconds, lastDns = 0, lastOnline = 0, lastCheck = 0, okSince = 0;
@@ -452,7 +478,8 @@ namespace KsBench
                 {
                     lastCheck = now;
                     bool up = TunnelUp();
-                    if (mode == 1 && !up) WentDown = true;
+                    if ((mode == 1 || mode == 3) && !up && !WentDown) { WentDown = true; DownAt = now; }
+                    if (mode == 3 && WentDown && now - DownAt >= 5) return true;
                     if (mode == 2)
                     {
                         if (!up) okSince = 0;
@@ -534,9 +561,11 @@ function Start-Capture {
     $script:Seg++
     $script:SegEtl = Join-Path $script:RunDir "seg$($script:Seg).etl"
     $script:SegStart = [KsBench.Probe]::Now()
-    Add-Change 'packet capture (pktmon)' 'pktmon' ''
+    # no text parsing (pktmon answers in the Windows language): start, and stop only on its exit code. Written down
+    # after the start - a capture that never started (another tool's) must never be stopped by the bench
     $o = & pktmon start --capture --comp nics --pkt-size 128 --file-name $script:SegEtl --file-size 256 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "pktmon start failed: $o" }
+    if ($LASTEXITCODE -ne 0) { throw "ksbench: pktmon could not start a capture (is another tool capturing?): $($o | Out-String)" }
+    Add-Change 'packet capture (pktmon)' 'pktmon' ''
 }
 
 function Stop-Capture {
@@ -644,8 +673,11 @@ function Wait-Recovery([string]$Label) {
     return $back
 }
 
-function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [scriptblock]$Restore = $null) {
-    if ([KsBench.Probe]::Now() + $HoldSec + 15 -gt $script:Deadline) {
+function Test-Fits([int]$Seconds) { return [KsBench.Probe]::Now() + $Seconds -le $script:Deadline }
+
+# -UntilDown: the fault stays until the tunnel goes down (+5 s), at most $HoldSec; otherwise exactly $HoldSec
+function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [scriptblock]$Restore = $null, [switch]$UntilDown) {
+    if (-not (Test-Fits ([Math]::Min($HoldSec, $Fault) + 20))) {
         Set-Result $Id 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached"; return
     }
     if (-not [KsBench.Probe]::TunnelUp()) {
@@ -659,16 +691,19 @@ function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [script
     $why = $null
     try { $why = & $Inject } catch { $why = "the bench could not make the change ($($_.Exception.Message))" }
     if ($why) { Undo-Since $mark; Stop-Capture; Set-Result $Id 'n/a' $why; return }
-    Write-Host "      fault active for $HoldSec s - sending test traffic, watching $($script:PhysNames -join ', ')"
+    if ($UntilDown) { Write-Host "      fault active until the tunnel goes down (at most $HoldSec s) - sending test traffic, watching $($script:PhysNames -join ', ')" }
+    else { Write-Host "      fault active for $HoldSec s - sending test traffic, watching $($script:PhysNames -join ', ')" }
     [KsBench.Probe]::Label = $Id
     [KsBench.Probe]::WentDown = $false
-    [void][KsBench.Probe]::ProbeFor($HoldSec, 1)
+    [void][KsBench.Probe]::ProbeFor($HoldSec, $(if ($UntilDown) { 3 } else { 1 }))
     $wentDown = [KsBench.Probe]::WentDown
+    if ($wentDown) { Write-Host ('      the tunnel went down after {0:N0} s' -f ([KsBench.Probe]::DownAt - $t0)) }
     if ($Restore) { & $Restore } else { Undo-Since $mark -KeepCapture }
     Write-Host "      waiting for the VPN to come back (up to $Recover s), still watching for leaks..."
     $tw = [KsBench.Probe]::Now()
     $back = Wait-Recovery $Id
     if ($back) { Write-Host ('      VPN is back after {0:N0} s' -f ([KsBench.Probe]::Now() - $tw)) } else { Write-Host '      the VPN did not come back' }
+    Undo-Since $mark -KeepCapture          # whatever this test still holds (T1's allow rule) goes now, not at the end
     Stop-Capture
     $t1 = [KsBench.Probe]::Now()
     if ($back) {
@@ -680,7 +715,7 @@ function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [script
     $hits = @([KsBench.Probe]::Hits | Where-Object { $_[0] -eq $Id } | ForEach-Object { $_[1] })
     $ev = [ordered]@{ tunnel_went_down = $wentDown; recovered = $back; leak = (Get-Evidence $leak $t0); dns = (Get-Evidence $dns $t0); online = $hits }
     if ($leak.Count -eq 0 -and -not $wentDown) {
-        Set-Result $Id 'n/a' "the fault did not take the tunnel down within $HoldSec s, so the kill-switch was not tested (nothing could leak); a longer -Hold may help" $ev
+        Set-Result $Id 'n/a' "the tunnel stayed up for all $HoldSec s of the fault, so the kill-switch was not tested (nothing could leak); a longer -Hold may help" $ev
     } elseif ($leak.Count -gt 0) {
         $e = $ev.leak
         Set-Result $Id 'fail' ('{0} packets leaked, first {1:N1} s after the fault, to {2}' -f $e.packets, ($e.first_ms / 1000), (@($e.to)[0..([Math]::Min(2, $e.to.Count - 1))] -join ', ')) $ev
@@ -801,47 +836,55 @@ function Invoke-Steady {
     }
 }
 
+# Over Remote Desktop, disabling the adapter may cut the session: asked once (no = skip D4, T1, T2)
+function Test-AdapterOk([string]$Id, [string]$Name) {
+    if ($env:SESSIONNAME -notlike 'RDP-*') { return $true }
+    if ($null -eq $script:RdpOk) {
+        $script:RdpOk = Read-YesNo "  You are connected over Remote Desktop: D4, T1 and T2 disable '$Name' for $Fault s and the session may drop. Run them anyway? [y/N]" $false
+    }
+    if (-not $script:RdpOk) { Set-Result $Id 'skipped' 'running over Remote Desktop - disabling the adapter could cut the session' }
+    return $script:RdpOk
+}
+
 function Invoke-Disruptive {
     $script:Deadline = [KsBench.Probe]::Now() + $Budget
-    if ((Test-Wanted 'D1') -and -not $script:Stopped) { Invoke-Outage 'D1' { Block-Server } $Hold }
+    $script:RdpOk = $null
+    $pn = $script:Phys[0].Name
+    $adapterBack = {          # only the adapter: T1's allow rule stays while the VPN comes back
+        $it = $script:Journal | Where-Object { $_.kind -eq 'adapter' -and -not $_.done } | Select-Object -Last 1
+        if ($it) { Undo-Change $it }
+        Stop-Capture          # the adapter is back: start a new capture so pktmon sees it again
+        for ($i = 0; $i -lt 100 -and (Get-NetAdapter -Name $pn).Status -ne 'Up'; $i++) { Start-Sleep -Milliseconds 200 }
+        Start-Capture
+        $ok = $false
+        for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+            $ok = [bool](Get-NetIPAddress -InterfaceAlias $pn -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.AddressState -eq 'Preferred' -and $_.PrefixOrigin -ne 'WellKnown' })
+            if (-not $ok) { [void][KsBench.Probe]::ProbeFor(0.5, 0) }
+        }
+        if (-not $ok) { Write-Host "      ! '$pn' is enabled but has no address yet - if it stays offline, turn it off and on in Settings" }
+    }
+    if ((Test-Wanted 'D1') -and -not $script:Stopped) { Invoke-Outage 'D1' { Block-Server } $Hold -UntilDown }
     if ((Test-Wanted 'D3') -and -not $script:Stopped) {
         $tun = Get-NetAdapter -InterfaceIndex ([KsBench.Probe]::BestIf('198.51.100.7')) -ErrorAction SilentlyContinue
         if (-not $tun) {
             Set-Result 'D3' 'n/a' "the tunnel is not a network adapter that can be disabled (Windows' own VPN client)"
         } else {
             $tn = $tun.Name
-            Invoke-Outage 'D3' { Disable-Adapter $tn; $null } $Hold
+            Invoke-Outage 'D3' { Disable-Adapter $tn; $null } $Fault
         }
     }
-    if ((Test-Wanted 'D4') -and -not $script:Stopped) {
-        $pn = $script:Phys[0].Name
-        if ($env:SESSIONNAME -like 'RDP-*' -and -not (Read-YesNo "  You are connected over Remote Desktop: D4 disables '$pn' for 10 s and the session may drop. Run D4 anyway? [y/N]" $false)) {
-            Set-Result 'D4' 'skipped' 'running over Remote Desktop - disabling the adapter could cut the session'
-        } else {
-            $restore = {
-                Undo-Since $mark -KeepCapture
-                Stop-Capture          # the adapter is back: start a new capture so pktmon sees it again
-                for ($i = 0; $i -lt 100 -and (Get-NetAdapter -Name $pn).Status -ne 'Up'; $i++) { Start-Sleep -Milliseconds 200 }
-                Start-Capture
-                $ok = $false
-                for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
-                    $ok = [bool](Get-NetIPAddress -InterfaceAlias $pn -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                            Where-Object { $_.AddressState -eq 'Preferred' -and $_.PrefixOrigin -ne 'WellKnown' })
-                    if (-not $ok) { [void][KsBench.Probe]::ProbeFor(0.5, 0) }
-                }
-                if (-not $ok) { Write-Host "      ! '$pn' is enabled but has no address yet - if it stays offline, turn it off and on in Settings" }
-            }
-            Invoke-Outage 'D4' { Disable-Adapter $pn; $null } ([Math]::Min($Hold, 10)) $restore
-        }
+    if ((Test-Wanted 'D4') -and -not $script:Stopped -and (Test-AdapterOk 'D4' $pn)) {
+        Invoke-Outage 'D4' { Disable-Adapter $pn; $null } $Fault $adapterBack
     }
-    if ((Test-Wanted 'T1') -and -not $script:Stopped) {
+    if ((Test-Wanted 'T1') -and -not $script:Stopped -and (Test-AdapterOk 'T1' $pn)) {
         Invoke-Outage 'T1' {
             $n = "ksbench-$([guid]::NewGuid())"
             Add-Change 'Windows Firewall rule: allow 198.51.100.0/24, 2001:db8::/32 (Outbound)' 'fw' $n
             $null = New-NetFirewallRule -Name $n -DisplayName 'ksbench: allow the test addresses' -Group 'ksbench' `
                 -Direction Outbound -Action Allow -RemoteAddress '198.51.100.0/24', '2001:db8::/32' -Profile Any
-            Block-Server
-        } $Hold
+            Disable-Adapter $pn; $null
+        } $Fault $adapterBack
     }
     if ((Test-Wanted 'D2') -and -not $script:Stopped) {
         $ids = @()
@@ -850,22 +893,27 @@ function Invoke-Disruptive {
         $procs = Get-SafeProcess $ids
         if (-not $procs) {
             Set-Result 'D2' 'n/a' 'no user process owns the VPN connection (the VPN runs inside Windows or in a driver) - nothing to kill safely'
+        } elseif (-not (Test-Fits ($Fault + 20))) {
+            Set-Result 'D2' 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached"
         } else {
             $desc = ($procs | ForEach-Object { "$($_.Name) (pid $($_.Id))" }) -join ', '
             if ((Read-YesNo "  D2 will kill the VPN client process $desc. OK? [y/N]" $false) -or $Yes) {
-                Invoke-Outage 'D2' { Stop-ProcessList $procs; $null } $Hold { }
+                Invoke-Outage 'D2' { Stop-ProcessList $procs; $null } $Hold { } -UntilDown
             } else { Set-Result 'D2' 'skipped' "you chose not to kill $desc" }
         }
     }
     if ((Test-Wanted 'T2') -and -not $script:Stopped) {
-        $name = $AppProcess
-        if (-not $name -and $script:Interactive) { $name = (Read-Host "  T2: name of the kill-switch app's process to kill (Enter = skip T2)").Trim() }
-        if (-not $name) { Set-Result 'T2' 'skipped' 'no kill-switch process named (-AppProcess)' }
+        if (-not (Test-Fits ($Fault + 20))) { Set-Result 'T2' 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached" }
         else {
-            $name = $name -replace '\.exe$', ''
-            $procs = Get-SafeProcess @(Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object Id)
-            if (-not $procs) { Set-Result 'T2' 'skipped' "no running process named $name" }
-            else { Invoke-Outage 'T2' { Stop-ProcessList $procs; Start-Sleep -Seconds 1; Block-Server } $Hold }
+            $name = $AppProcess
+            if (-not $name -and $script:Interactive) { $name = (Read-Host "  T2: name of the kill-switch app's process to kill (Enter = skip T2)").Trim() }
+            if (-not $name) { Set-Result 'T2' 'skipped' 'no kill-switch process named (-AppProcess)' }
+            else {
+                $name = $name -replace '\.exe$', ''
+                $procs = Get-SafeProcess @(Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object Id)
+                if (-not $procs) { Set-Result 'T2' 'skipped' "no running process named $name" }
+                elseif (Test-AdapterOk 'T2' $pn) { Invoke-Outage 'T2' { Stop-ProcessList $procs; Start-Sleep -Seconds 1; Disable-Adapter $pn; $null } $Fault $adapterBack }
+            }
         }
     }
     if (Test-Wanted 'D5') {
@@ -955,7 +1003,6 @@ function Invoke-Bench {
     if ($Restore) { Invoke-Restore; return }
     if (Get-PendingChange) { throw "ksbench: an earlier run did not finish undoing its changes. Run '.\ksbench.ps1 -Restore' first." }
     if (-not (Get-Command pktmon -ErrorAction SilentlyContinue)) { throw 'ksbench: pktmon is missing - it needs Windows 10 21H2 or later.' }
-    if ((& pktmon status 2>&1 | Out-String) -notmatch 'not running') { throw 'ksbench: pktmon is already capturing (another tool uses it). Stop it and run again.' }
 
     $script:Interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not $Yes
     $script:Res = @{}
@@ -969,8 +1016,6 @@ function Invoke-Bench {
 
     $os = Get-CimInstance Win32_OperatingSystem
     Write-Host "ksbench $Version - VPN kill-switch leak bench ($($os.Caption) $($os.Version))"
-    $flt = (& pktmon filter list 2>&1 | Out-String)
-    if ($flt -notmatch 'No filters|None|^\s*$' -and -not (Read-YesNo "pktmon has packet filters set:`n$flt`nThey may hide packets from the bench (the bench does not change them). Continue? [y/N]" $false)) { return }
     $script:ProductName = $Product
     if (-not $script:ProductName -and $script:Interactive) { $script:ProductName = (Read-Host 'Name of the VPN / kill-switch app you are testing (for the report)').Trim() }
     if (-not $script:ProductName) { $script:ProductName = 'unnamed' }

@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import pwd
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -349,6 +350,19 @@ def down(profile: str) -> bool:
         return True                     # VeroScudo never stops Hiddify
     r = subprocess.run(down_argv(profile), check=False, capture_output=True, text=True)
     return r.returncode == 0
+
+
+def reset_resolver() -> None:
+    """Right before a dial: systemd-resolved forgets what it learned about the DNS servers while blocked. The dropped
+    queries of every other name count as timeouts there and can make it fall back to TCP for the server - and only a UDP
+    query for the VPN server's name gets out (firewall.qname_match). Nothing without resolved."""
+    if not Path("/run/systemd/resolve/io.systemd.Resolve").exists() or not shutil.which("resolvectl"):
+        return
+    try:
+        subprocess.run(["resolvectl", "reset-server-features"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def resolver_uid() -> int | None:

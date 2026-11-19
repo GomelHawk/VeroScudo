@@ -422,7 +422,7 @@ Describe 'a VPN server that moved: fresh lookup before arming and after a failed
         Update-VeroServerIpBeforeArm -Config $script:cfgM -Action test
         Should -Invoke -ModuleName VeroScudo.Core Resolve-VeroServerIp -Times 0 -Exactly
     }
-    It 'after a failed redial: a new address is looked up and allowed before the next attempt' {
+    It 'redialing: a new address is looked up right before the dial and allowed for it' {
         Set-VeroArmed $true 'test'
         Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
         Mock -ModuleName VeroScudo.Core Invoke-VeroDial { }
@@ -433,8 +433,12 @@ Describe 'a VPN server that moved: fresh lookup before arming and after a failed
         $cm = $script:cfgM
         Mock -ModuleName VeroScudo.Core Get-VeroConfig { $cm }.GetNewClosure()
         Mock -ModuleName VeroScudo.Core Start-Sleep { Set-VeroArmed $false 'test' }
+        Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('203.0.113.20'))) }
         Invoke-VeroReconnect -Config $script:cfgM -Action test
-        Should -Invoke -ModuleName VeroScudo.Core Sync-VeroKillSwitch -Times 2 -Exactly       # the attempt's sync + the re-sync with the new address
+        # the attempt's sync, the DNS window open and closed, the re-sync with the new address - all before the one dial
+        Should -Invoke -ModuleName VeroScudo.Core Sync-VeroKillSwitch -Times 4 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Resolve-VeroServerIp -ParameterFilter { -not $CacheOnly } -Times 1 -Exactly
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroDial -Times 1 -Exactly
     }
 }
 
@@ -692,5 +696,50 @@ Describe 'the VPN server''s ports are for Windows itself, not for any program' {
             { [VeroScudo.Wfp]::Validate([VeroScudo.FilterSpec[]]@($specs)) } | Should -Not -Throw -Because $type
         }
         [VeroScudo.Wfp]::Count() | Should -Be $before                         # nothing was left behind
+    }
+}
+
+Describe 'DNS while blocked: only the redial''s own lookup of the server, right before each dial (mocked)' {
+    AfterAll { Set-VeroArmed $false 'test' }
+    BeforeAll {
+        Set-VeroArmed $true 'test'
+        $script:cfgN = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":false}'
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { '203.0.113.5' }
+        Mock -ModuleName VeroScudo.Core Get-VeroDnsServer { @('192.168.1.1') }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelType { 'Sstp' }
+    }
+    AfterEach { InModuleScope VeroScudo.Core { $script:DnsWindow = $false; $script:DnsFresh = @{} } }
+    It 'blocked: no DNS permit for a type VeroScudo dials' {
+        $plan = & (Get-Module VeroScudo.Core) { Get-VeroSyncPlan -Config $args[0] -Action test } $script:cfgN
+        @(Get-SpecText $plan.Specs | Where-Object { $_ -like 'DNS*' }).Count | Should -Be 0
+    }
+    It 'blocked, inside the redial''s DNS window: the DNS client may ask the network''s resolvers' {
+        InModuleScope VeroScudo.Core { $script:DnsWindow = $true }
+        $plan = & (Get-Module VeroScudo.Core) { Get-VeroSyncPlan -Config $args[0] -Action test } $script:cfgN
+        @(Get-SpecText $plan.Specs | Where-Object { $_ -like 'DNS (redial)*' }).Count | Should -BeGreaterThan 0
+    }
+    It 'the names a dial looks up: the server''s name, none for an address or pinned addresses' {
+        Get-VeroDialName -Config $script:cfgN | Should -Be 'vpn.example.com'
+        @(Get-VeroDialName -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"}}')).Count | Should -Be 0
+        @(Get-VeroDialName -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u","serverIps":["203.0.113.5"]}}')).Count | Should -Be 0
+    }
+    It 'opens DNS for the lookup and closes it before the dial - also when the answer does not come in time' {
+        $script:seen = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { [void]$script:seen.Add("sync window=$(& (Get-Module VeroScudo.Core) { $script:DnsWindow })") }
+        Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [void]$script:seen.Add('lookup'); (New-Object System.Threading.Tasks.TaskCompletionSource[System.Net.IPAddress[]]).Task }   # never answers
+        InModuleScope VeroScudo.Core { $script:DnsFirstSeconds = 1 }
+        Invoke-VeroDnsFirst -Config $script:cfgN -Action test
+        InModuleScope VeroScudo.Core { $script:DnsFirstSeconds = 3 }
+        @($script:seen) | Should -Be @('sync window=True', 'lookup', 'sync window=False')
+        InModuleScope VeroScudo.Core { $script:DnsWindow } | Should -BeFalse
+    }
+    It 'an answer goes into the cache without a second lookup, and the new address is allowed for the dial' {
+        $script:seen = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { [void]$script:seen.Add('sync') }
+        Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('203.0.113.77'))) }
+        Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { [void]$script:seen.Add("resolve " + ((& (Get-Module VeroScudo.Core) { Get-VeroHostAddress 'vpn.example.com' }) -join ',')) }
+        Invoke-VeroDnsFirst -Config $script:cfgN -Action test
+        @($script:seen) | Should -Be @('sync', 'sync', 'resolve 203.0.113.77', 'sync')
     }
 }

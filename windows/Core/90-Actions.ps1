@@ -247,8 +247,9 @@ function Invoke-VeroAction {
         'reconnect' {
             # the user's Reconnect: block, hang up, redial; normal traffic again only once the new tunnel is up
             if (-not (Test-VeroArmed)) { Write-VeroLog 'Reconnect: the VPN is off - use Turn on' $Action; return }
-            Clear-VeroAuthFailed -ProfileName $Config.Profile -Action $Action
-            Invoke-VeroReconnect -Config $Config -Action $Action -Renew
+            $dead = Test-VeroDeadMarker -ProfileName $Config.Profile -Take           # the watchdog's own: a password pause stays
+            if (-not $dead) { Clear-VeroAuthFailed -ProfileName $Config.Profile -Action $Action }
+            Invoke-VeroReconnect -Config $Config -Action $Action -Renew -Dead:$dead
         }
         'redial'    { if (Test-VeroArmed) { Invoke-VeroReconnect -Config $Config -Action $Action } }   # the Redial task: the loop's one owner
         'openvpn'   { Invoke-VeroOpenVpnRunner -Action $Action }

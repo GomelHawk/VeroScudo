@@ -36,6 +36,7 @@ def env(request, tmp_path, monkeypatch):
     monkeypatch.setattr(nm, "kind", lambda p: "vpn")
     monkeypatch.setattr(nm, "nm_dns", list)
     monkeypatch.setattr(nm, "vm_bridges", list)
+    monkeypatch.setattr(nm, "reset_resolver", lambda: None)          # never the real resolvectl in a unit test
 
     def up(p):
         calls["up"].append(p)
@@ -181,6 +182,12 @@ def test_lookup_after_the_tunnel_is_allowed_and_after_a_failed_redial(env, monke
     monkeypatch.setattr(calls["nm"], "up", lambda p: False)                           # the redial fails
     monkeypatch.setattr(daemon.time, "sleep", lambda s: None)
     g.attempts = 2
+    if calls["backend"] == "pf":
+        # pf: blocked, the server is looked up only right before each dial, in its short DNS window (another thread)
+        monkeypatch.setattr(calls["nm"], "resolve", lambda s: looked.append(s) or ["203.0.113.77"])
+        g.reconnect()
+        assert looked == ["vpn.example.com"] * 2
+        return
     g.reconnect()
     assert looked == ["vpn.example.com"]                    # only once: with the block after the failed attempt
 
@@ -371,6 +378,10 @@ def test_drops_are_recorded_with_their_reason_for_the_tray(env):
     g.renew_marker.write_text(str(__import__("time").time()))      # your Reconnect took it down itself
     g.on_event_down("Work", user_requested=True)
     assert g.store.last_drop()["why"] == "Reconnect"
+    g.renew_marker.write_text(str(__import__("time").time()))      # the guard's own Reconnect of a dead tunnel
+    g.dead_marker.write_text(str(__import__("time").time()))
+    g.on_event_down("Work", user_requested=True)
+    assert g.store.last_drop()["why"] == "no traffic through the tunnel" and g.store.armed
     g.on_event_down("Work", user_requested=True)                   # you hung up
     assert g.store.last_drop()["why"] == "you disconnected"
 
@@ -484,3 +495,56 @@ def test_rules_another_process_applied_are_put_back(env):
     g.store.set_applied("Work", None, "the blocked rules of a CLI call that ended early")
     g.watchdog()
     assert len(calls["apply"]) == n + 1 and calls["allows_tunnel"](calls["apply"][-1])
+
+
+# ---------------------------------------------------------------- DNS while blocked: the VPN server's name only
+def test_the_redial_may_look_up_the_server_name_only(env, monkeypatch):
+    g, calls, connected = env
+    monkeypatch.setattr(calls["nm"], "nameservers", lambda: ["192.168.1.1"])
+    order = []
+    def last():
+        return calls["apply"][-1] if calls["apply"] else ""
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: order.append(("lookup", last())) or ["203.0.113.5"])
+    real_up = calls["nm"].up
+
+    def up(p):
+        order.append(("dial", last()))
+        return real_up(p)
+    monkeypatch.setattr(calls["nm"], "up", up)
+    g.arm()
+    g.reconnect()
+    assert "Work" in connected
+    dial = [rs for what, rs in order if what == "dial"][-1]
+    if calls["backend"] == "nftables":
+        # nftables: only a query for vpn.example.com gets out, in every blocked ruleset; no other DNS
+        blocked = [rs for rs in calls["apply"] if not calls["allows_tunnel"](rs)]
+        assert blocked and all("@th,160,128 0x0376706e076578616d706c6503636f6d" in rs for rs in blocked)
+        assert not any("dport 53 ct mark" in rs or "tcp dport 53" in rs for rs in blocked)
+    else:
+        # pf: DNS was open for the redial's own lookup and is closed again before the dial
+        i = max(n for n, (what, _) in enumerate(order) if what == "dial")
+        lookup = [rs for what, rs in order[:i] if what == "lookup"]
+        assert lookup and "port 53" in lookup[-1]               # the lookup right before the dial
+        assert "port 53" not in dial
+
+
+def test_pf_closes_dns_again_even_when_the_lookup_hangs(env, monkeypatch):
+    g, calls, _ = env
+    if calls["backend"] != "pf":
+        pytest.skip("nftables lets the name out by itself")
+    monkeypatch.setattr(calls["nm"], "nameservers", lambda: ["192.168.1.1"])
+    gate = threading.Event()
+    g.store.server_cache("Work").parent.mkdir(parents=True, exist_ok=True)
+    g.store.server_cache("Work").write_text("203.0.113.5")      # the rules never wait for this lookup
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: (gate.wait(5), [])[1])
+    monkeypatch.setattr(daemon, "DNS_FIRST_SECONDS", 0.2)
+    g.store.set_armed(True)
+    g.prime_dns()
+    gate.set()
+    assert "port 53" not in calls["apply"][-1]
+
+
+def test_dns_names_skip_hiddify_and_servers_given_as_addresses():
+    assert daemon.Guard.dns_names(Config.from_text(MULTI)) == ("vpn.example.com",)
+    ip = Config.from_text('{"profiles":[{"profile":"W","server":"203.0.113.5"}]}')
+    assert daemon.Guard.dns_names(ip) == ()

@@ -204,3 +204,16 @@ def test_a_bridge_with_any_member_that_is_not_a_vm_port_is_not_host_only():
             "bridge101: flags=8a63<UP> mtu 1500\n\tmember: ap1 flags=3<LEARNING>\n"
             "bridge102: flags=8a63<UP> mtu 1500\n\tmember: vmenet1 flags=3<LEARNING>\n\tmember: awdl0 flags=3<LEARNING>\n")
     assert scutil.parse_bridges(text) == ["bridge100"]
+
+
+def test_pf_dns_while_blocked_only_for_the_redials_own_lookup():
+    names = ("vpn.example.com",)
+    closed = pf.render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False, dns=DnsPolicy(servers=("192.168.1.1",), names=names))
+    assert "port 53" not in closed                        # blocked: the system resolver gets no DNS for other names
+    window = pf.render_ruleset(CFG, ["203.0.113.5"], None, vm_allowed=False,
+                               dns=DnsPolicy(servers=("192.168.1.1",), names=names, window=True))
+    assert "proto { udp tcp } to { 192.168.1.1 } port 53" in window
+    up = pf.render_ruleset(CFG, ["203.0.113.5"], "utun4", vm_allowed=False,
+                           dns=DnsPolicy(servers=("192.168.1.1",), names=names, window=True))
+    assert "port 53" not in up                            # up: DNS through the tunnel only
+    assert not pf.matches_dns_names()
