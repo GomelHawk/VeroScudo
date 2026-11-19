@@ -21,7 +21,7 @@ param(
     [string]$AppProcess,
     [string[]]$Only,
     [ValidateRange(10, 120)][int]$Hold = 60,
-    [ValidateRange(10, 120)][int]$Recover = 30,
+    [ValidateRange(10, 120)][int]$Recover = 60,
     [string]$Out,
     [switch]$List,
     [switch]$Restore
@@ -32,17 +32,17 @@ $ErrorActionPreference = 'Stop'
 $Version = '0.1.0'
 # id, group, weight, title - keep in sync with ksbench.py and SCENARIOS.md (a test checks it)
 $Scenarios = @(
-    @('S1', 'steady', 15, 'DNS stays in the tunnel'),
-    @('S2', 'steady', 10, 'IPv6 stays in the tunnel'),
-    @('S3', 'steady', 15, 'A program bound to the physical adapter cannot get out'),
-    @('S4', 'steady', 5, 'UDP/QUIC, STUN and ping stay in the tunnel'),
-    @('D1', 'outage', 20, 'VPN server unreachable'),
-    @('D2', 'outage', 15, 'VPN client process killed'),
-    @('D3', 'outage', 15, 'Tunnel adapter goes down'),
-    @('D4', 'outage', 20, 'Physical link drops and comes back'),
-    @('D5', 'outage', 10, 'No DNS leak during any outage'),
-    @('T1', 'tamper', 15, 'Another program adds a firewall allow rule'),
-    @('T2', 'tamper', 10, 'The kill-switch app is killed')
+    @('S1', 'steady', 10, 'DNS stays in the tunnel'),
+    @('S2', 'steady', 7, 'IPv6 stays in the tunnel'),
+    @('S3', 'steady', 10, 'A program bound to the physical adapter cannot get out'),
+    @('S4', 'steady', 3, 'UDP/QUIC, STUN and ping stay in the tunnel'),
+    @('D1', 'outage', 13, 'VPN server unreachable'),
+    @('D2', 'outage', 10, 'VPN client process killed'),
+    @('D3', 'outage', 10, 'Tunnel adapter goes down'),
+    @('D4', 'outage', 13, 'Physical link drops and comes back'),
+    @('D5', 'outage', 7, 'No DNS leak during any outage'),
+    @('T1', 'tamper', 10, 'Another program adds a firewall allow rule'),
+    @('T2', 'tamper', 7, 'The kill-switch app is killed')
 )
 $Budget = 240     # seconds for all outage and tamper tests together
 $Fault = 10       # seconds an adapter stays down (D3, D4, T1, T2)
@@ -75,7 +75,7 @@ Each change is undone at once (also on Ctrl-C; '.\ksbench.ps1 -Restore' if the w
   D4  the physical network adapter is disabled for 10 s - you are offline meanwhile
   T1  a Windows Firewall allow rule for the test addresses + the physical adapter disabled for 10 s
   D2  the VPN client process is killed (asks first; skipped if the VPN runs inside Windows)
-  T2  the kill-switch app's process is killed + the physical adapter disabled for 10 s (only if you name the process)
+  T2  (experts, only with -AppProcess) the kill-switch app's process is killed + the adapter disabled for 10 s
 Nothing is installed, nothing is rebooted, no files are deleted.
 "@
 $OnlinePrompt = @'
@@ -905,9 +905,8 @@ function Invoke-Disruptive {
     if ((Test-Wanted 'T2') -and -not $script:Stopped) {
         if (-not (Test-Fits ($Fault + 20))) { Set-Result 'T2' 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached" }
         else {
-            $name = $AppProcess
-            if (-not $name -and $script:Interactive) { $name = (Read-Host "  T2: name of the kill-switch app's process to kill (Enter = skip T2)").Trim() }
-            if (-not $name) { Set-Result 'T2' 'skipped' 'no kill-switch process named (-AppProcess)' }
+            $name = $AppProcess                               # an expert's option: no question - nobody knows that name
+            if (-not $name) { Set-Result 'T2' 'n/a' "an expert test: run it by naming the kill-switch app's process with -AppProcess" }
             else {
                 $name = $name -replace '\.exe$', ''
                 $procs = Get-SafeProcess @(Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object Id)
@@ -960,7 +959,8 @@ function Write-Report {
     $level, $verdict = Get-Verdict $score $failed $total $allW
     $color = @{ STRONG = 'Green'; FAIR = 'Yellow'; POOR = 'Red'; UNCLEAR = 'Yellow' }[$level]
     Write-Host ("`n" + ('=' * 78))
-    Write-Host ('SCORE: {0} / 100   ({1})   tests that ran: {2} of {3} points' -f $(if ($null -ne $score) { $score } else { '-' }), $level, $total, $allW) -ForegroundColor $color
+    $ran = @($Scenarios | Where-Object { $script:Res[$_[0]].status -in 'pass', 'fail' }).Count
+    Write-Host ('SCORE: {0} / 100   ({1})   - from the {2} tests that could run here; {3} could not run on this setup and do not count' -f $(if ($null -ne $score) { $score } else { '-' }), $level, $ran, ($Scenarios.Count - $ran)) -ForegroundColor $color
     if ($capped) { Write-Host "(capped at ${Cap}: a leak in a critical test outweighs the points of the tests that passed)" }
     Write-Host $verdict -ForegroundColor $color
     if ($failed) {

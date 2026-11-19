@@ -59,7 +59,7 @@ the outage tests. Useful options (Windows names in brackets):
 | `--only S1,S2,S3,S4` (`-Only S1,S2,S3,S4`) | run only some tests - these four change nothing |
 | `--yes` (`-Yes`) | run the outage tests without asking |
 | `--online` / `--no-online` (`-Online` / `-NoOnline`) | answer the online-check question in advance |
-| `--app-process NAME` (`-AppProcess NAME`) | the kill-switch app's process for T2 |
+| `--app-process NAME` (`-AppProcess NAME`) | experts: the kill-switch app's process for T2 (otherwise T2 is N/A - the bench never asks) |
 | `--server ADDR` / `--iface NAME` (`-Server` / `-Iface`) | when the bench cannot find the VPN server or adapter itself |
 | `--restore` (`-Restore`) | undo the changes of a run that was interrupted |
 

@@ -46,17 +46,17 @@ ONLINE6 = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
 
 # id, group, weight, title - keep in sync with ksbench.ps1 and SCENARIOS.md (a test checks it)
 SCENARIOS = [
-    ("S1", "steady", 15, "DNS stays in the tunnel"),
-    ("S2", "steady", 10, "IPv6 stays in the tunnel"),
-    ("S3", "steady", 15, "A program bound to the physical adapter cannot get out"),
-    ("S4", "steady", 5, "UDP/QUIC, STUN and ping stay in the tunnel"),
-    ("D1", "outage", 20, "VPN server unreachable"),
-    ("D2", "outage", 15, "VPN client process killed"),
-    ("D3", "outage", 15, "Tunnel adapter goes down"),
-    ("D4", "outage", 20, "Physical link drops and comes back"),
-    ("D5", "outage", 10, "No DNS leak during any outage"),
-    ("T1", "tamper", 15, "Another program adds a firewall allow rule"),
-    ("T2", "tamper", 10, "The kill-switch app is killed"),
+    ("S1", "steady", 10, "DNS stays in the tunnel"),
+    ("S2", "steady", 7, "IPv6 stays in the tunnel"),
+    ("S3", "steady", 10, "A program bound to the physical adapter cannot get out"),
+    ("S4", "steady", 3, "UDP/QUIC, STUN and ping stay in the tunnel"),
+    ("D1", "outage", 13, "VPN server unreachable"),
+    ("D2", "outage", 10, "VPN client process killed"),
+    ("D3", "outage", 10, "Tunnel adapter goes down"),
+    ("D4", "outage", 13, "Physical link drops and comes back"),
+    ("D5", "outage", 7, "No DNS leak during any outage"),
+    ("T1", "tamper", 10, "Another program adds a firewall allow rule"),
+    ("T2", "tamper", 7, "The kill-switch app is killed"),
 ]
 NEVER_KILL = {"systemd", "init", "networkmanager", "launchd", "kernel_task", "configd", "sshd", "system",
               "svchost", "lsass", "csrss", "wininit", "services", "smss", "registry", "idle", "python3", "python"}
@@ -994,19 +994,11 @@ class Bench:
                 else:
                     self.set("D2", "skipped", "you chose not to kill " + desc)
         if self.wanted("T2") and not self.stopped:
-            pname = self.a.app_process
-            if not self.fits(FAULT + 20):
+            pname = self.a.app_process                    # an expert's option: no question - nobody knows that name
+            if not pname:
+                self.set("T2", "n/a", "an expert test: run it by naming the kill-switch app's process with --app-process")
+            elif not self.fits(FAULT + 20):
                 self.set("T2", "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
-                pname = False
-            elif pname is None and self.interactive:
-                try:
-                    pname = input("  T2: name of the kill-switch app's process to kill (Enter = skip T2): ").strip()
-                except EOFError:
-                    pname = ""
-            if pname is False:
-                pass
-            elif not pname:
-                self.set("T2", "skipped", "no kill-switch process named (--app-process)")
             else:
                 pids = {int(x): pname for x in run(["pgrep", "-x", pname]).stdout.split()}
                 pids = {p: n for p, n in pids.items() if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL}
@@ -1165,7 +1157,9 @@ class Bench:
         all_w = sum(w for _, _, w, _ in SCENARIOS)
         level, verdict = judge(score, failed, total, all_w)
         print("\n" + "=" * 78)
-        print(f"SCORE: {score if score is not None else '-'} / 100   ({level})   tests that ran: {total} of {all_w} points")
+        ran = sum(1 for s, _, _, _ in SCENARIOS if self.res[s]["status"] in ("pass", "fail"))
+        print(f"SCORE: {score if score is not None else '-'} / 100   ({level})   - from the {ran} tests that could run here; "
+              f"{len(SCENARIOS) - ran} could not run on this setup and do not count")
         if capped:
             print(f"(capped at {CAP}: a leak in a critical test outweighs the points of the tests that passed)")
         print(verdict)
@@ -1253,7 +1247,7 @@ Each change is undone at once (also on Ctrl-C; 'sudo python3 ksbench.py --restor
   D4  the physical network adapter is taken down for 10 s - you are offline meanwhile
   T1  a firewall allow rule for the test addresses + the physical adapter down for 10 s
   D2  the VPN client process is killed (asks first; skipped if the VPN runs in the kernel/system)
-  T2  the kill-switch app's process is killed + the physical adapter down for 10 s (only if you name the process)
+  T2  (experts, only with --app-process) the kill-switch app's process is killed + the adapter down for 10 s
 Nothing is installed, nothing is rebooted, no files are deleted."""
 
 
@@ -1270,7 +1264,7 @@ def main(argv=None):
     ap.add_argument("--app-process", help="kill-switch app process for T2")
     ap.add_argument("--only", type=lambda s: [x.strip().upper() for x in s.split(",")], help="e.g. S1,D1")
     ap.add_argument("--hold", type=int, default=60, help="longest a blocked server / killed client waits for the tunnel to go down (default 60)")
-    ap.add_argument("--recover", type=int, default=30, help="seconds to wait for the VPN to come back (default 30)")
+    ap.add_argument("--recover", type=int, default=60, help="seconds to wait for the VPN to come back (default 60)")
     ap.add_argument("--out", help="report file (JSON)")
     ap.add_argument("--list", action="store_true", help="list the scenarios and exit")
     ap.add_argument("--restore", action="store_true", help="undo the changes of an interrupted run")

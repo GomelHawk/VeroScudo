@@ -63,15 +63,15 @@ def test_capture_keeps_only_our_outbound_frames():
 
 
 @pytest.mark.parametrize("score,failed,tested,level", [
-    (100, [], 135, "STRONG"),
-    (93, ["D5"], 150, "STRONG"),
-    (80, ["S4", "D5"], 150, "FAIR"),
-    (40, ["D3"], 150, "POOR"),
-    (100, [], 60, "UNCLEAR"),
+    (100, [], 90, "STRONG"),
+    (93, ["D5"], 100, "STRONG"),
+    (80, ["S4", "D5"], 100, "FAIR"),
+    (40, ["D3"], 100, "POOR"),
+    (100, [], 40, "UNCLEAR"),
     (None, [], 0, "UNCLEAR"),
 ])
 def test_judge(score, failed, tested, level):
-    assert ksbench.judge(score, failed, tested, 150)[0] == level
+    assert ksbench.judge(score, failed, tested, 100)[0] == level
 
 
 def test_every_scenario_has_a_meaning():
@@ -131,3 +131,7 @@ def test_constants_in_sync_with_ps1():
     assert set(re.findall(r"'(\w\d)'", crit)) == ksbench.CRITICAL
     for sid, text in ksbench.MEANING.items():
         assert text in src.replace("''", "'"), sid
+
+
+def test_weights_add_up_to_100():
+    assert sum(w for _, _, w, _ in ksbench.SCENARIOS) == 100

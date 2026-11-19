@@ -58,13 +58,13 @@ Describe 'Wi-Fi frames (pktmon records raw 802.11 on a Wi-Fi adapter)' {
 
 Describe 'verdict' {
     It '<s> with <f> -> <level>' -ForEach @(
-        @{ s = 100; f = @(); t = 135; level = 'STRONG' },
-        @{ s = 93; f = @('D5'); t = 150; level = 'STRONG' },
-        @{ s = 80; f = @('S4', 'D5'); t = 150; level = 'FAIR' },
-        @{ s = 40; f = @('D3'); t = 150; level = 'POOR' },
-        @{ s = 100; f = @(); t = 60; level = 'UNCLEAR' }
+        @{ s = 100; f = @(); t = 90; level = 'STRONG' },
+        @{ s = 93; f = @('D5'); t = 100; level = 'STRONG' },
+        @{ s = 80; f = @('S4', 'D5'); t = 100; level = 'FAIR' },
+        @{ s = 40; f = @('D3'); t = 100; level = 'POOR' },
+        @{ s = 100; f = @(); t = 40; level = 'UNCLEAR' }
     ) {
-        (Get-Verdict $s $f $t 150)[0] | Should -Be $level
+        (Get-Verdict $s $f $t 100)[0] | Should -Be $level
     }
 }
 
