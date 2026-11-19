@@ -240,12 +240,22 @@ reads the name in the packet); every other name stays inside. **Windows and macO
 name: DNS from the system resolver to the network's DNS servers is open only right before each dial,
 for that lookup, and closed again once the answer is in (3 s at most). A server given as an address
 needs no DNS at all; no DNS server known: no DNS at all.
-On Windows, the SSTP certificate-revocation check (HTTP) is allowed for 2 minutes only after a
-dial failed on exactly that check. On Linux nothing reaches the machine from outside either: only
+On Windows, the SSTP certificate-revocation check (HTTP, and DNS for its servers' names) is allowed
+for 2 minutes only after a dial failed on exactly that check, and for 20 s right after an SSTP
+tunnel connected (it may still be checking). On Linux nothing reaches the machine from outside either: only
 replies to the flows above, the tunnel, DHCP replies and neighbour discovery. The redial's DNS lookup is the one documented
 side-channel - it is needed to find the VPN server (on Windows and macOS another app's lookup in those seconds can get
 out too). Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
 ping, no IPv6, and no app gets through on the strength of its own firewall rule.
+
+**WSL on Windows - one known limit.** In WSL's default network mode (NAT), Windows translates WSL's
+traffic below every filter a program can set, so VeroScudo controls it with the Hyper-V firewall: WSL
+may go out only while the tunnel is proven to work. When the tunnel drops, VeroScudo blocks WSL within
+about a second - but connections WSL already had open can go on over the Wi-Fi/Ethernet card for a
+few seconds until they break by themselves (the Hyper-V firewall judges only new connections).
+Programs on Windows itself are not affected. To close this for WSL too, switch WSL to mirrored
+networking (`networkingMode=mirrored` under `[wsl2]` in `%USERPROFILE%\.wslconfig`, then
+`wsl --shutdown`): WSL then uses Windows' own network stack and VeroScudo's filters like any program.
 
 ## Profile types
 

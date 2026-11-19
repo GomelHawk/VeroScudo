@@ -162,11 +162,16 @@ function Invoke-VeroActionWatchdog {
     # a lock file in the state folder (per home, so a unit test with a temp home never meets the installed watchdog's lock)
     $single = Enter-VeroSingleton -Name 'watchdog'
     if (-not $single) { return }
+    $netEvt = $null                                                        # set before any early exit: the finally reads it
     try {
         if (-not (Test-VeroNativeRetryDue (Get-VeroNativeBlocked))) { return }      # helper blocked: not yet time to retry
         # by the UTC clock: local time goes back an hour when summer time ends, and a loop that waits for "15 s from now"
         # in local time would then sleep for that hour
         $nextCheck = [datetime]::MinValue; $nextProbe = [datetime]::MinValue
+        # Windows' address notification: a tunnel that goes away is handled at once (Invoke-VeroNetChange), the loop's waits
+        # end early on it; without it the loop sleeps as before and the NetDown task stays the only fast path
+        try { $netEvt = Register-ObjectEvent -InputObject ([System.Net.NetworkInformation.NetworkChange]) -EventName NetworkAddressChanged -SourceIdentifier 'VeroNetChange' -ErrorAction Stop }
+        catch { Write-VeroLog "WARNING: no address notifications ($($_.Exception.Message)) - drops are seen by the NetDown task only" $Action }
         while ($true) {
             if ([datetime]::UtcNow -ge $nextCheck) {
                 try {
@@ -190,9 +195,22 @@ function Invoke-VeroActionWatchdog {
                 $nextProbe = [datetime]::UtcNow.AddSeconds($wait)
             }
             $due = if ($nextCheck -lt $nextProbe) { $nextCheck } else { $nextProbe }
-            Start-Sleep -Seconds ([Math]::Min(60, [Math]::Max(1, [int][Math]::Ceiling(($due - [datetime]::UtcNow).TotalSeconds))))   # never longer than a minute, whatever the clock does
+            $sec = [Math]::Min(60, [Math]::Max(1, [int][Math]::Ceiling(($due - [datetime]::UtcNow).TotalSeconds)))   # never longer than a minute, whatever the clock does
+            # wait in 1-second steps: each step looks whether the route left the tunnel (one system call), and an address
+            # change ends the step at once - a drop is handled within about a second, not when Windows logs it
+            $until = [datetime]::UtcNow.AddSeconds($sec)
+            while ([datetime]::UtcNow -lt $until) {
+                $hit = $null
+                if ($netEvt) { $hit = Wait-Event -SourceIdentifier 'VeroNetChange' -Timeout 1 } else { Start-Sleep -Seconds 1 }
+                if ($hit) { Get-Event -SourceIdentifier 'VeroNetChange' -ErrorAction SilentlyContinue | Remove-Event }   # a burst counts once
+                if ($hit -or (Test-VeroRouteLeft)) {
+                    try { Invoke-VeroNetChange -Action $Action } catch { Write-VeroLog "ERROR: network change: $($_.Exception.Message)" $Action }
+                    break
+                }
+            }
         }
     } finally {
+        if ($netEvt) { Unregister-Event -SourceIdentifier 'VeroNetChange' -ErrorAction SilentlyContinue }
         try { Save-VeroStatsMinute } catch { Write-Verbose 'statistics: last minute not saved' }   # the minute so far (a restart adds to it)
         $single.Dispose()
     }

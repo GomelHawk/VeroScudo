@@ -962,6 +962,23 @@ Describe 'the CRL window at arm' {
         & (Get-Module VeroScudo.Core) { Test-VeroCrlWindowRecent } | Should -BeFalse
         Remove-TestFile $f
     }
+    It 'lasts 20 seconds, not 2 minutes: a drop minutes after a connect finds HTTP and DNS closed' {
+        $f = (Get-VeroPath).CrlWindow
+        Remove-TestFile $f
+        Open-VeroCrlWindow -Action test -AtArm
+        $until = [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        ($until - (Get-Date)).TotalSeconds | Should -BeLessOrEqual 21
+        Remove-TestFile $f
+    }
+    It 'does not cut short the 2-minute window of a dial that failed on the revocation check' {
+        $f = (Get-VeroPath).CrlWindow
+        Remove-TestFile $f
+        Open-VeroCrlWindow -Action test
+        Open-VeroCrlWindow -Action test -AtArm
+        $until = [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        ($until - (Get-Date)).TotalSeconds | Should -BeGreaterThan 100
+        Remove-TestFile $f
+    }
 }
 
 Describe 'a state file somebody is reading at that instant' {

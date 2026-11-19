@@ -361,6 +361,109 @@ Describe 'Disable-VeroKillSwitch vs a parallel re-arm' {
     }
 }
 
+Describe 'WSL at a drop: a ready block rule, switched on first (mocked Hyper-V firewall)' {
+    BeforeAll {
+        # the fake Hyper-V firewall's table: one test-only global (a mock body sees its parameters only in its own scope, so
+        # no closure), emptied between tests, removed after this block
+        $global:VeroTestHv = @{ Rules = @{}; Steps = (New-Object System.Collections.ArrayList) }
+        Mock -ModuleName VeroScudo.Core Test-VeroHyperVFirewall { $true }
+        Mock -ModuleName VeroScudo.Core Get-NetFirewallHyperVVMSetting { [pscustomobject]@{ DefaultOutboundAction = 'Block' } }
+        Mock -ModuleName VeroScudo.Core Get-NetFirewallHyperVRule { if ($Name -and $global:VeroTestHv.Rules.ContainsKey([string]$Name)) { [pscustomobject]@{ Name = [string]$Name; Enabled = $global:VeroTestHv.Rules[[string]$Name] } } }
+        Mock -ModuleName VeroScudo.Core Set-NetFirewallHyperVRule { [void]$global:VeroTestHv.Steps.Add("$Name=$Enabled"); $global:VeroTestHv.Rules[[string]$Name] = [string]$Enabled }
+        Mock -ModuleName VeroScudo.Core New-NetFirewallHyperVRule { [void]$global:VeroTestHv.Steps.Add("new $Name $Action=$Enabled"); $global:VeroTestHv.Rules[[string]$Name] = [string]$Enabled }
+        Mock -ModuleName VeroScudo.Core Remove-NetFirewallHyperVRule { [void]$global:VeroTestHv.Steps.Add("remove $Name") }
+    }
+    BeforeEach {
+        $global:VeroTestHv.Steps.Clear(); $global:VeroTestHv.Rules.Clear()
+        $global:VeroTestHv.Rules['VeroScudo-WSL'] = 'True'; $global:VeroTestHv.Rules['VeroScudo-WSL-Block'] = 'False'
+        '{"DefaultOutboundAction":"NotConfigured"}' | Set-Content (Get-VeroPath).VmBackup
+    }
+    AfterAll { Remove-TestFile (Get-VeroPath).VmBackup; Remove-Variable -Name VeroTestHv -Scope Global -ErrorAction SilentlyContinue }
+    It 'blocking: the block rule goes on BEFORE the allow rule goes off' {
+        Set-VeroVmAccess -Allow $false -Action test
+        @($global:VeroTestHv.Steps) | Should -Be @('VeroScudo-WSL-Block=True', 'VeroScudo-WSL=False')
+    }
+    It 'blocking again (every watchdog pass): nothing is switched' {
+        $global:VeroTestHv.Rules['VeroScudo-WSL-Block'] = 'True'; $global:VeroTestHv.Rules['VeroScudo-WSL'] = 'False'
+        Set-VeroVmAccess -Allow $false -Action test
+        $global:VeroTestHv.Steps.Count | Should -Be 0
+    }
+    It 'allowing: the allow rule goes on BEFORE the block rule goes off; the block rule stays ready' {
+        $global:VeroTestHv.Rules['VeroScudo-WSL-Block'] = 'True'; $global:VeroTestHv.Rules['VeroScudo-WSL'] = 'False'
+        Set-VeroVmAccess -Allow $true -Action test
+        @($global:VeroTestHv.Steps) | Should -Be @('VeroScudo-WSL=True', 'VeroScudo-WSL-Block=False')
+    }
+    It 'allowing on a machine without the block rule yet: it is created, switched off' {
+        $global:VeroTestHv.Rules.Remove('VeroScudo-WSL-Block')
+        Set-VeroVmAccess -Allow $true -Action test
+        @($global:VeroTestHv.Steps) | Should -Contain 'new VeroScudo-WSL-Block Block=False'
+    }
+    It 'Off: the block rule is removed first, whatever happens to the rest (WSL never stays blocked while off)' {
+        Mock -ModuleName VeroScudo.Core Set-NetFirewallHyperVVMSetting { throw 'access denied' }
+        Restore-VeroVmAccess
+        @($global:VeroTestHv.Steps)[0] | Should -Be 'remove VeroScudo-WSL-Block'
+    }
+    It 'the drop handling switches WSL off before it touches the VMs' {
+        $script:order = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Lock-VeroWslNow { [void]$script:order.Add('wsl') }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { [void]$script:order.Add('vms'); 1 }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmAccess { }
+        Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $true }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":true}'
+        Set-VeroArmed $true 'test'
+        try { & (Get-Module VeroScudo.Core) { Invoke-VeroActionNetDown -Config $args[0] -Action test } $c }
+        finally { Set-VeroArmed $false 'test'; Remove-TestFile (Get-VeroPath).NetSuspect }
+        @($script:order) | Should -Be @('wsl', 'vms')
+    }
+}
+
+Describe 'Invoke-VeroNetChange (the watchdog heard an address change)' {
+    BeforeEach {
+        Mock -ModuleName VeroScudo.Core Invoke-VeroActionNetDown { }
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":true}' } -ParameterFilter { -not $Raw }
+        Mock -ModuleName VeroScudo.Core Get-VeroNetSuspect { $null }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+    }
+    It 'the tunnel is gone: the drop handling runs at once' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        Invoke-VeroNetChange -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroActionNetDown -Times 1 -Exactly
+    }
+    It 'the route left the tunnel while RAS still says connected: the drop handling runs at once, and once' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]77 }
+        Mock -ModuleName VeroScudo.Core Get-VeroBestLuid { [uint64]5 }                 # the route goes to the Wi-Fi now
+        InModuleScope VeroScudo.Core { $script:WatchLuid = [uint64]77 }
+        Test-VeroRouteLeft | Should -BeTrue
+        Invoke-VeroNetChange -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroActionNetDown -Times 1 -Exactly
+        Test-VeroRouteLeft | Should -BeFalse                                            # not watched until the sync proves it again
+    }
+    It 'a split tunnel (never watched) is not a drop' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]77 }
+        Mock -ModuleName VeroScudo.Core Get-VeroBestLuid { [uint64]5 }
+        InModuleScope VeroScudo.Core { $script:WatchLuid = [uint64]0 }
+        Invoke-VeroNetChange -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroActionNetDown -Times 0 -Exactly
+    }
+    It 'the tunnel is still there (another address changed): nothing' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]77 }
+        Mock -ModuleName VeroScudo.Core Get-VeroBestLuid { [uint64]77 }
+        InModuleScope VeroScudo.Core { $script:WatchLuid = [uint64]77 }
+        Invoke-VeroNetChange -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroActionNetDown -Times 0 -Exactly
+    }
+    It 'off, or the drop already handled: nothing' {
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroNetSuspect { [pscustomobject]@{ Time = 'x'; Tunnel = '77' } }
+        Invoke-VeroNetChange -Action test
+        Mock -ModuleName VeroScudo.Core Get-VeroNetSuspect { $null }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
+        Invoke-VeroNetChange -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroActionNetDown -Times 0 -Exactly
+    }
+}
+
 Describe 'WSL setting restore' {
     It 'never restores VeroScudo''s own Block as the "original" (WSL would stay offline while off)' {
         '{"DefaultOutboundAction":"Block"}' | Set-Content (Get-VeroPath).VmBackup
@@ -743,3 +846,4 @@ Describe 'DNS while blocked: only the redial''s own lookup of the server, right 
         @($script:seen) | Should -Be @('sync', 'sync', 'resolve 203.0.113.77', 'sync')
     }
 }
+

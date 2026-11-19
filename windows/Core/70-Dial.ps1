@@ -54,8 +54,10 @@ $script:RasRevocationCodes = @(-2146885613, -2146885614, 0x80092013, 0x80092012,
 # makes every dial fail on the revocation check would otherwise keep svchost's HTTP open all the time
 $script:CrlWindowEveryMinutes = 15
 function Open-VeroCrlWindow {
-    <# Allow svchost TCP 80 for 2 minutes so SSTP can fetch the CRL: after a dial failed on the revocation check, and right
-       after an SSTP tunnel came up (it may still be checking when the filters arrive - RAS can report 829 ~5 s after arm). #>
+    <# Allow svchost TCP 80 (and DNS, for the CRL/OCSP host names) while the tunnel is down so SSTP can fetch the CRL: for 2
+       minutes after a dial failed on the revocation check, and for 20 s right after an SSTP tunnel came up (it may still be
+       checking when the filters arrive - RAS can report 829 ~5 s after arm). Not longer: a drop minutes after a connect
+       must not find HTTP and DNS open. #>
     [CmdletBinding()] param([string]$Action = 'core', [string]$Reason = 'SSTP could not check the server certificate revocation', [switch]$AtArm)
     # -AtArm: the window of a tunnel that just connected. It keeps the time of the last window opened for a FAILED dial,
     # so a real revocation failure soon after an arm still gets its window (Test-VeroCrlWindowRecent counts only those)
@@ -65,8 +67,12 @@ function Open-VeroCrlWindow {
         $opened = ''
         if (Test-Path $f) { try { $old = Get-Content $f -Raw | ConvertFrom-Json; if ($old.PSObject.Properties['Opened']) { $opened = [string]$old.Opened } } catch { Write-Verbose 'crl window unreadable' } }
     }
-    Write-VeroStateFile -Path $f -Text (@{ Until = (Get-Date).AddMinutes(2).ToString('o'); Opened = $opened } | ConvertTo-Json)
-    Write-VeroLog "$Reason - HTTP (TCP 80) from Windows services allowed for 2 minutes so it can" $Action
+    $until = if ($AtArm) { (Get-Date).AddSeconds(20) } else { (Get-Date).AddMinutes(2) }
+    if ($AtArm -and (Test-VeroCrlWindow)) {                                 # a failed dial's window still open: it keeps its end
+        try { $old = [datetime]::Parse([string](Get-Content $f -Raw | ConvertFrom-Json).Until, $null, [Globalization.DateTimeStyles]::RoundtripKind); if ($old -gt $until) { $until = $old } } catch { Write-Verbose 'crl window unreadable' }
+    }
+    Write-VeroStateFile -Path $f -Text (@{ Until = $until.ToString('o'); Opened = $opened } | ConvertTo-Json)
+    Write-VeroLog "$Reason - HTTP (TCP 80) from Windows services allowed for $(if ($AtArm) { '20 seconds' } else { '2 minutes' }) so it can" $Action
 }
 function Test-VeroCrlWindow {
     $f = (Get-VeroPath).CrlWindow

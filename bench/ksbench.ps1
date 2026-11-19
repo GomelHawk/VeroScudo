@@ -28,6 +28,8 @@ param(
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
+# 'powershell -File ... -Only D1,D4' hands the list over as ONE string: split it here (also a typed array, any case)
+$Only = @($Only | ForEach-Object { "$_" -split '[,\s]+' } | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
 
 $Version = '0.1.0'
 # id, group, weight, title - keep in sync with ksbench.py and SCENARIOS.md (a test checks it)

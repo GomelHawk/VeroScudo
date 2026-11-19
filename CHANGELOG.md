@@ -13,6 +13,17 @@ All notable changes to VeroScudo are recorded here. The format follows
   the whole outage.
 - A server given as an address: no DNS at all while blocked. Hiddify profiles are unchanged.
 
+### Windows: WSL blocked within a second of a drop
+- The watchdog looks every second whether the route to the internet still leads into the tunnel - RAS reports a dead
+  SSTP tunnel up to ~20 s late - and WSL is then blocked first, by switching on a ready Hyper-V block rule. Connections
+  WSL already had open can still go on for a few seconds in WSL's default (NAT) mode; WSL's mirrored mode closes that
+  (README, *WSL on Windows*).
+
+### Windows, SSTP: the revocation window after a connect lasts 20 s
+- After an SSTP tunnel connects, HTTP for the certificate-revocation check stays allowed for 20 s instead of 2 minutes:
+  a drop soon after a connect no longer finds HTTP and DNS open. After a dial that failed on that check: 2 minutes, as
+  before.
+
 ### A tunnel that carries nothing is reconnected
 - With the connection check on, every check failing 3 rounds in a row (the tunnel is up but nothing gets through, e.g. a
   server gone silent) makes VeroScudo do what *Reconnect VPN* does: blocked, hang up, redial the same profile. At most

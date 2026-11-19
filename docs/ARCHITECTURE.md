@@ -179,7 +179,7 @@ IPv4 and IPv6, outbound and unsolicited inbound, and on Linux anything forwarded
 | the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows SSTP's TCP only from `svchost.exe` (SstpSvc); the ports of IKEv2, L2TP and PPTP (UDP 500/4500/1701, TCP 1723) only for traffic sent as Local System or by an elevated administrator - Windows' IKE service, its tunnel drivers and what they send for the elevated guard's dial, never an ordinary program of the signed-in user; ESP, GRE and IP-in-IP by address (ordinary programs cannot send them) | always (keeps the tunnel and lets it redial) |
 | DHCP / DHCPv6, IPv6 neighbour discovery | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
 | DNS | Linux: UDP 53, only a query for exactly the VPN server's name (an nftables raw-payload match on the question, `firewall.qname_match`; the configured spelling and lower case), only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; right before each dial `resolvectl reset-server-features`, so the dropped queries of other names do not push resolved to TCP. Windows: UDP/TCP 53, only `svchost.exe` (DNS Client), only to the resolvers of the up physical links; macOS: only those resolvers - both **only right before each dial** (`Invoke-VeroDnsFirst`, `daemon.prime_dns`): open, the server's names looked up, closed once answered, 3 s at most. A server given as an address: no DNS. Hiddify (not dialed): the resolvers while down, as before. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
-| certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check, at most once per 15 minutes** (and for 2 minutes after an SSTP tunnel was armed - it may still be checking) - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
+| certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check, at most once per 15 minutes** (and for 20 s after an SSTP tunnel was armed - it may still be checking; not longer, so a drop minutes later finds it closed), with DNS for the CRL/OCSP names meanwhile - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
 | host ↔ WSL switch (Windows) | the WSL vEthernet interface (LUID, re-bound every 15 s - it changes at every boot) | always |
 | `lanAllow` ranges | each CIDR, IPv4 `/8`+ / IPv6 `/16`+ only | always |
 
@@ -227,7 +227,14 @@ with a hard permit can win - VeroScudo warns about such layers); the PERMITs are
 Their packets are forwarded, not sent by the host, so they need their own control:
 
 - **Windows (WSL)**: the Hyper-V firewall - the WSL VM's default outbound is set to Block while
-  armed (restored on disarm), and an allow rule is enabled only while the tunnel is up.
+  armed (restored on disarm), and an allow rule is enabled only while the tunnel is up. A ready block rule
+  (`VeroScudo-WSL-Block`, off while the tunnel is up) is switched on first at a drop - one switch, it beats the allow rule;
+  removed first on Off. The drop is noticed by the watchdog itself: it looks every second whether the route to the
+  internet still leads into the tunnel it saw holding it (`GetBestInterface`, `Test-VeroRouteLeft`) and listens for
+  Windows' address changes - RAS reports a dead SSTP tunnel up to ~20 s late. Limit: in WSL's NAT mode connections WSL
+  had already opened go on over the physical card until they break (~10 s measured); the Hyper-V firewall judges only
+  new connections, and WFP never sees the translated traffic (its forwarding layers included - tested). WSL's mirrored
+  mode routes WSL through Windows' own stack and closes this.
 - **Windows (Hyper-V Default Switch)**: Windows itself is its VMs' DHCP server and DNS proxy, on the host adapter
   `vEthernet (Default Switch)`. That adapter is allowed by interface only while the tunnel is up (the DNS proxy then
   resolves through the tunnel); while blocked the VMs get nothing from Windows. `vm: false`: always open (left alone).

@@ -327,6 +327,15 @@ function Test-VeroVmWanted {
 }
 $script:VmWarned = $false
 
+function Lock-VeroWslNow {
+    <# The fastest block of WSL: one switch of a ready block rule (created on the first arm, off while the tunnel is up). A
+       block rule beats the allow rule at once; the rest of the drop handling follows. #>
+    [CmdletBinding()] param()
+    if (-not (Test-VeroHyperVFirewall)) { return }
+    try { Set-NetFirewallHyperVRule -Name $script:VmBlockRule -Enabled True -ErrorAction Stop }
+    catch { New-NetFirewallHyperVRule -Name $script:VmBlockRule -DisplayName 'VeroScudo - WSL blocked (VPN down)' -Direction Outbound -Action Block -VMCreatorId $script:WslCreator -Enabled True | Out-Null }
+}
+
 function Set-VeroVmAccess {
     <# WSL traffic is NAT-forwarded, so the host's WFP filters do not see it; the Hyper-V firewall does. While armed the WSL
        VM's default outbound is Block, and our allow rule is enabled only while the tunnel is up. #>
@@ -339,6 +348,11 @@ function Set-VeroVmAccess {
         # Block is VeroScudo's own value (a leftover of an earlier arm), never a real original: WSL would have no network at all
         if ($orig -eq 'Block') { $orig = 'NotConfigured' }
         Write-VeroStateFile -Path $p.VmBackup -Text (@{ DefaultOutboundAction = $orig } | ConvertTo-Json)
+    }
+    # blocking: the block rule first - it beats the allow rule at once; only when it is not on already (this runs every 15 s)
+    if (-not $Allow) {
+        $b = Get-NetFirewallHyperVRule -Name $script:VmBlockRule -ErrorAction SilentlyContinue
+        if (-not $b -or [string]$b.Enabled -ne 'True') { Lock-VeroWslNow; Write-VeroLog 'WSL block rule -> on' $Action }
     }
     # the allow rule first, the default Block after it: turning on while the tunnel is up never leaves WSL a moment without
     # network (the other order - Block, then 1 s later allowed - could hang a connection open in WSL at that moment)
@@ -356,10 +370,20 @@ function Set-VeroVmAccess {
         Set-NetFirewallHyperVVMSetting -Name $script:WslCreator -DefaultOutboundAction Block
         Write-VeroLog 'WSL default outbound -> Block' $Action
     }
+    # allowing: the block rule off last (after the allow rule is on); it stays ready for the next drop - created off if missing
+    if ($Allow) {
+        $b = Get-NetFirewallHyperVRule -Name $script:VmBlockRule -ErrorAction SilentlyContinue
+        if (-not $b) { New-NetFirewallHyperVRule -Name $script:VmBlockRule -DisplayName 'VeroScudo - WSL blocked (VPN down)' -Direction Outbound -Action Block -VMCreatorId $script:WslCreator -Enabled False | Out-Null }
+        elseif ([string]$b.Enabled -ne 'False') { Set-NetFirewallHyperVRule -Name $script:VmBlockRule -Enabled False }
+    }
 }
 function Restore-VeroVmAccess {
     $p = Get-VeroPath
     if (-not (Test-VeroHyperVFirewall)) { Remove-Item $p.VmBackup -Force -ErrorAction SilentlyContinue; return }   # nothing was ever changed
+    # the block rule goes first and always: Off must never leave WSL blocked, whatever happens to the rest
+    if (Get-NetFirewallHyperVRule -Name $script:VmBlockRule -ErrorAction SilentlyContinue) {
+        try { Remove-NetFirewallHyperVRule -Name $script:VmBlockRule } catch { Write-VeroLog "ERROR: WSL block rule not removed: $($_.Exception.Message) - will retry" 'core' }
+    }
     # the default first, the allow rule after it: Off never leaves WSL a moment without network; a default that could not be
     # restored keeps the rule (WSL keeps its network) and is retried
     $restored = $true
@@ -629,6 +653,9 @@ function Sync-VeroKillSwitchCore {
     $full = if ($tun -and $Config.Vm) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
     if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "the route to the internet does not lead into the tunnel of '$($Config.Profile)' (a split-tunnel profile, or the network is changing) - VMs and WSL stay blocked" $Action }
     $script:SplitLogged = -not $full
+    # the tunnel that holds the route to the internet, for the watchdog's 1-second look (Test-VeroRouteLeft): only a full
+    # tunnel that carries traffic - a split tunnel or a drop not yet proven over is never watched
+    $script:WatchLuid = if ($tun -and $full -and -not $suspect -and $Config.Vm) { [uint64]$tun } else { [uint64]0 }
     $aclWant = ((-not [bool]$tun) -or [bool]$suspect -or -not $full) -and [bool]$Config.Vm
     if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {
         try { $null = Set-VeroVmBlock -Block $aclWant -Action $Action; $script:AclBlocked = $aclWant }

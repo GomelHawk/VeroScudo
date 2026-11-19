@@ -462,6 +462,17 @@ namespace VeroScudo
             return luid;
         }
 
+        /// <summary>The LUID of the interface the route to this IPv4 address uses right now; 0 = no route. One system call
+        /// (GetBestInterface) - cheap enough to ask every second.</summary>
+        public static ulong BestLuid(string ipv4)
+        {
+            uint idx;
+            byte[] a = System.Net.IPAddress.Parse(ipv4).GetAddressBytes();
+            if (Native.GetBestInterface(BitConverter.ToUInt32(a, 0), out idx) != 0) return 0;
+            ulong luid;
+            return Native.ConvertInterfaceIndexToLuid(idx, out luid) == 0 ? luid : 0;
+        }
+
         /// <summary>Interface GUID (NetworkInterface.Id) -> LUID: the fast path, no CIM query.</summary>
         public static ulong LuidFromGuid(Guid id)
         {
@@ -666,6 +677,7 @@ namespace VeroScudo
         [DllImport("fwpuclnt.dll")] internal static extern uint FwpmSubLayerDestroyEnumHandle0(IntPtr engineHandle, IntPtr enumHandle);
         [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)] internal static extern uint FwpmGetAppIdFromFileName0(string fileName, out IntPtr appId);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceIndexToLuid(uint ifIndex, out ulong luid);
+        [DllImport("iphlpapi.dll")] internal static extern uint GetBestInterface(uint destAddr, out uint bestIfIndex);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceGuidToLuid(ref Guid guid, out ulong luid);
         [DllImport("rasapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "RasDialW")]
         internal static extern uint RasDial(IntPtr extensions, string phonebook, IntPtr dialParams, uint notifierType, IntPtr notifier, out IntPtr rasConn);

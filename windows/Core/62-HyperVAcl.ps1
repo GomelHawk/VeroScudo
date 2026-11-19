@@ -216,6 +216,35 @@ function Test-VeroTunnelHoldsDefault {
     } catch { $true }
 }
 
+function Get-VeroBestLuid { [VeroScudo.Iface]::BestLuid('1.1.1.1') }     # the interface the internet route uses now (tests replace it)
+
+function Test-VeroRouteLeft {
+    <# The watchdog's 1-second look: the tunnel it last saw holding the route to the internet ($script:WatchLuid, set by the
+       sync) no longer does - the route leads elsewhere or nowhere. A drop, also while RAS still says "connected" (it says
+       so up to ~20 s late). One system call; never for a split tunnel (not watched). #>
+    if (-not $script:WatchLuid) { return $false }
+    $best = try { [uint64](Get-VeroBestLuid) } catch { return $false }
+    $best -ne $script:WatchLuid
+}
+
+function Invoke-VeroNetChange {
+    <# The watchdog saw the route leave the tunnel, or heard Windows change an address with the tunnel gone: armed and VMs
+       protected -> the drop handling now (Invoke-VeroActionNetDown), not ~3 s later when Windows logs "network
+       disconnected". Once per drop: an open note of the drop (net-suspect) means it was handled. #>
+    [CmdletBinding()] param([string]$Action = 'watchdog')
+    if (-not (Test-VeroArmed) -or (Get-VeroNetSuspect)) { return }
+    $c = try { Get-VeroConfig } catch { $null }
+    if (-not $c -or -not $c.Vm) { return }
+    $left = Test-VeroRouteLeft
+    if (-not $left) {
+        $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]1 }    # unknown: not a drop
+        if ($tun) { return }
+    }
+    $script:WatchLuid = [uint64]0                                            # once: the sync watches again when the tunnel is proven
+    Write-VeroLog $(if ($left) { 'the route to the internet left the tunnel - WSL and VMs blocked at once' } else { 'the tunnel is gone (Windows changed an address) - WSL and VMs blocked at once' }) $Action
+    Invoke-VeroActionNetDown -Config $c -Action $Action
+}
+
 function Invoke-VeroActionNetDown {
     <# \VeroScudo\NetDown (Windows logged "network disconnected"): while armed and VMs are protected, block the Default
        Switch VMs now and remember why - the sync keeps them blocked until the tunnel is proven again. #>
@@ -226,8 +255,11 @@ function Invoke-VeroActionNetDown {
         if (-not (Test-VeroArmed)) { return }
         $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]0 }
         if (-not (Get-VeroNetSuspect)) { Write-VeroLog 'network disconnected - Hyper-V VMs blocked until the tunnel is proven to work again' $a }
-        $null = Set-VeroVmBlock -Block $true -Action $a                    # first the block, then the note of why
-        try { if (Test-VeroVmWanted -Config $c) { Set-VeroVmAccess -Allow $false -Action $a } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
+        # WSL first: one switch of its ready block rule (the VMs' port ACLs take seconds); then the VMs; then the note of why
+        $wsl = Test-VeroVmWanted -Config $c
+        try { if ($wsl) { Lock-VeroWslNow } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
+        $null = Set-VeroVmBlock -Block $true -Action $a
+        try { if ($wsl) { Set-VeroVmAccess -Allow $false -Action $a } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
         try { Write-VeroStateFile -Path (Get-VeroPath).NetSuspect -Text (@{ Time = (Get-Date).ToString('o'); Tunnel = [string]$tun } | ConvertTo-Json) }
         catch { Write-VeroLog "WARNING: the note of the network drop could not be written ($($_.Exception.Message))" $a }
         $script:AclBlocked = $true

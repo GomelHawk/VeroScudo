@@ -4,6 +4,7 @@
 $script:Version      = '1.3.0'
 $script:LegacyGroup  = 'VeroScudo'                                       # Windows Firewall rule group of 1.0.x (migrated away)
 $script:VmRule       = 'VeroScudo-WSL'
+$script:VmBlockRule  = 'VeroScudo-WSL-Block'                            # switched on at a drop, before anything else
 $script:WslCreator   = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'          # Hyper-V firewall VM creator id of WSL
 # System folders come from the OS, never from environment variables: the guard runs elevated, and a non-admin process can
 # plant %ProgramFiles%, %ProgramData% or %SystemRoot% in HKCU\Environment (the SilentCleanup-style UAC bypass).
