@@ -15,6 +15,10 @@ pfctl -a com.apple/250.VeroScudo -F all 2>/dev/null      # the kill-switch: the 
 for t in /var/run/veroscudo/pf.token /var/run/veroscudo-pf.token; do      # the second: where versions up to 1.3 kept it
   [ -f "$t" ] && pfctl -X "$(cat "$t")" 2>/dev/null
 done
+# VeroScudo's resolver files (the VPN server answered locally while blocked): only files with its marker line
+for f in /etc/resolver/*; do
+  [ -f "$f" ] && [ "$(head -n 1 "$f")" = "# VeroScudo: the VPN server while the tunnel is down - removed when it is up" ] && rm -f "$f"
+done
 rm -f /var/run/veroscudo-pf.token /var/run/veroscudo/pf.token /var/run/veroscudo/*.lock /var/run/veroscudo/*.marker /var/run/veroscudo/off.at
 rmdir /var/run/veroscudo 2>/dev/null
 rm -f /var/lib/veroscudo/armed.flag                       # a later install must not start armed

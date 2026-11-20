@@ -21,9 +21,9 @@ def cfg(check: str | None = None) -> Config:
 
 
 # ---------------------------------------------------------------- config.json
-def test_missing_key_means_off_with_the_defaults():
+def test_missing_key_means_on_with_the_defaults():
     c = cfg().check
-    assert c == CheckConfig(False, 10, 1, (Target("1.1.1.1", "tcp", 443),))
+    assert c == CheckConfig(True, 10, 1, (Target("1.1.1.1", "tcp", 443),))
 
 
 def test_a_full_setting_is_read():

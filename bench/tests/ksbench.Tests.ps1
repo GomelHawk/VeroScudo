@@ -9,7 +9,7 @@ Describe 'parse and classify' {
             ForEach-Object { @{ name = $_.name; hex = $_.hex; linktype = $_.linktype; expect = $_.expect } }) {
         $p = [KsBench.Parse]::Hex($hex, [int]$linktype)
         if ($null -eq $expect) { $p | Should -BeNullOrEmpty; return }
-        $map = @{ ver = 'Ver'; src = 'Src'; dst = 'Dst'; proto = 'Proto'; sport = 'SPort'; dport = 'DPort'; itype = 'IType' }
+        $map = @{ ver = 'Ver'; src = 'Src'; dst = 'Dst'; proto = 'Proto'; sport = 'SPort'; dport = 'DPort'; itype = 'IType'; ttl = 'Ttl' }
         foreach ($k in $expect.PSObject.Properties.Name) {
             if ($k -eq 'cls') { continue }
             $want = $expect.$k

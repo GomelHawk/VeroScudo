@@ -50,13 +50,14 @@ SCENARIOS = [
     ("S2", "steady", 7, "IPv6 stays in the tunnel"),
     ("S3", "steady", 10, "A program bound to the physical adapter cannot get out"),
     ("S4", "steady", 3, "UDP/QUIC, STUN and ping stay in the tunnel"),
-    ("D1", "outage", 13, "VPN server unreachable"),
-    ("D2", "outage", 10, "VPN client process killed"),
-    ("D3", "outage", 10, "Tunnel adapter goes down"),
-    ("D4", "outage", 13, "Physical link drops and comes back"),
+    ("D1", "outage", 12, "VPN server unreachable"),
+    ("D2", "outage", 8, "VPN client process killed"),
+    ("D3", "outage", 9, "Tunnel adapter goes down"),
+    ("D4", "outage", 12, "Physical link drops and comes back"),
     ("D5", "outage", 7, "No DNS leak during any outage"),
+    ("V1", "outage", 7, "Virtual machines and WSL stay inside"),
     ("T1", "tamper", 10, "Another program adds a firewall allow rule"),
-    ("T2", "tamper", 7, "The kill-switch app is killed"),
+    ("T2", "tamper", 5, "The kill-switch app is killed"),
 ]
 NEVER_KILL = {"systemd", "init", "networkmanager", "launchd", "kernel_task", "configd", "sshd", "system",
               "svchost", "lsass", "csrss", "wininit", "services", "smss", "registry", "idle", "python3", "python"}
@@ -69,11 +70,11 @@ _LAN = [ipaddress.ip_network(n) for n in (
 # ---------------------------------------------------------------- packets
 
 class Pkt:
-    __slots__ = ("dport", "dst", "itype", "proto", "sport", "src", "ver")
+    __slots__ = ("dport", "dst", "itype", "proto", "sport", "src", "ttl", "ver")
 
-    def __init__(self, ver, src, dst, proto, sport=None, dport=None, itype=None):
+    def __init__(self, ver, src, dst, proto, sport=None, dport=None, itype=None, ttl=None):
         self.ver, self.src, self.dst, self.proto = ver, src, dst, proto
-        self.sport, self.dport, self.itype = sport, dport, itype
+        self.sport, self.dport, self.itype, self.ttl = sport, dport, itype, ttl
 
     def where(self):
         name = {6: "tcp", 17: "udp", 1: "icmp", 58: "icmp6"}.get(self.proto, f"proto{self.proto}")
@@ -88,7 +89,7 @@ def parse_ip(b):
     if ver == 4 and len(b) >= 20:
         ihl = (b[0] & 15) * 4
         proto, frag = b[9], struct.unpack_from("!H", b, 6)[0] & 0x1FFF
-        p = Pkt(4, socket.inet_ntop(socket.AF_INET, b[12:16]), socket.inet_ntop(socket.AF_INET, b[16:20]), proto)
+        p = Pkt(4, socket.inet_ntop(socket.AF_INET, b[12:16]), socket.inet_ntop(socket.AF_INET, b[16:20]), proto, ttl=b[8])
         off = ihl
         if frag:
             return p
@@ -98,14 +99,14 @@ def parse_ip(b):
         while nh in (0, 43, 44, 51, 60) and len(b) >= off + 8:
             if nh == 44:
                 if struct.unpack_from("!H", b, off + 2)[0] & 0xFFF8:
-                    return Pkt(6, src, dst, b[off])
+                    return Pkt(6, src, dst, b[off], ttl=b[7])
                 nxt, ln = b[off], 8
             elif nh == 51:
                 nxt, ln = b[off], (b[off + 1] + 2) * 4
             else:
                 nxt, ln = b[off], (b[off + 1] + 1) * 8
             nh, off = nxt, off + ln
-        p, proto = Pkt(6, src, dst, nh), nh
+        p, proto = Pkt(6, src, dst, nh, ttl=b[7]), nh
     else:
         return None
     if proto in (6, 17) and len(b) >= off + 4:
@@ -141,8 +142,15 @@ def is_lan(addr):
     return any(a.version == n.version and a in n for n in _LAN)
 
 
+def forwarded(ttl):
+    """A packet this computer forwarded for a VM or WSL: one hop already used - 63 (Linux, macOS guests) or 127 (Windows
+    guests). What the computer sends itself leaves with 64, 128 or 255."""
+    return ttl in (63, 127)
+
+
 def classify(p, servers):
-    """'server' | 'ignore' | 'dns' | 'lan' | 'leak' for an outbound packet on the physical adapter."""
+    """'server' | 'ignore' | 'dns' | 'lan' | 'leak' (sent by the computer itself) | 'vmleak' (forwarded for a VM or WSL)
+    for an outbound packet on the physical adapter."""
     if p is None:
         return "ignore"
     if p.dst in servers:
@@ -155,7 +163,7 @@ def classify(p, servers):
         return "dns"
     if is_lan(p.dst):
         return "lan"
-    return "leak"
+    return "vmleak" if forwarded(p.ttl) else "leak"
 
 
 def read_pcap_stream(f, emit):
@@ -472,6 +480,15 @@ class Linux:
                     out[int(pid)] = name
         return out
 
+    @staticmethod
+    def vm_present():
+        """Bridges VMs and containers sit behind (Docker, libvirt, LXD, VirtualBox host-only, VMware)."""
+        try:
+            names = os.listdir("/sys/class/net")
+        except OSError:
+            return False
+        return any(n.startswith(("docker", "br-", "virbr", "lxdbr", "vboxnet", "vmnet", "podman", "cni")) for n in names)
+
     def os_desc(self):
         try:
             with open("/etc/os-release") as f:
@@ -546,6 +563,11 @@ class Mac:
                 if len(f) > 1 and f[1].isdigit():
                     out[int(f[1])] = f[0]
         return out
+
+    @staticmethod
+    def vm_present():
+        """The vmnet bridge NAT-mode VMs sit behind (Parallels, VMware Fusion, UTM, Lima: bridge100 and up)."""
+        return any(n.startswith(("bridge1", "vmenet", "vmnet")) for n in run(["ifconfig", "-l"]).stdout.split())
 
     def os_desc(self):
         return "macOS " + platform.mac_ver()[0]
@@ -673,6 +695,7 @@ class Bench:
         self.servers = {}                   # ip -> (proto, port)
         self.vpn_ips, self.online, self.online_hits = set(), False, []
         self.outage_windows, self.keep = [], []
+        self.dns_windows, self.manual_at = [], None    # D5: tests that took the tunnel down, until the bench asked for help
         self.stopped = False
 
     # -- helpers
@@ -777,7 +800,9 @@ class Bench:
     def wait_recovery(self, label):
         """Keep probing while the product reconnects; leaks right at reconnect count."""
         back = self.probe_until(time.time() + self.a.recover, label, until=self.tunnel_up)
+        self.manual_at = None
         while not back and self.interactive:
+            self.manual_at = self.manual_at or time.time()     # from here on the user acts - D5 stops counting
             if not ask("  The VPN is not back. Reconnect it (or restart the app), then press Enter "
                        "(n = stop the bench) [Y/n] ", True, True):
                 break
@@ -789,6 +814,9 @@ class Bench:
             for _ in range(3):
                 self.online_tick(None)
         return back
+
+    def vmleaks(self, t0, t1):
+        return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, self.servers) == "vmleak"]
 
     def leaks(self, t0, t1):
         leak, dns = [], []
@@ -859,6 +887,8 @@ class Bench:
         t1 = time.time()
         self.outage_windows.append((t0, t1))
         leak, dns = self.leaks(t0, t1)
+        if went_down[0] or leak:            # D5 only where the test really tested something
+            self.dns_windows.append((t0, self.manual_at or t1))
         hits = [h for h in self.online_hits if h["scenario"] == sid]
         ev = {"tunnel_went_down": went_down[0], "recovered": back, "leak": self.evidence(leak, t0),
               "dns": self.evidence(dns, t0), "online": hits}
@@ -879,6 +909,7 @@ class Bench:
 
     # -- scenarios
     def steady(self):
+        self.steady_window = (time.time(), None)
         tun = self.tunnel_iface()
         if self.wanted("S1"):
             self.say("  S1  running... 3 DNS look-ups through the system resolver + direct DNS queries")
@@ -942,6 +973,7 @@ class Bench:
             ev = self.evidence(leak, t0)
             self.set("S4", "fail" if leak else "pass",
                      f"{ev['packets']} packets bypassed the tunnel" if leak else "", leak=ev)
+        self.steady_window = (self.steady_window[0], time.time())
         self.say(f"  (tunnel adapter: {tun})")
 
     def adapter_ok(self, sid, name):
@@ -1012,15 +1044,30 @@ class Bench:
                     self.outage("T2", inject2, lambda: self.link_up(name), FAULT)
         windows = self.outage_windows
         if self.wanted("D5"):
-            if not windows:
-                self.set("D5", "n/a", "no outage test ran")
+            if not self.dns_windows:
+                self.set("D5", "n/a", "no outage test took the tunnel down")
             else:
                 dns = []
-                for t0, t1 in windows:
+                for t0, t1 in self.dns_windows:
                     dns += self.leaks(t0, t1)[1]
-                ev = self.evidence(dns, windows[0][0]) if dns else {}
+                ev = self.evidence(dns, self.dns_windows[0][0]) if dns else {}
                 self.set("D5", "fail" if dns else "pass",
                          f"{ev['packets']} DNS packets went out while the VPN was down, to {', '.join(ev['to'][:3])}" if dns else "", dns=ev)
+        if self.wanted("V1"):
+            spans = list(windows) + ([self.steady_window] if getattr(self, "steady_window", (0, None))[1] else [])
+            vm = []
+            for t0, t1 in spans:
+                vm += self.vmleaks(t0, t1)
+            ev = self.evidence(vm, spans[0][0]) if vm else {}
+            if vm:
+                self.set("V1", "fail", f"{ev['packets']} packets of a VM or WSL went out without the VPN, to "
+                         f"{', '.join(ev['to'][:3])}", leak=ev)
+            elif not self.p.vm_present():
+                self.set("V1", "n/a", "no virtual machines, WSL or containers on this computer")
+            elif not windows:
+                self.set("V1", "n/a", "no outage test ran")
+            else:
+                self.set("V1", "pass", "no packet of a VM or WSL went out")
 
     def _kill(self, pids):
         for p, n in pids.items():
@@ -1168,7 +1215,10 @@ class Bench:
             for s in failed:
                 print(f"  {s}  {MEANING[s]}")
         if level == "POOR":
-            print("\n" + RECOMMEND + (" (macOS: alpha)" if IS_MAC else ""))
+            if is_veroscudo(self.product):
+                print("\nThis is VeroScudo itself: see what failed above and its README (limits, settings).")
+            else:
+                print("\n" + RECOMMEND + (" (macOS: alpha)" if IS_MAC else ""))
         el = int(time.time() - self.t_start)
         print(f"Run time: {el // 60} min {el % 60} s")
         print("=" * 78)
@@ -1211,10 +1261,16 @@ MEANING = {
     "D5": "while the VPN reconnects, the names of the sites you visit go to your provider's DNS.",
     "T1": "another program's firewall rule is enough to get around the kill-switch.",
     "T2": "if the kill-switch app is closed or crashes, the protection is gone.",
+    "V1": "traffic of your virtual machines or WSL can go out without the VPN when it drops.",
 }
 RECOMMEND = ("Recommendation: change your kill-switch to one that blocks at the firewall by default.\n"
              "VeroScudo - free and open source, from the authors of this bench: https://github.com/GomelHawk/VeroScudo\n"
              "Run this bench again with it to compare.")
+
+
+def is_veroscudo(product):
+    """The product under test is VeroScudo (by its name, or installed here) - the bench never recommends it to itself."""
+    return "veroscudo" in (product or "").lower() or os.path.isdir("/opt/veroscudo")
 
 
 def judge(score, failed, tested, total):

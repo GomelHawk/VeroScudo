@@ -671,6 +671,8 @@ function Sync-VeroKillSwitchCore {
         try { Set-VeroVmAccess -Allow $wslAllow -Action $Action; $script:VmAllowed = $wslAllow }
         catch { Write-VeroLog "ERROR: WSL (Hyper-V firewall): $($_.Exception.Message) - tried again on the next pass" $Action; $script:VmAllowed = $null }
     }
+    # the VPN server's name answered locally while the tunnel is down (NRPT) - nothing is asked of Windows unless it changes
+    try { Sync-VeroNrpt -Config $Config -TunnelLuid ([uint64]$tun) -Action $Action } catch { Write-VeroLog "ERROR: NRPT: $($_.Exception.Message) - tried again on the next pass" $Action }
     # the emergency block of an earlier failure goes last: the real filters and the VM / WSL steps are in force by now
     if ($liftEmergency) { try { Remove-VeroLegacyFirewall -Action $Action } catch { Write-VeroLog "ERROR: the emergency block could not be lifted ($($_.Exception.Message)) - tried again on the next pass" $Action } }
     # the server addresses are refreshed only now - through the tunnel, after the filters let it through - by the caller,
@@ -697,6 +699,7 @@ function Disable-VeroKillSwitch {
         Clear-VeroNetSuspect
         try { $null = Set-VeroVmBlock -Block $false -Action $a } catch { Write-VeroLog "ERROR: Hyper-V port ACLs not removed: $($_.Exception.Message) - will retry" $a }
         $script:AclBlocked = $null
+        try { Remove-VeroNrpt -Action $a } catch { Write-VeroLog "ERROR: NRPT rules not removed: $($_.Exception.Message) - will retry" $a }
         Write-VeroLog 'kill-switch OFF (filters removed)' $a
     } -Arguments @($Action)
 }

@@ -5,6 +5,13 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Connection check on by default: a tunnel that carries nothing is reconnected
+- The connection check (Settings > Connection) is now on unless turned off - a config without it gets it. It is what
+  notices a tunnel that is up but carries nothing (a server gone silent, a tunnel adapter that lost its routes) and
+  reconnects it after 3 rounds; before, that waited for the VPN's own keepalive, often minutes.
+- The automatic reconnect's 10-minute pause ends as soon as a check answers again: one stall no longer stops VeroScudo
+  from reconnecting the next one.
+
 ### DNS while redialing: only the VPN server's name
 - **Linux:** while blocked, only a DNS query for exactly the VPN server's name gets out (nftables reads the name in the
   packet). The names of the sites you visit no longer reach the network's DNS while VeroScudo redials.
@@ -12,6 +19,19 @@ All notable changes to VeroScudo are recorded here. The format follows
   each dial, for the redial's own lookup of the server, and closed again once the answer is in (3 s at most) - not for
   the whole outage.
 - A server given as an address: no DNS at all while blocked. Hiddify profiles are unchanged.
+
+### DNS while blocked: the server's name answered on the computer itself (Windows, macOS)
+- While the tunnel is down, a small responder on a loopback address answers only the VPN server's name, with the
+  addresses VeroScudo cached through the tunnel; one NRPT rule (Windows) or `/etc/resolver/<name>` (macOS) sends exactly
+  that name there, only while the tunnel is down. The redial finds its server and no DNS packet leaves the computer -
+  Windows empties its DNS cache at a drop, so before this every redial opened DNS for about a second. If the rule is
+  refused, the one-second DNS window is the fallback.
+
+### ksbench: who sent a leak
+- Each leaked packet is told apart by its TTL: sent by the computer itself, or forwarded for a VM, WSL or a container.
+  The computer's own leaks count in D1-D4, T1, T2; forwarded ones in the new test V1 *Virtual machines and WSL stay
+  inside* (judged where there are VMs/WSL, no score cap). Weights rebalanced to 100. The bench never recommends
+  VeroScudo when it tests VeroScudo.
 
 ### Windows: WSL blocked within a second of a drop
 - The watchdog looks every second whether the route to the internet still leads into the tunnel - RAS reports a dead

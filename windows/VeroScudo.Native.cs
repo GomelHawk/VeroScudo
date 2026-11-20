@@ -483,6 +483,110 @@ namespace VeroScudo
         }
     }
 
+    /// <summary>A DNS responder on a loopback address that answers ONLY the VPN server's names, with the addresses
+    /// VeroScudo has cached - for the NRPT rule that sends exactly those names here while the tunnel is down, so the redial
+    /// finds its server without a DNS packet leaving the PC. Every other name: REFUSED. Never reachable from the network.</summary>
+    public static class LocalDns
+    {
+        static UdpClient udp;
+        static System.Threading.Thread loop;
+        static Dictionary<string, string[]> map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        public static string Address;
+
+        /// <summary>Listens on the first of these loopback addresses that is free (port 53). True when listening.</summary>
+        public static bool Start(string[] candidates)
+        {
+            if (udp != null) return true;
+            foreach (string a in candidates)
+            {
+                IPAddress ip;
+                if (!IPAddress.TryParse(a, out ip) || !IPAddress.IsLoopback(ip)) continue;      // loopback only, ever
+                try { udp = new UdpClient(new IPEndPoint(ip, 53)); Address = a; break; }
+                catch (SocketException) { }
+            }
+            if (udp == null) return false;
+            loop = new System.Threading.Thread(Serve) { IsBackground = true, Name = "VeroScudo local DNS" };
+            loop.Start();
+            return true;
+        }
+
+        public static void Stop()
+        {
+            UdpClient u = udp; udp = null; Address = null;
+            if (u != null) u.Close();
+        }
+
+        /// <summary>The names to answer and their addresses (replaced as a whole: names not given are refused).</summary>
+        public static void SetAnswers(string[] names, string[] addresses)
+        {
+            var m = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (string n in names ?? new string[0]) if (!string.IsNullOrEmpty(n)) m[n.TrimEnd('.')] = addresses ?? new string[0];
+            map = m;
+        }
+
+        static void Serve()
+        {
+            while (true)
+            {
+                UdpClient u = udp;
+                if (u == null) return;
+                IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                byte[] q;
+                try { q = u.Receive(ref from); }
+                catch (ObjectDisposedException) { return; }
+                catch (SocketException) { continue; }
+                if (!IPAddress.IsLoopback(from.Address)) continue;                            // nothing from outside
+                byte[] r = Answer(q, map);
+                if (r != null) { try { u.Send(r, r.Length, from); } catch (Exception) { } }
+            }
+        }
+
+        /// <summary>The reply to one DNS query: A/AAAA of a known name (TTL 30), no data for its other types, REFUSED for
+        /// any other name; null for what is not one well-formed standard query. Pure.</summary>
+        public static byte[] Answer(byte[] q, Dictionary<string, string[]> names)
+        {
+            if (q == null || q.Length < 17 || (q[2] & 0xF8) != 0 || q[4] != 0 || q[5] != 1) return null;   // a query, QDCOUNT 1
+            var labels = new List<string>();
+            int o = 12;
+            while (o < q.Length && q[o] != 0)
+            {
+                int n = q[o];
+                if (n > 63 || o + 1 + n > q.Length) return null;
+                labels.Add(System.Text.Encoding.ASCII.GetString(q, o + 1, n));
+                o += 1 + n;
+            }
+            if (o + 5 > q.Length) return null;
+            int qtype = (q[o + 1] << 8) | q[o + 2], qclass = (q[o + 3] << 8) | q[o + 4];
+            int qend = o + 5;
+            string name = string.Join(".", labels.ToArray());
+            string[] addrs = null;
+            bool known = qclass == 1 && names != null && names.TryGetValue(name, out addrs);
+            var ans = new List<byte[]>();
+            if (known)
+            {
+                foreach (string a in addrs)
+                {
+                    IPAddress ip;
+                    if (!IPAddress.TryParse(a, out ip)) continue;
+                    byte[] b = ip.GetAddressBytes();
+                    if ((qtype == 1 && b.Length == 4) || (qtype == 28 && b.Length == 16)) ans.Add(b);
+                }
+            }
+            var r = new List<byte>();
+            r.Add(q[0]); r.Add(q[1]);
+            r.Add((byte)(0x84 | (q[2] & 0x01)));                     // QR, AA, RD as asked
+            r.Add((byte)(known ? 0x00 : 0x05));                       // NOERROR / REFUSED
+            r.AddRange(new byte[] { 0, 1, 0, (byte)ans.Count, 0, 0, 0, 0 });
+            for (int i = 12; i < qend; i++) r.Add(q[i]);
+            foreach (byte[] b in ans)
+            {
+                r.AddRange(new byte[] { 0xC0, 0x0C, 0, (byte)qtype, 0, 1, 0, 0, 0, 30, 0, (byte)b.Length });
+                r.AddRange(b);
+            }
+            return r.ToArray();
+        }
+    }
+
     public static class Ras
     {
         // RASDIALPARAMSW (64-bit): dwSize, szEntryName[257], szPhoneNumber[129], szCallbackNumber[129], szUserName[257],

@@ -176,6 +176,7 @@ function Invoke-VeroActionWatchdog {
             if ([datetime]::UtcNow -ge $nextCheck) {
                 try {
                     Invoke-VeroCheck -Action $Action
+                    try { Update-VeroLocalDns -Action $Action } catch { Write-VeroLog "ERROR: local DNS answer: $($_.Exception.Message)" $Action }
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
                     try {
                         $sc = try { Get-VeroConfig } catch { $null }; $armedNow = Test-VeroArmed
@@ -211,6 +212,7 @@ function Invoke-VeroActionWatchdog {
         }
     } finally {
         if ($netEvt) { Unregister-Event -SourceIdentifier 'VeroNetChange' -ErrorAction SilentlyContinue }
+        try { [VeroScudo.LocalDns]::Stop() } catch { Write-Verbose 'local DNS answer not running' }
         try { Save-VeroStatsMinute } catch { Write-Verbose 'statistics: last minute not saved' }   # the minute so far (a restart adds to it)
         $single.Dispose()
     }

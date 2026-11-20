@@ -37,12 +37,15 @@
     # command that changes the system; a test that needs a behaviour overrides one of them in its own block.
     foreach ($cmd in 'Set-NetFirewallProfile', 'New-NetFirewallRule', 'Set-NetFirewallRule', 'Remove-NetFirewallRule',
                      'Set-NetFirewallHyperVVMSetting', 'New-NetFirewallHyperVRule', 'Set-NetFirewallHyperVRule', 'Remove-NetFirewallHyperVRule',
-                     'Set-VeroWfpFilter', 'Clear-VeroWfpFilter', 'Invoke-VeroDial', 'Invoke-VeroHangUp') {
+                     'Set-VeroWfpFilter', 'Clear-VeroWfpFilter', 'Invoke-VeroDial', 'Invoke-VeroHangUp',
+                     'Add-DnsClientNrptRule', 'Remove-DnsClientNrptRule', 'Get-DnsClientNrptRule') {
         Mock -ModuleName VeroScudo.Core $cmd { }
     }
     # Hyper-V port ACLs (62-HyperVAcl.ps1): no VM is ever seen or changed by this file unless a test says so
     # the redial's DNS window (Invoke-VeroDnsFirst): never a real DNS query from a test - "no answer" at once
     Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@()) }
+    # the local DNS answer (Update-VeroLocalDns): never a real listener on 127.0.0.53:53 from a test (the watchdog loop runs it)
+    Mock -ModuleName VeroScudo.Core Update-VeroLocalDns { }
     Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { }
     Mock -ModuleName VeroScudo.Core Get-VeroVmAdapterAcl { }
     Mock -ModuleName VeroScudo.Core Add-VeroVmAdapterAcl { }

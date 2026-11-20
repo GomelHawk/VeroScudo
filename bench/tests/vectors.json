@@ -27,7 +27,8 @@
     "proto": 6,
     "sport": 50000,
     "dport": 443,
-    "cls": "leak"
+    "cls": "leak",
+    "ttl": 64
    }
   },
   {
@@ -176,6 +177,34 @@
    "expect": {
     "dport": 80,
     "cls": "leak"
+   }
+  },
+  {
+   "name": "forwarded for WSL or a Linux VM (TTL 63)",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff080045000028000000003f060000c0a80114c6336407c35001bb00000000000000005002000000000000",
+   "expect": {
+    "ver": 4,
+    "dst": "198.51.100.7",
+    "proto": 6,
+    "sport": 50000,
+    "dport": 443,
+    "cls": "vmleak",
+    "ttl": 63
+   }
+  },
+  {
+   "name": "forwarded for a Windows VM (TTL 127)",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff080045000028000000007f060000c0a80114c6336407c35001bb00000000000000005002000000000000",
+   "expect": {
+    "ver": 4,
+    "dst": "198.51.100.7",
+    "proto": 6,
+    "sport": 50000,
+    "dport": 443,
+    "cls": "vmleak",
+    "ttl": 127
    }
   }
  ],

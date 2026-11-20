@@ -178,7 +178,7 @@ IPv4 and IPv6, outbound and unsolicited inbound, and on Linux anything forwarded
 | the tunnel | its interface (Windows: LUID, Linux: `oifname`, macOS: `on ipsecN`) - only the **active** profile's | while up |
 | the VPN server | its addresses + the profile's protocol/ports (Windows: per tunnel type - SSTP TCP 443, IKEv2/L2TP UDP 500/4500/1701 + ESP, PPTP TCP 1723 + GRE); on Windows SSTP's TCP only from `svchost.exe` (SstpSvc); the ports of IKEv2, L2TP and PPTP (UDP 500/4500/1701, TCP 1723) only for traffic sent as Local System or by an elevated administrator - Windows' IKE service, its tunnel drivers and what they send for the elevated guard's dial, never an ordinary program of the signed-in user; ESP, GRE and IP-in-IP by address (ordinary programs cannot send them) | always (keeps the tunnel and lets it redial) |
 | DHCP / DHCPv6, IPv6 neighbour discovery | ports / ICMPv6 types; Windows: DHCP only from `svchost.exe` (DHCP client) | always |
-| DNS | Linux: UDP 53, only a query for exactly the VPN server's name (an nftables raw-payload match on the question, `firewall.qname_match`; the configured spelling and lower case), only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; right before each dial `resolvectl reset-server-features`, so the dropped queries of other names do not push resolved to TCP. Windows: UDP/TCP 53, only `svchost.exe` (DNS Client), only to the resolvers of the up physical links; macOS: only those resolvers - both **only right before each dial** (`Invoke-VeroDnsFirst`, `daemon.prime_dns`): open, the server's names looked up, closed once answered, 3 s at most. A server given as an address: no DNS. Hiddify (not dialed): the resolvers while down, as before. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
+| DNS | Linux: UDP 53, only a query for exactly the VPN server's name (an nftables raw-payload match on the question, `firewall.qname_match`; the configured spelling and lower case), only the `systemd-resolve` user, else only the resolvers in `resolv.conf` or, when that names only a local stub, NetworkManager's; right before each dial `resolvectl reset-server-features`, so the dropped queries of other names do not push resolved to TCP. Windows: UDP/TCP 53, only `svchost.exe` (DNS Client), only to the resolvers of the up physical links; macOS: only those resolvers - both **normally none**: while armed and down the server's names are answered on the machine itself - `LocalDns` in the watchdog (Windows, 127.0.0.53-60 port 53, an NRPT rule per name, `Sync-VeroNrpt`, recorded in `state\nrpt.json`, added only while the note `state\localdns.json` is fresh) / `localdns.Responder` in the daemon (macOS, 127.0.0.1:53153+, `/etc/resolver/<name>` marked as VeroScudo's) - only those names, only the cached addresses, REFUSED otherwise, loopback only. The redial's lookup (`Invoke-VeroDnsFirst`, `daemon.prime_dns`) is answered there with DNS closed; only without an answer the system resolver's DNS opens for it, closed once answered, 3 s at most. A server given as an address: no DNS. Hiddify (not dialed): the resolvers while down, as before. **No resolver known: no DNS permit** (never port 53 to anywhere) | **only while the tunnel is down** (to resolve the server) |
 | certificate revocation (Windows, SSTP) | TCP 80 from `svchost.exe` | **only for 2 minutes after a dial failed on the revocation check, at most once per 15 minutes** (and for 20 s after an SSTP tunnel was armed - it may still be checking; not longer, so a drop minutes later finds it closed), with DNS for the CRL/OCSP names meanwhile - decided from the `RasDial` result alone, never from the user-writable Application log (`state\crl-window.json`). Not open by default: BITS, Delivery Optimization and WPAD share `svchost.exe`, so a standing permit would be a side door |
 | host ↔ WSL switch (Windows) | the WSL vEthernet interface (LUID, re-bound every 15 s - it changes at every boot) | always |
 | `lanAllow` ranges | each CIDR, IPv4 `/8`+ / IPv6 `/16`+ only | always |
@@ -335,7 +335,7 @@ below; the 1.0 single `"vpn": {...}` object is still accepted). The example is a
   "wifiRecoveryFix": true,
   "updateCheck":     true,
   "lanAllow":        [],
-  "connectionCheck": { "enabled": false, "intervalSeconds": 10, "windowMinutes": 1,
+  "connectionCheck": { "enabled": true, "intervalSeconds": 10, "windowMinutes": 1,
                        "targets": [ { "host": "1.1.1.1", "method": "tcp", "port": 443 } ] }
 }
 ```
@@ -377,12 +377,12 @@ kill-switch all the same (logged); only the VPN connection itself is left as it 
   when it is newer. Only while the state is *protected* or *off* - never while blocked. HTTPS to `api.github.com`,
   nothing sent but the version in the User-Agent. Only links to this project's release pages are opened.
   `false` disables it. No automatic installation.
-- `connectionCheck` (optional, off by default): see *Connection check*. `intervalSeconds` 10-100, `windowMinutes` 1-10,
+- `connectionCheck` (on by default; `"enabled": false` turns it off): see *Connection check*. `intervalSeconds` 10-100, `windowMinutes` 1-10,
   1-3 `targets`, each a host name or IP with `method` `ping` or `tcp` (+ `port` 1-65535). An empty list means 1.1.1.1 TCP 443.
 
 ## Connection check
 
-Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how good the connection is while protected.
+On by default, can be turned off (Settings > *Connection*, the same on Windows, Linux and macOS): how good the connection is while protected.
 
 - **Who checks:** the guard - the Windows watchdog loop (`Core/66-Quality.ps1`), the Linux/macOS daemon's `quality` thread
   (`linux/veroscudo/quality.py`). Every `intervalSeconds` it checks each address once, in parallel: an ICMP echo (*ping*),
@@ -397,7 +397,7 @@ Optional (Settings > *Connection*, the same on Windows, Linux and macOS): how go
   tunnel is up but nothing gets through, e.g. a server gone silent that SSTP or OpenVPN notice only when their own
   keepalive gives up. The guard then does what *Reconnect VPN* does (Windows: starts the Reconnect task; Linux/macOS:
   `renew(dead=True)` in a thread), with a marker so the log and *Last drop* say *no traffic through the tunnel* and a
-  stored-password pause stays. At most once per 10 minutes (an address that is always down must not make it redial in
+  stored-password pause stays. At most once per 10 minutes while no check answers - any answer ends the pause (an address that is always down must not make it redial in
   a loop); never for Hiddify (VeroScudo does not dial it) - both cases are logged once.
 - **Only while armed and connected:** the checks go through the tunnel like any other traffic; nothing in the
   kill-switch is opened for them. While blocked, off or redialing there is no rating - the samples are dropped, and a

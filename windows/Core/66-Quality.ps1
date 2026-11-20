@@ -14,7 +14,8 @@
 $script:CheckDefaultHost = '1.1.1.1'
 # Every check failed this many rounds in a row: the tunnel is up but carries nothing (a server gone silent - SSTP and OpenVPN
 # notice it only when their own keepalive gives up, minutes later). The watchdog then starts the Reconnect task, as the tray's
-# Reconnect does - at most once per DeadPauseSeconds, so a check address that is always down cannot make it redial in a loop.
+# Reconnect does - at most once per DeadPauseSeconds while no check answers, so a check address that is always down cannot make
+# it redial in a loop (any answer ends the pause).
 # Same numbers on Linux/macOS (daemon.py DEAD_ROUNDS, DEAD_PAUSE_SECONDS).
 $script:DeadRounds = 3
 $script:DeadPauseSeconds = 600
@@ -50,14 +51,14 @@ function Get-VeroCheckLabel($Target) {
 }
 
 function ConvertFrom-VeroCheckConfig {
-    <# config.json's connectionCheck -> @{ Enabled; IntervalSeconds; WindowMinutes; Targets }. Missing = off with the
+    <# config.json's connectionCheck -> @{ Enabled; IntervalSeconds; WindowMinutes; Targets }. Missing = on with the
        defaults; an empty target list falls back to 1.1.1.1 (there is always one). Throws on anything invalid. Pure. #>
     [CmdletBinding()] param($Raw)
     $def = New-VeroCheckTarget $script:CheckDefaultHost 'tcp' 443
-    if ($null -eq $Raw) { return [pscustomobject]@{ Enabled = $false; IntervalSeconds = 10; WindowMinutes = 1; Targets = @($def) } }
+    if ($null -eq $Raw) { return [pscustomobject]@{ Enabled = $true; IntervalSeconds = 10; WindowMinutes = 1; Targets = @($def) } }
     if ($Raw -isnot [System.Management.Automation.PSCustomObject]) { throw 'config.json: connectionCheck must be an object' }
     function Get-P($n, $d) { if ($Raw.PSObject.Properties[$n]) { $Raw.$n } else { $d } }
-    $enabled = Get-P 'enabled' $false
+    $enabled = Get-P 'enabled' $true
     if ($enabled -isnot [bool]) { throw 'config.json: connectionCheck.enabled must be true or false' }
     $interval = 0; $window = 0
     if (-not [int]::TryParse([string](Get-P 'intervalSeconds' 10), [ref]$interval) -or $interval -lt 10 -or $interval -gt 100) { throw 'config.json: connectionCheck.intervalSeconds must be 10-100' }
@@ -290,7 +291,9 @@ function Test-VeroDeadTunnel {
     [CmdletBinding()] param([Parameter(Mandatory)]$Config, [object[]]$Round = @(), [string]$Action = 'watchdog',
                             [datetime]$Now = (Get-Date), [scriptblock]$StartTask = { Start-VeroTask 'Reconnect' })
     if ($Round.Count -eq 0 -or @($Round | Where-Object { $_.Ok }).Count -gt 0) {
-        $script:DeadCount = 0; $script:DeadSaid = ''; return $false
+        $script:DeadCount = 0; $script:DeadSaid = ''
+        if ($Round.Count -gt 0) { $script:DeadNext = [datetime]::MinValue }    # an answer: the check addresses work - the next stall may redial at once
+        return $false
     }
     $script:DeadCount++
     if ($script:DeadCount -lt $script:DeadRounds) { return $false }

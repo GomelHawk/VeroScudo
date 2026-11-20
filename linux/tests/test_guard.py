@@ -521,10 +521,9 @@ def test_the_redial_may_look_up_the_server_name_only(env, monkeypatch):
         assert blocked and all("@th,160,128 0x0376706e076578616d706c6503636f6d" in rs for rs in blocked)
         assert not any("dport 53 ct mark" in rs or "tcp dport 53" in rs for rs in blocked)
     else:
-        # pf: DNS was open for the redial's own lookup and is closed again before the dial
-        i = max(n for n, (what, _) in enumerate(order) if what == "dial")
-        lookup = [rs for what, rs in order[:i] if what == "lookup"]
-        assert lookup and "port 53" in lookup[-1]               # the lookup right before the dial
+        # pf: the resolver's cache answered the redial's lookup with DNS closed - no ruleset ever opened DNS
+        assert [what for what, _ in order].count("lookup") >= 1
+        assert not any("port 53" in rs for rs in calls["apply"])
         assert "port 53" not in dial
 
 
@@ -544,7 +543,46 @@ def test_pf_closes_dns_again_even_when_the_lookup_hangs(env, monkeypatch):
     assert "port 53" not in calls["apply"][-1]
 
 
+def test_pf_answered_from_the_cache_never_opens_dns(env, monkeypatch):
+    g, calls, _ = env
+    if calls["backend"] != "pf":
+        pytest.skip("nftables lets the name out by itself")
+    monkeypatch.setattr(calls["nm"], "nameservers", lambda: ["192.168.1.1"])
+    monkeypatch.setattr(calls["nm"], "resolve", lambda s: ["203.0.113.5"])           # the resolver's cache answers
+    g.store.set_armed(True)
+    g.prime_dns()
+    assert not any("port 53" in rs for rs in calls["apply"])
+
+
 def test_dns_names_skip_hiddify_and_servers_given_as_addresses():
     assert daemon.Guard.dns_names(Config.from_text(MULTI)) == ("vpn.example.com",)
     ip = Config.from_text('{"profiles":[{"profile":"W","server":"203.0.113.5"}]}')
     assert daemon.Guard.dns_names(ip) == ()
+
+
+def test_pf_blocked_the_servers_name_is_answered_locally_and_the_file_goes_when_up(env, monkeypatch):
+    g, calls, connected = env
+    if calls["backend"] != "pf":
+        pytest.skip("nftables lets the name out by itself")
+    from veroscudo import localdns
+    monkeypatch.setattr(localdns, "PORTS", (0,))
+    g.store.set_armed(True)
+    g.store.server_cache("Work").parent.mkdir(parents=True, exist_ok=True)
+    g.store.server_cache("Work").write_text("203.0.113.5")
+    try:
+        g.update_local_dns()
+        assert g.local.names == {"vpn.example.com": ["203.0.113.5"]}
+        g.enable_killswitch(tunnel_up=False)
+        f = localdns.RESOLVER_DIR / "vpn.example.com"
+        assert localdns.ours(f)
+        connected.add("Work")
+        g.enable_killswitch(tunnel_up=True)
+        assert not f.exists()                                   # up: lookups go through the tunnel again
+        connected.clear()
+        g.enable_killswitch(tunnel_up=False)
+        assert f.exists()
+        g.store.set_armed(False)
+        g.disable_killswitch()
+        assert not f.exists()                                   # Off: gone
+    finally:
+        g.local.stop()

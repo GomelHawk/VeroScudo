@@ -87,8 +87,12 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   until the handshake age shows the drop; then the redial starts.
 - **DNS while blocked** is the one documented side channel: the redial looks up the VPN server's name. Linux lets out
   only a query for exactly that name (nftables matches the name in the packet). Windows and macOS cannot filter by name:
-  the system resolver may query the network's DNS servers right before each dial, until the answer is in (3 s at most) -
-  another app's lookup in those seconds can get out too.
+  while the tunnel is down the server's name is answered on the computer itself - a responder on a loopback address that
+  knows only that name (the addresses VeroScudo cached through the tunnel), reached through one NRPT rule (Windows) or a
+  resolver file (macOS) for exactly that name, present only while the tunnel is down. No DNS packet leaves for it.
+  Fallback when the rule is refused or there is no cached address yet: the system resolver may query the network's DNS
+  servers for that lookup (3 s at most) - another app's lookup in those seconds can get out too. Not used: a hosts-file
+  entry (security software commonly blocks it) or a signed driver.
 - **macOS (alpha)**: the boot window before launchd starts the daemon; VM filtering (pf, vmnet bridges) written but not yet seen on a real Mac.
   A DNS connection opened while blocked can go on after the tunnel is up for as long as pf keeps its state (Linux ends
   such connections; the pf of macOS has no way to pick them out).

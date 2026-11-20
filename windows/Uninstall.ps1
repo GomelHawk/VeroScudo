@@ -46,6 +46,9 @@ if (Test-Path $core) {
     Set-NetFirewallProfile -All -DefaultOutboundAction NotConfigured
     Get-NetFirewallRule -Group VeroScudo -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     Remove-NetFirewallHyperVRule -Name VeroScudo-WSL -ErrorAction SilentlyContinue
+    Remove-NetFirewallHyperVRule -Name VeroScudo-WSL-Block -ErrorAction SilentlyContinue
+    Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { [string]$_.Comment -eq 'VeroScudo: the VPN server while the tunnel is down' } |
+        ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }
 }
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WcmSvc' -Name EnableBadStateTracking -ErrorAction SilentlyContinue
 $d = [Environment]::GetFolderPath('Desktop')

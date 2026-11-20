@@ -38,13 +38,14 @@ $Scenarios = @(
     @('S2', 'steady', 7, 'IPv6 stays in the tunnel'),
     @('S3', 'steady', 10, 'A program bound to the physical adapter cannot get out'),
     @('S4', 'steady', 3, 'UDP/QUIC, STUN and ping stay in the tunnel'),
-    @('D1', 'outage', 13, 'VPN server unreachable'),
-    @('D2', 'outage', 10, 'VPN client process killed'),
-    @('D3', 'outage', 10, 'Tunnel adapter goes down'),
-    @('D4', 'outage', 13, 'Physical link drops and comes back'),
+    @('D1', 'outage', 12, 'VPN server unreachable'),
+    @('D2', 'outage', 8, 'VPN client process killed'),
+    @('D3', 'outage', 9, 'Tunnel adapter goes down'),
+    @('D4', 'outage', 12, 'Physical link drops and comes back'),
     @('D5', 'outage', 7, 'No DNS leak during any outage'),
+    @('V1', 'outage', 7, 'Virtual machines and WSL stay inside'),
     @('T1', 'tamper', 10, 'Another program adds a firewall allow rule'),
-    @('T2', 'tamper', 7, 'The kill-switch app is killed')
+    @('T2', 'tamper', 5, 'The kill-switch app is killed')
 )
 $Budget = 240     # seconds for all outage and tamper tests together
 $Fault = 10       # seconds an adapter stays down (D3, D4, T1, T2)
@@ -62,6 +63,7 @@ $Meaning = @{
     D5 = "while the VPN reconnects, the names of the sites you visit go to your provider's DNS."
     T1 = "another program's firewall rule is enough to get around the kill-switch."
     T2 = 'if the kill-switch app is closed or crashes, the protection is gone.'
+    V1 = 'traffic of your virtual machines or WSL can go out without the VPN when it drops.'
 }
 $Recommend = "Recommendation: change your kill-switch to one that blocks at the firewall by default.`n" +
     "VeroScudo - free and open source, from the authors of this bench: https://github.com/GomelHawk/VeroScudo`n" +
@@ -106,7 +108,7 @@ namespace KsBench
     public class Pkt
     {
         public int Ver; public string Src; public string Dst; public int Proto;
-        public int SPort = -1; public int DPort = -1; public int IType = -1; public double Ts;
+        public int SPort = -1; public int DPort = -1; public int IType = -1; public int Ttl = -1; public double Ts;
         public string Where()
         {
             string n = Proto == 6 ? "tcp" : Proto == 17 ? "udp" : Proto == 1 ? "icmp" : Proto == 58 ? "icmp6" : "proto" + Proto;
@@ -135,7 +137,7 @@ namespace KsBench
             if (ver == 4 && n >= 20)
             {
                 proto = b[o + 9];
-                p = new Pkt { Ver = 4, Src = Addr(b, o + 12, 4), Dst = Addr(b, o + 16, 4), Proto = proto };
+                p = new Pkt { Ver = 4, Src = Addr(b, o + 12, 4), Dst = Addr(b, o + 16, 4), Proto = proto, Ttl = b[o + 8] };
                 off = (b[o] & 15) * 4;
                 if ((((b[o + 6] << 8) | b[o + 7]) & 0x1FFF) != 0) return p;
             }
@@ -150,7 +152,7 @@ namespace KsBench
                     if (nh == 44)
                     {
                         if ((((b[o + off + 2] << 8) | b[o + off + 3]) & 0xFFF8) != 0)
-                            return new Pkt { Ver = 6, Src = src, Dst = dst, Proto = nxt };
+                            return new Pkt { Ver = 6, Src = src, Dst = dst, Proto = nxt, Ttl = b[o + 7] };
                         ln = 8;
                     }
                     else if (nh == 51) ln = (b[o + off + 1] + 2) * 4;
@@ -159,7 +161,7 @@ namespace KsBench
                     off += ln;
                 }
                 proto = nh;
-                p = new Pkt { Ver = 6, Src = src, Dst = dst, Proto = nh };
+                p = new Pkt { Ver = 6, Src = src, Dst = dst, Proto = nh, Ttl = b[o + 7] };
             }
             else return null;
             if ((proto == 6 || proto == 17) && n >= off + 4)
@@ -227,10 +229,13 @@ namespace KsBench
             if (p.Proto == 58 && Is(p.IType, 130, 131, 132, 133, 134, 135, 136, 137, 143)) return "ignore";
             if ((p.Proto == 6 || p.Proto == 17) && (p.DPort == 53 || p.DPort == 853)) return "dns";
             if (IsLan(p.Dst)) return "lan";
-            return "leak";
+            return Forwarded(p.Ttl) ? "vmleak" : "leak";
         }
 
         static bool Is(int v, params int[] set) { return Array.IndexOf(set, v) >= 0; }
+
+        // a packet this computer forwarded for a VM or WSL: one hop used - 63 (Linux/macOS guests) or 127 (Windows guests)
+        public static bool Forwarded(int ttl) { return ttl == 63 || ttl == 127; }
 
         static uint U32(byte[] f, int p, bool le)
         {
@@ -667,7 +672,9 @@ function Find-Server([double]$Seconds = 3.0, [switch]$SamePortOnly) {
 function Wait-Recovery([string]$Label) {
     [KsBench.Probe]::Label = $Label
     $back = [KsBench.Probe]::ProbeFor($Recover, 2)
+    $script:ManualAt = $null
     while (-not $back -and $script:Interactive) {
+        if ($null -eq $script:ManualAt) { $script:ManualAt = [KsBench.Probe]::Now() }    # from here on the user acts - D5 stops counting
         if (-not (Read-YesNo '  The VPN is not back. Reconnect it (or restart the app), then press Enter (n = stop the bench) [Y/n]' $true)) { break }
         $back = [KsBench.Probe]::ProbeFor(30, 2)
     }
@@ -713,6 +720,7 @@ function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [script
     }
     [void]$script:Windows.Add(@($t0, $t1))
     $leak = Get-Leak $t0 $t1
+    if ($wentDown -or $leak.Count) { [void]$script:DnsWindows.Add(@($t0, $(if ($null -ne $script:ManualAt) { $script:ManualAt } else { $t1 }))) }   # D5 only where the test really tested something
     $dns = Get-Leak $t0 $t1 'dns'
     $hits = @([KsBench.Probe]::Hits | Where-Object { $_[0] -eq $Id } | ForEach-Object { $_[1] })
     $ev = [ordered]@{ tunnel_went_down = $wentDown; recovered = $back; leak = (Get-Evidence $leak $t0); dns = (Get-Evidence $dns $t0); online = $hits }
@@ -766,6 +774,7 @@ function Get-SafeProcess([int[]]$Ids) {
 # ---------------------------------------------------------------- scenarios
 
 function Invoke-Steady {
+    $script:SteadyStart = [KsBench.Probe]::Now()
     $v6 = [KsBench.Probe]::V6
     Start-Capture
     if (Test-Wanted 'S1') {
@@ -817,6 +826,7 @@ function Invoke-Steady {
     Start-Sleep -Seconds 1
     [KsBench.Probe]::Reap(0)
     Stop-Capture
+    $script:SteadyEnd = [KsBench.Probe]::Now()
     if (Test-Wanted 'S1') {
         $dns = Get-Leak $s1[0] $s1[1] 'dns'; $ev = Get-Evidence $dns $s1[0]
         if ($dns.Count) { Set-Result 'S1' 'fail' "$($ev.packets) DNS packets went out of the tunnel to $($ev.to -join ', ')" $ev } else { Set-Result 'S1' 'pass' }
@@ -918,14 +928,26 @@ function Invoke-Disruptive {
         }
     }
     if (Test-Wanted 'D5') {
-        if ($script:Windows.Count -eq 0) { Set-Result 'D5' 'n/a' 'no outage test ran' }
+        if ($script:DnsWindows.Count -eq 0) { Set-Result 'D5' 'n/a' 'no outage test took the tunnel down' }
         else {
             $dns = New-Object 'System.Collections.Generic.List[KsBench.Pkt]'
-            foreach ($w in $script:Windows) { $dns.AddRange((Get-Leak $w[0] $w[1] 'dns')) }
-            $ev = Get-Evidence $dns $script:Windows[0][0]
+            foreach ($w in $script:DnsWindows) { $dns.AddRange((Get-Leak $w[0] $w[1] 'dns')) }
+            $ev = Get-Evidence $dns $script:DnsWindows[0][0]
             if ($dns.Count) { Set-Result 'D5' 'fail' "$($ev.packets) DNS packets went out while the VPN was down, to $(@($ev.to)[0..([Math]::Min(2, $ev.to.Count - 1))] -join ', ')" $ev }
             else { Set-Result 'D5' 'pass' }
         }
+    }
+    if (Test-Wanted 'V1') {
+        $spans = @($script:Windows | ForEach-Object { , $_ })
+        if ($script:SteadyEnd) { $spans += , @($script:SteadyStart, $script:SteadyEnd) }
+        $vm = New-Object 'System.Collections.Generic.List[KsBench.Pkt]'
+        foreach ($w in $spans) { $vm.AddRange((Get-Leak $w[0] $w[1] 'vmleak')) }
+        if ($vm.Count) {
+            $ev = Get-Evidence $vm $spans[0][0]
+            Set-Result 'V1' 'fail' "$($ev.packets) packets of a VM or WSL went out without the VPN, to $(@($ev.to)[0..([Math]::Min(2, $ev.to.Count - 1))] -join ', ')" $ev
+        } elseif (-not @(Get-NetAdapter -Name 'vEthernet*' -ErrorAction SilentlyContinue).Count) { Set-Result 'V1' 'n/a' 'no virtual machines, WSL or containers on this computer' }
+        elseif ($script:Windows.Count -eq 0) { Set-Result 'V1' 'n/a' 'no outage test ran' }
+        else { Set-Result 'V1' 'pass' 'no packet of a VM or WSL went out' }
     }
 }
 
@@ -969,7 +991,12 @@ function Write-Report {
         Write-Host "`nWhat failed means for you:"
         foreach ($s in $failed) { Write-Host "  $s  $($Meaning[$s])" }
     }
-    if ($level -eq 'POOR') { Write-Host ("`n" + $Recommend) -ForegroundColor Cyan }
+    if ($level -eq 'POOR') {
+        # never VeroScudo recommended to VeroScudo itself (by its name, or installed here)
+        if ("$script:ProductName" -match 'veroscudo' -or (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'VeroScudo'))) {
+            Write-Host "`nThis is VeroScudo itself: see what failed above and its README (limits, settings)." -ForegroundColor Cyan
+        } else { Write-Host ("`n" + $Recommend) -ForegroundColor Cyan }
+    }
     $el = [int]([KsBench.Probe]::Now() - $script:TStart)
     Write-Host ('Run time: {0} min {1} s' -f [int][Math]::Floor($el / 60), ($el % 60))
     Write-Host ('=' * 78)
@@ -1011,6 +1038,8 @@ function Invoke-Bench {
     foreach ($s in $Scenarios) { $script:Res[$s[0]] = [ordered]@{ status = 'not run'; detail = ''; evidence = $null } }
     $script:Servers = @{}
     $script:Windows = New-Object System.Collections.ArrayList
+    $script:DnsWindows = New-Object System.Collections.ArrayList
+    $script:ManualAt = $null
     $script:Stopped = $false
     $script:RunDir = Join-Path $script:JournalDir ('run-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     $null = New-Item -ItemType Directory -Path $script:RunDir

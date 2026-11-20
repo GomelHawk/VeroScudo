@@ -538,8 +538,8 @@ Describe 'a VPN server that moved: fresh lookup before arming and after a failed
         Mock -ModuleName VeroScudo.Core Start-Sleep { Set-VeroArmed $false 'test' }
         Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('203.0.113.20'))) }
         Invoke-VeroReconnect -Config $script:cfgM -Action test
-        # the attempt's sync, the DNS window open and closed, the re-sync with the new address - all before the one dial
-        Should -Invoke -ModuleName VeroScudo.Core Sync-VeroKillSwitch -Times 4 -Exactly
+        # the attempt's sync and the re-sync with the new address - answered from the cache, DNS never opened - before the dial
+        Should -Invoke -ModuleName VeroScudo.Core Sync-VeroKillSwitch -Times 2 -Exactly
         Should -Invoke -ModuleName VeroScudo.Core Resolve-VeroServerIp -ParameterFilter { -not $CacheOnly } -Times 1 -Exactly
         Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroDial -Times 1 -Exactly
     }
@@ -827,14 +827,14 @@ Describe 'DNS while blocked: only the redial''s own lookup of the server, right 
         @(Get-VeroDialName -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"}}')).Count | Should -Be 0
         @(Get-VeroDialName -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u","serverIps":["203.0.113.5"]}}')).Count | Should -Be 0
     }
-    It 'opens DNS for the lookup and closes it before the dial - also when the answer does not come in time' {
+    It 'no answer from the cache: opens DNS for the lookup and closes it before the dial - also when no answer comes in time' {
         $script:seen = New-Object System.Collections.ArrayList
         Mock -ModuleName VeroScudo.Core Sync-VeroKillSwitch { [void]$script:seen.Add("sync window=$(& (Get-Module VeroScudo.Core) { $script:DnsWindow })") }
         Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [void]$script:seen.Add('lookup'); (New-Object System.Threading.Tasks.TaskCompletionSource[System.Net.IPAddress[]]).Task }   # never answers
         InModuleScope VeroScudo.Core { $script:DnsFirstSeconds = 1 }
         Invoke-VeroDnsFirst -Config $script:cfgN -Action test
         InModuleScope VeroScudo.Core { $script:DnsFirstSeconds = 3 }
-        @($script:seen) | Should -Be @('sync window=True', 'lookup', 'sync window=False')
+        @($script:seen) | Should -Be @('lookup', 'sync window=True', 'lookup', 'sync window=False')   # the cache first, DNS closed
         InModuleScope VeroScudo.Core { $script:DnsWindow } | Should -BeFalse
     }
     It 'an answer goes into the cache without a second lookup, and the new address is allowed for the dial' {
@@ -843,7 +843,91 @@ Describe 'DNS while blocked: only the redial''s own lookup of the server, right 
         Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('203.0.113.77'))) }
         Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { [void]$script:seen.Add("resolve " + ((& (Get-Module VeroScudo.Core) { Get-VeroHostAddress 'vpn.example.com' }) -join ',')) }
         Invoke-VeroDnsFirst -Config $script:cfgN -Action test
-        @($script:seen) | Should -Be @('sync', 'sync', 'resolve 203.0.113.77', 'sync')
+        @($script:seen) | Should -Be @('resolve 203.0.113.77', 'sync')          # answered from the cache: DNS never opened
     }
 }
 
+
+Describe 'the VPN server''s name answered locally while the tunnel is down (NRPT + local DNS answer, mocked)' {
+    BeforeAll {
+        $script:cfgL = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"vpn.example.com","username":"u"},"vm":false}'
+        function New-Query([string]$n, [int]$t) {
+            $b = New-Object System.Collections.Generic.List[byte]; $b.AddRange([byte[]](0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            foreach ($l in $n.Split('.')) { $b.Add([byte]$l.Length); $b.AddRange([Text.Encoding]::ASCII.GetBytes($l)) }
+            $b.AddRange([byte[]](0, 0, $t, 0, 1)); , $b.ToArray()
+        }
+        $script:map = New-Object 'System.Collections.Generic.Dictionary[string,string[]]' ([StringComparer]::OrdinalIgnoreCase)
+        $script:map['vpn.example.com'] = [string[]]@('203.0.113.5', '2001:db8::5')
+    }
+    BeforeEach {
+        $global:VeroTestNrpt = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Add-DnsClientNrptRule { [void]$global:VeroTestNrpt.Add("add $Namespace -> $NameServers"); [pscustomobject]@{ Name = '{guid-1}' } }
+        Mock -ModuleName VeroScudo.Core Remove-DnsClientNrptRule { [void]$global:VeroTestNrpt.Add("remove $Name") }
+        Mock -ModuleName VeroScudo.Core Resolve-VeroServerIp { '203.0.113.5' } -ParameterFilter { $CacheOnly }
+        Mock -ModuleName VeroScudo.Core Get-VeroLocalDnsAddress { '127.0.0.53' }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Remove-TestFile (Get-VeroPath).Nrpt
+    }
+    AfterAll { Remove-TestFile (Get-VeroPath).Nrpt, (Get-VeroPath).LocalDns; Remove-Variable -Name VeroTestNrpt -Scope Global -ErrorAction SilentlyContinue }
+    It 'the local answer: A and AAAA of the server''s name (any case), REFUSED for every other name, nothing for garbage' {
+        $r = [VeroScudo.LocalDns]::Answer((New-Query 'VPN.Example.com' 1), $script:map)
+        ($r[3] -band 15) | Should -Be 0; $r[7] | Should -Be 1; ($r[-4..-1] -join '.') | Should -Be '203.0.113.5'
+        ([VeroScudo.LocalDns]::Answer((New-Query 'vpn.example.com' 28), $script:map))[7] | Should -Be 1
+        $o = [VeroScudo.LocalDns]::Answer((New-Query 'news.example.org' 1), $script:map); ($o[3] -band 15) | Should -Be 5; $o[7] | Should -Be 0
+        [VeroScudo.LocalDns]::Answer([byte[]](1, 2, 3), $script:map) | Should -BeNullOrEmpty
+        [VeroScudo.LocalDns]::Start([string[]]@('203.0.113.9')) | Should -BeFalse              # never anything but loopback
+    }
+    It 'the answer map: the server''s name with its cached addresses; none for a server given as an address' {
+        $m = Get-VeroDnsAnswerMap -Config $script:cfgL
+        @($m.Keys) | Should -Be @('vpn.example.com'); @($m['vpn.example.com']) | Should -Be @('203.0.113.5')
+        (Get-VeroDnsAnswerMap -Config (Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"}}')).Count | Should -Be 0
+    }
+    It 'tunnel down: one rule for the server''s name -> the local answer, recorded; the next pass asks Windows nothing' {
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        @($global:VeroTestNrpt) | Should -Be @('add vpn.example.com -> 127.0.0.53')
+        $global:VeroTestNrpt.Clear()
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        $global:VeroTestNrpt.Count | Should -Be 0
+    }
+    It 'tunnel up: the recorded rule goes (lookups through the tunnel keep the addresses fresh)' {
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        $global:VeroTestNrpt.Clear()
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 77 -Action test
+        @($global:VeroTestNrpt) | Should -Be @('remove {guid-1}')
+        Test-Path (Get-VeroPath).Nrpt | Should -BeTrue
+        @(& (Get-Module VeroScudo.Core) { Get-VeroNrptRecord }).Count | Should -Be 0
+    }
+    It 'no local answer running (watchdog down): no rule - the redial falls back to its DNS window' {
+        Mock -ModuleName VeroScudo.Core Get-VeroLocalDnsAddress { $null }
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        $global:VeroTestNrpt.Count | Should -Be 0
+    }
+    It 'a rule Windows refuses (security software): said once, not recorded' {
+        Mock -ModuleName VeroScudo.Core Add-DnsClientNrptRule { throw 'access denied' }
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { }
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        Should -Invoke -ModuleName VeroScudo.Core Write-VeroLog -Times 1 -Exactly -ParameterFilter { $Message -like 'WARNING: Windows refused the NRPT rule*' }
+        Test-Path (Get-VeroPath).Nrpt | Should -BeFalse
+    }
+    It 'Off: the recorded rule and any rule with VeroScudo''s comment are removed, the record goes' {
+        Sync-VeroNrpt -Config $script:cfgL -TunnelLuid 0 -Action test
+        Mock -ModuleName VeroScudo.Core Get-DnsClientNrptRule { @([pscustomobject]@{ Name = '{orphan}'; Comment = 'VeroScudo: the VPN server while the tunnel is down' }, [pscustomobject]@{ Name = '{users-own}'; Comment = 'something else' }) }
+        $global:VeroTestNrpt.Clear()
+        Remove-VeroNrpt -Action test
+        @($global:VeroTestNrpt) | Should -Be @('remove {guid-1}', 'remove {orphan}')                  # never the user's own rule
+        Test-Path (Get-VeroPath).Nrpt | Should -BeFalse
+    }
+}
+
+Describe 'the note that the local DNS answer runs' {
+    It 'the note that the local answer runs counts for 60 s only' {
+        $p = (Get-VeroPath).LocalDns
+        @{ Address = '127.0.0.53'; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p
+        & (Get-Module VeroScudo.Core) { Get-VeroLocalDnsAddress } | Should -Be '127.0.0.53'
+        @{ Address = '127.0.0.53'; Time = (Get-Date).AddMinutes(-5).ToString('o') } | ConvertTo-Json | Set-Content $p
+        & (Get-Module VeroScudo.Core) { Get-VeroLocalDnsAddress } | Should -BeNullOrEmpty
+        @{ Address = '10.0.0.1'; Time = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $p
+        & (Get-Module VeroScudo.Core) { Get-VeroLocalDnsAddress } | Should -BeNullOrEmpty         # never a non-loopback address
+    }
+}

@@ -210,14 +210,14 @@ without the tray). Windows: left-click shows the status window; Linux: middle-cl
 rights; changing Settings asks for an administrator's password. Settings has three tabs: **VPN profiles**, **Behaviour**
 and **Connection**.
 
-**Connection check** (optional, off by default; Settings > *Connection*): while protected, VeroScudo checks up to three
+**Connection check** (on by default, can be turned off; Settings > *Connection*): while protected, VeroScudo checks up to three
 addresses through the tunnel every 10-100 s - ping, or a TCP connection to a port (default: 1.1.1.1, TCP 443) - and rates
 the last 1-10 minutes: under 10 % lost **good**, 10-50 % **unstable**, over 50 % **bad**; answers slower than 1 s count like partial loss (**unstable**, never bad). The first rating comes one full
 period after each connect or settings change (*checking…* until then). The rating shows in the tooltip
 (*VeroScudo - Protected, connection good*), the menu header and the status window's **CONNECTION** card, which shows the
 redial instead while the VPN is not connected. When **every** check fails 3 rounds in a row, the tunnel is up but carries
 nothing (a server gone silent - SSTP and OpenVPN notice that only minutes later): VeroScudo then does what *Reconnect VPN*
-does - traffic blocked, hang up, redial the same profile - at most once per 10 minutes; *Last drop* says
+does - traffic blocked, hang up, redial the same profile - at most once per 10 minutes while no check answers; *Last drop* says
 *no traffic through the tunnel*. It never switches profiles, and never redials Hiddify (connect it in Hiddify).
 
 Command line (Windows): `powershell -File "C:\Program Files\VeroScudo\VeroScudo.ps1" -Action status`
@@ -237,8 +237,12 @@ Only: the tunnel itself, the VPN server's address on the profile's protocol and 
 only from the VPN service), DHCP (on Windows only from the DHCP client service), and the redial's
 lookup of the VPN server's name. **Linux:** only a DNS query for exactly that name gets out (nftables
 reads the name in the packet); every other name stays inside. **Windows and macOS** cannot filter by
-name: DNS from the system resolver to the network's DNS servers is open only right before each dial,
-for that lookup, and closed again once the answer is in (3 s at most). A server given as an address
+name, so while the tunnel is down VeroScudo answers the server's name **on the computer itself**: a small
+responder on a loopback address knows only that name and the addresses VeroScudo has cached, and a
+Windows NRPT rule (macOS: `/etc/resolver/<name>`) sends exactly that name there. The redial finds its
+server and no DNS packet leaves the computer; every other name stays blocked. The rule exists only while
+the tunnel is down. Should it be refused (security software) or have nothing to answer yet, DNS from the
+system resolver opens for that one lookup and closes once the answer is in - about a second, 3 s at most. A server given as an address
 needs no DNS at all; no DNS server known: no DNS at all.
 On Windows, the SSTP certificate-revocation check (HTTP, and DNS for its servers' names) is allowed
 for 2 minutes only after a dial failed on exactly that check, and for 20 s right after an SSTP

@@ -260,38 +260,158 @@ function Get-VeroDialName {
 
 function Start-VeroDnsLookup([string]$Name) { [System.Net.Dns]::GetHostAddressesAsync($Name) }   # a task (tests replace it)
 
-function Invoke-VeroDnsFirst {
-    <# Blocked, right before a dial: the redial's own lookup of its server is the one DNS request that gets out. The DNS
-       permit for Windows' DNS client opens, the server's names are looked up (the DNS client keeps the answers, the dial
-       finds them there; a moved server's new address is cached and allowed for this dial), and the permit closes again -
-       once the answers are in, after DnsFirstSeconds at most. Linux lets only the server's name out (nftables); macOS does
-       the same as this (daemon.prime_dns). #>
-    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
-    $names = @(Get-VeroDialName -Config $Config)
-    if ($names.Count -eq 0) { return }
+function Get-VeroDnsAnswer([string[]]$Names, [int]$TimeoutMs) {
+    <# name -> addresses for every name that was answered within $TimeoutMs (lookups in parallel; a name without an answer
+       is left out). #>
     $tasks = @{}
-    $script:DnsWindow = $true
-    try {
-        Sync-VeroKillSwitch -Config $Config -Action $Action
-        foreach ($n in $names) { $tasks[$n] = Start-VeroDnsLookup $n }
-        try { $null = [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($tasks.Values), $script:DnsFirstSeconds * 1000) }
-        catch { Write-Verbose "DNS lookup of the server failed: $($_.Exception.Message)" }        # a name that does not resolve
-    } finally {
-        $script:DnsWindow = $false
-        Sync-VeroKillSwitch -Config $Config -Action $Action
-    }
-    $script:DnsFresh = @{}
+    foreach ($n in $Names) { $tasks[$n] = Start-VeroDnsLookup $n }
+    try { $null = [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($tasks.Values), $TimeoutMs) }
+    catch { Write-Verbose "DNS lookup of the server failed: $($_.Exception.Message)" }            # a name that does not resolve
+    $out = @{}
     foreach ($n in $tasks.Keys) {
         $t = $tasks[$n]
         if ([string]$t.Status -eq 'RanToCompletion') {
-            $script:DnsFresh[$n] = @($t.Result | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString })
+            $a = @($t.Result | Where-Object { $_.AddressFamily -in 'InterNetwork', 'InterNetworkV6' } | ForEach-Object { $_.IPAddressToString })
+            if ($a.Count) { $out[$n] = $a }
         }
     }
-    if ($script:DnsFresh.Count -eq 0) { return }
+    $out
+}
+
+function Invoke-VeroDnsFirst {
+    <# Blocked, right before a dial: the redial's own lookup of its server. First with DNS still closed: the DNS client
+       answers from its cache (kept fresh while the tunnel was up - the sync looks the server up every pass), and a query it
+       would send is dropped before it leaves the PC - in the normal case no DNS packet leaves at all. Only for a name the
+       cache does not have, the DNS permit for Windows' DNS client opens, the name is looked up, and the permit closes
+       again - once answered, after DnsFirstSeconds at most. A moved server's new address is cached and allowed for this
+       dial. Linux lets only the server's name out (nftables); macOS does the same as this (daemon.prime_dns). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [string]$Action = 'core')
+    $names = @(Get-VeroDialName -Config $Config)
+    if ($names.Count -eq 0) { return }
+    $fresh = Get-VeroDnsAnswer -Names $names -TimeoutMs 1000                          # DNS closed: the cache only
+    $missing = @($names | Where-Object { -not $fresh.ContainsKey($_) })
+    if ($missing.Count) {
+        $script:DnsWindow = $true
+        try {
+            Sync-VeroKillSwitch -Config $Config -Action $Action
+            $more = Get-VeroDnsAnswer -Names $missing -TimeoutMs ($script:DnsFirstSeconds * 1000)
+            foreach ($k in $more.Keys) { $fresh[$k] = $more[$k] }
+        } finally {
+            $script:DnsWindow = $false
+            Sync-VeroKillSwitch -Config $Config -Action $Action
+        }
+    }
+    if ($fresh.Count -eq 0) { return }
+    $script:DnsFresh = $fresh
     try {
         $null = & (Get-VeroTypeHandler (Get-VeroConfigType $Config)).ResolveIps $Config      # into the cache, from the answers above
     } finally { $script:DnsFresh = @{} }
     Sync-VeroKillSwitch -Config $Config -Action $Action                                       # a moved server: allowed for this dial
+}
+
+function Get-VeroDnsAnswerMap {
+    <# name -> cached addresses, for the names a dial of this profile looks up - from the caches only, never a lookup. #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config)
+    $map = @{}
+    $names = @(Get-VeroDialName -Config $Config)
+    if ($names.Count -eq 0) { return $map }
+    if ((Get-VeroConfigType $Config) -eq 'openvpn') {
+        $p = Get-VeroPath -VpnProfile $Config.Profile
+        if (Test-Path -LiteralPath $p.EndpointCache) {
+            try {
+                foreach ($e in (Get-Content -LiteralPath $p.EndpointCache -Raw | ConvertFrom-Json).PSObject.Properties) {
+                    $a = @($e.Value | ForEach-Object { [string]$_ } | Where-Object { Test-VeroUsableServerIp $_ })
+                    if ($names -contains $e.Name -and $a.Count) { $map[$e.Name] = $a }
+                }
+            } catch { Write-Verbose 'endpoint cache unreadable' }
+        }
+    } else {
+        $a = @(Resolve-VeroServerIp -Config $Config -CacheOnly)
+        if ($a.Count) { foreach ($n in $names) { $map[$n] = $a } }
+    }
+    $map
+}
+
+function Update-VeroLocalDns {
+    <# The watchdog's part of the local DNS answer: listen on the first free loopback address (once), answer the active
+       profile's server names with their cached addresses (every pass), and note that it runs (localdns.json) - the sync
+       adds the NRPT rule only while that note is fresh. #>
+    [CmdletBinding()] param([string]$Action = 'watchdog')
+    if (-not [VeroScudo.LocalDns]::Address) {
+        if (-not [VeroScudo.LocalDns]::Start([string[]]$script:LocalDnsAddresses)) {
+            if (-not $script:LocalDnsSaid) { Write-VeroLog "WARNING: no free loopback address for the local DNS answer (127.0.0.53-60, port 53) - the redial asks the network's DNS for a second instead" $Action; $script:LocalDnsSaid = $true }
+            return
+        }
+        Write-VeroLog "local DNS answer for the VPN server listens on $([VeroScudo.LocalDns]::Address) (used only while the tunnel is down)" $Action
+    }
+    $cfg = try { Get-VeroConfig } catch { $null }
+    $map = if ($cfg) { Get-VeroDnsAnswerMap -Config $cfg } else { @{} }
+    $all = @($map.Values | ForEach-Object { $_ } | Select-Object -Unique)
+    [VeroScudo.LocalDns]::SetAnswers([string[]]@($map.Keys), [string[]]$all)
+    Write-VeroStateFile -Path (Get-VeroPath).LocalDns -Text ([ordered]@{ Address = [VeroScudo.LocalDns]::Address; Time = (Get-Date).ToString('o') } | ConvertTo-Json)
+}
+
+function Get-VeroLocalDnsAddress {
+    <# The local DNS answer's address while the watchdog keeps it running (its note is at most 60 s old), else $null. #>
+    $p = (Get-VeroPath).LocalDns
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try {
+        $j = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+        $age = ((Get-Date) - [datetime]::Parse([string]$j.Time, $null, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds
+        if ($age -ge -5 -and $age -le 60 -and [string]$j.Address -match '^127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') { return [string]$j.Address }
+    } catch { Write-Verbose 'local DNS note unreadable' }
+    $null
+}
+
+function Get-VeroNrptRecord {
+    $p = (Get-VeroPath).Nrpt
+    if (-not (Test-Path -LiteralPath $p)) { return @() }
+    try { return @(Get-Content -LiteralPath $p -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return @() }
+}
+
+function Sync-VeroNrpt {
+    <# While armed and the tunnel is down: one NRPT rule per server name -> the local DNS answer, so the redial finds its
+       server without a DNS packet leaving the PC (Windows empties its DNS cache at a drop). Otherwise none. Only the rules
+       VeroScudo recorded are ever removed; Windows is asked only when something changes. A rule Windows (or security
+       software) refuses is logged once - the redial then falls back to its one-second DNS window (Invoke-VeroDnsFirst). #>
+    [CmdletBinding()] param([Parameter(Mandatory)]$Config, [uint64]$TunnelLuid, [string]$Action = 'core')
+    $want = @{}; $addr = $null
+    if ((Test-VeroArmed) -and -not $TunnelLuid) {
+        $addr = Get-VeroLocalDnsAddress
+        if ($addr) { $map = Get-VeroDnsAnswerMap -Config $Config; foreach ($k in $map.Keys) { $want[$k] = $addr } }
+    }
+    $have = @(Get-VeroNrptRecord)
+    $keep = New-Object System.Collections.ArrayList
+    $changed = $false
+    foreach ($r in $have) {
+        if ($want.ContainsKey([string]$r.Namespace) -and $want[[string]$r.Namespace] -eq [string]$r.Address) { [void]$keep.Add($r); continue }
+        try { Remove-DnsClientNrptRule -Name ([string]$r.Name) -Force -ErrorAction Stop } catch { Write-Verbose "NRPT rule already gone: $($_.Exception.Message)" }
+        $changed = $true
+    }
+    foreach ($n in $want.Keys) {
+        if (@($keep | Where-Object { [string]$_.Namespace -eq $n }).Count) { continue }
+        try {
+            $x = Add-DnsClientNrptRule -Namespace $n -NameServers $want[$n] -Comment $script:NrptComment -PassThru -ErrorAction Stop
+            [void]$keep.Add([pscustomobject]@{ Name = [string]$x.Name; Namespace = $n; Address = $want[$n] }); $changed = $true
+            $script:NrptSaid = $null
+        } catch {
+            if ($script:NrptSaid -ne $n) { Write-VeroLog "WARNING: Windows refused the NRPT rule for the VPN server ($($_.Exception.Message)) - the redial asks the network's DNS for a second instead" $Action; $script:NrptSaid = $n }
+        }
+    }
+    if ($changed) {
+        Write-VeroStateFile -Path (Get-VeroPath).Nrpt -Text (ConvertTo-Json -InputObject @($keep) -Depth 3)
+        Write-VeroLog $(if ($keep.Count) { "the VPN server's name is answered locally while the tunnel is down (NRPT -> $addr) - no DNS leaves the PC for it" } else { 'NRPT rule for the VPN server removed' }) $Action
+    }
+}
+
+function Remove-VeroNrpt {
+    <# Off and uninstall: every NRPT rule VeroScudo recorded, and any other carrying its comment (a record lost in a crash). #>
+    [CmdletBinding()] param([string]$Action = 'core')
+    foreach ($r in @(Get-VeroNrptRecord)) { try { Remove-DnsClientNrptRule -Name ([string]$r.Name) -Force -ErrorAction Stop } catch { Write-Verbose 'NRPT rule already gone' } }
+    try { @(Get-DnsClientNrptRule -ErrorAction Stop | Where-Object { [string]$_.Comment -eq $script:NrptComment }) | ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction Stop } }
+    catch { Write-VeroLog "ERROR: NRPT rules of VeroScudo not checked: $($_.Exception.Message) - will retry" $Action }
+    $p = (Get-VeroPath).Nrpt
+    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
 }
 
 function Start-VeroRedial {

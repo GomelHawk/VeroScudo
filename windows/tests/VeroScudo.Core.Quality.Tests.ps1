@@ -5,9 +5,9 @@ AfterAll { Remove-TestDir; Set-VeroHome $null }
 
 Describe 'Connection check: config.json (connectionCheck)' {
     BeforeAll { $script:one = '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}]' }
-    It 'missing = off, every 10 s over 1 minute, 1.1.1.1 TCP 443' {
+    It 'missing = on, every 10 s over 1 minute, 1.1.1.1 TCP 443' {
         $c = (Get-VeroConfig -Raw ($script:one + '}')).ConnectionCheck
-        $c.Enabled | Should -BeFalse; $c.IntervalSeconds | Should -Be 10; $c.WindowMinutes | Should -Be 1
+        $c.Enabled | Should -BeTrue; $c.IntervalSeconds | Should -Be 10; $c.WindowMinutes | Should -Be 1
         @($c.Targets).Count | Should -Be 1; $c.Targets[0].Host | Should -Be '1.1.1.1'; $c.Targets[0].Method | Should -Be 'tcp'; $c.Targets[0].Port | Should -Be 443
     }
     It 'a full setting is read' {
@@ -127,7 +127,7 @@ Describe 'Connection check: the watchdog (mocked checks)' {
     It 'does nothing while off or when the check is off' {
         Mock -ModuleName VeroScudo.Core Test-VeroArmed { $false }
         Update-VeroQuality | Out-Null
-        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}]}'
+        Set-Content -Path (Get-VeroPath).Config -Value '{"profiles":[{"profile":"Work","server":"vpn.example.com","username":"jdoe"}],"connectionCheck":{"enabled":false}}'
         Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
         Update-VeroQuality | Out-Null
         Should -Invoke -ModuleName VeroScudo.Core Invoke-VeroProbeRound -Times 0 -Exactly

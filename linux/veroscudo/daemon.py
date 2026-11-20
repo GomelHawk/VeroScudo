@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import hiddify, quality, stats
+from . import hiddify, localdns, quality, stats
 from .backend import firewall, nm
 from .config import Config, config_path
 from .netutil import usable_server_ip
@@ -26,8 +26,8 @@ RENEW_MARKER_SECONDS = 120.0
 
 # The connection check (Settings > Connection) saw every check fail this many rounds in a row: the tunnel is up but carries
 # nothing (a server gone silent - SSTP and OpenVPN notice it only when their own keepalive gives up, minutes later). The guard
-# then does what the user's Reconnect does - at most once per DEAD_PAUSE_SECONDS, so a check address that is always down
-# cannot make it redial in a loop. Same numbers on Windows (Core/66-Quality.ps1).
+# then does what the user's Reconnect does - at most once per DEAD_PAUSE_SECONDS while no check answers, so a check address
+# that is always down cannot make it redial in a loop (any answer ends the pause). Same numbers on Windows (Core/66-Quality.ps1).
 # pf (macOS) cannot let out DNS for one name only: while blocked the system resolver gets no DNS, except for the redial's
 # own lookup of the server right before each dial - at most this long (Windows: the same, Core/70-Dial.ps1)
 DNS_FIRST_SECONDS = 3.0
@@ -81,6 +81,7 @@ class Guard:
         self._hiddify_said: dict = {}            # what was logged last per topic - each problem is logged once
         self._lookup_next = False                # look the server name up after the next block (a redial failed)
         self._cgroup_ok = True                   # False once nftables refused the cgroup rule (kernel without nft_socket)
+        self.local = localdns.Responder()        # pf: the server's name answered on this machine while blocked
         self.dead_rounds = 0                     # connection-check rounds in a row with every check failed
         self._dead_next = 0.0                    # monotonic time before which no dead-tunnel reconnect starts
 
@@ -245,6 +246,7 @@ class Guard:
         plan = self._plan(tunnel_up)                           # name lookups and questions to the VPN service: not under the lock
         with self.store.firewall_lock():
             tun = self._apply(tunnel_up, force, plan)
+        self.sync_resolver(tun)                                # pf: the local answer while blocked, before any lookup
         cfg = self.cfg
         # blocked, after a failed redial: Linux looks the server up again here (only its name gets out); pf does it in
         # prime_dns, the only moment it has DNS
@@ -257,26 +259,62 @@ class Guard:
             with self.store.firewall_lock():
                 self._apply(tunnel_up, False, plan)
 
+    def update_local_dns(self) -> None:
+        """pf only: the responder runs (started once) and answers the active profile's server name with its cached
+        addresses; the resolver file that sends the name to it exists only while armed and blocked (sync_resolver)."""
+        if firewall.matches_dns_names():
+            return
+        if not self.local.port:
+            if self.local.start():
+                log.info("local DNS answer for the VPN server listens on %s:%s (used only while the tunnel is down)",
+                         localdns.ADDRESS, self.local.port)
+            else:
+                self._say_once("localdns", "no free port for the local DNS answer - the redial asks the network's DNS "
+                               "for a second instead")
+                return
+        cfg = self.cfg
+        names = self.dns_names(cfg) or ()
+        ips = self.cached_server_ips(cfg) if names else []
+        self.local.set_answers({n: ips for n in names} if ips else {})
+
+    def sync_resolver(self, tun: str | None, remove: bool = False) -> None:
+        """pf only: while armed and blocked, /etc/resolver/<server name> sends that name to the local answer - the redial
+        finds its server with no DNS packet leaving the Mac (the system resolver's cache may be empty after a drop).
+        Otherwise no file of VeroScudo's. Files not marked as VeroScudo's are never touched."""
+        if firewall.matches_dns_names():
+            return
+        cfg = self.cfg
+        names = list(self.dns_names(cfg) or ()) if not remove and self.store.armed and not tun and self.local.port else []
+        if names and not self.cached_server_ips(cfg):
+            names = []
+        try:
+            if localdns.sync_files(names, self.local.port if names else None):
+                log.info("resolver file: %s", f"'{names[0]}' answered locally while the tunnel is down" if names
+                         else "VeroScudo's resolver file removed")
+        except OSError:
+            log.exception("resolver file")
+
     def prime_dns(self) -> None:
-        """pf only, right before a dial: the redial's own lookup of the server is the one DNS request that gets out while
-        blocked. The rules open DNS to the network's resolvers, the server's name is looked up (the system resolver keeps
-        the answer, the dial finds it there; a moved server's new address is cached and allowed), and DNS is closed again -
-        once the answer is in, after DNS_FIRST_SECONDS at most. Linux needs none of it: only that name ever gets out there."""
+        """pf only, right before a dial: the redial's own lookup of the server. First from the resolver's cache with DNS
+        still closed (no packet leaves); only without an answer the rules open DNS to the network's resolvers for that
+        lookup and close it again - once answered, after DNS_FIRST_SECONDS at most. A moved server's new address is cached
+        and allowed. Linux needs none of it: only that name ever gets out there."""
         cfg = self.cfg
         if firewall.matches_dns_names() or not self.dns_names(cfg) or not self._looks_up(cfg):
             return
-        try:
-            plan = self._plan(False, window=True)
-            with self.store.firewall_lock():
-                self._apply(False, False, plan)
-            found: list = []
-            t = threading.Thread(target=lambda: found.extend(nm.resolve(cfg.server)), daemon=True)
-            t.start()
-            t.join(DNS_FIRST_SECONDS)
-        finally:
-            plan = self._plan(False)
-            with self.store.firewall_lock():
-                self._apply(False, False, plan)
+        # first with DNS still closed: the system resolver answers from its cache (fresh - the server was looked up while
+        # the tunnel was up), and a query it would send is dropped before it leaves the Mac. Only without an answer: the window
+        found = self._lookup_within(cfg.server, 1.0)
+        if not found:
+            try:
+                plan = self._plan(False, window=True)
+                with self.store.firewall_lock():
+                    self._apply(False, False, plan)
+                found = self._lookup_within(cfg.server, DNS_FIRST_SECONDS)
+            finally:
+                plan = self._plan(False)
+                with self.store.firewall_lock():
+                    self._apply(False, False, plan)
         self._lookup_next = False
         cached = self.cached_server_ips(cfg)
         merged = list(dict.fromkeys([ip for ip in found if usable_server_ip(ip)] + cached))[:8]
@@ -284,6 +322,15 @@ class Guard:
             write_atomic(self.store.server_cache(cfg.profile), "\n".join(merged))
             log.info("server '%s' now resolves to %s - allowed for this attempt", cfg.server, ", ".join(merged))
             self.enable_killswitch(tunnel_up=False)
+
+    @staticmethod
+    def _lookup_within(name: str, seconds: float) -> list:
+        """The addresses of `name` from the system resolver, or [] after `seconds` (the lookup may go on in its thread)."""
+        found: list = []
+        t = threading.Thread(target=lambda: found.extend(nm.resolve(name)), daemon=True)
+        t.start()
+        t.join(seconds)
+        return list(found)
 
     @staticmethod
     def _looks_up(cfg: Config) -> bool:
@@ -375,6 +422,7 @@ class Guard:
             self._applied = None
             self.store.set_applied(None, None)
         log.info("kill-switch OFF (firewall restored)")
+        self.sync_resolver(None, remove=True)                  # pf: VeroScudo's resolver file goes with the rules
 
     def boot(self) -> None:
         """Before the network starts: if armed, put the kill-switch back. No DNS here - cached server IPs only;
@@ -651,6 +699,7 @@ class Guard:
 
     def watchdog(self) -> None:
         self.reload_config()
+        self.update_local_dns()
         armed = bool(self.store.armed)
         up = armed and nm.is_connected(self.cfg.profile)
         self.record_minute(up, down=armed and not up)
@@ -701,6 +750,8 @@ class Guard:
         if not results or any(r[0] for r in results):
             self.dead_rounds = 0
             self._say_once("dead", None)
+            if results:
+                self._dead_next = 0.0            # an answer: the check addresses work - the next stall may redial at once
             return
         self.dead_rounds += 1
         if self.dead_rounds < DEAD_ROUNDS:

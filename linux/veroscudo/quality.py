@@ -61,7 +61,7 @@ DEFAULT_TARGET = Target(DEFAULT_HOST, "tcp", 443)
 
 @dataclass(frozen=True)
 class CheckConfig:
-    enabled: bool = False
+    enabled: bool = True
     interval_seconds: int = 10
     window_minutes: int = 1
     targets: tuple[Target, ...] = (DEFAULT_TARGET,)
@@ -96,13 +96,13 @@ def split_address(text: str) -> tuple[str, int | None]:
 
 
 def parse(raw: object, is_host) -> CheckConfig:
-    """config.json's `connectionCheck` -> CheckConfig. Missing = off with the defaults. Raises ValueError. `is_host` is
+    """config.json's `connectionCheck` -> CheckConfig. Missing = on with the defaults. Raises ValueError. `is_host` is
     config.py's host check (passed in: no import cycle). An empty target list falls back to 1.1.1.1 - there is always one."""
     if raw is None:
         return CheckConfig()
     if not isinstance(raw, dict):
         raise ValueError("config.json: connectionCheck must be an object")  # noqa: TRY004 - a config error is a ValueError everywhere (`veroscudo set` and the loaders catch ValueError)
-    enabled = raw.get("enabled", False)
+    enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("config.json: connectionCheck.enabled must be true or false")  # noqa: TRY004 - a config error is a ValueError everywhere (`veroscudo set` and the loaders catch ValueError)
     try:

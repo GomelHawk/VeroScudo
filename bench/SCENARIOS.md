@@ -18,18 +18,24 @@ by definition. The DNS probes look up random names under `example.com`.
 | S2 | steady | 7 | IPv6 stays in the tunnel | No IPv6 leak during UDP, TCP and ping over IPv6. N/A when the network has no IPv6. |
 | S3 | steady | 10 | A program bound to the physical adapter cannot get out | No leak from UDP/TCP sockets bound to the physical adapter (`SO_BINDTODEVICE`, `IP_BOUND_IF`, `IP_UNICAST_IF`). Route-only kill-switches fail this. |
 | S4 | steady | 3 | UDP/QUIC, STUN and ping stay in the tunnel | No leak of a QUIC-sized UDP packet, a STUN request or a ping. |
-| D1 | outage | 13 | VPN server unreachable | A firewall rule blocks the VPN server until the tunnel goes down (+5 s, at most 60 s); no leak until the VPN is back. |
-| D2 | outage | 10 | VPN client process killed | The process that owns the VPN connection is killed; no leak until the VPN is back. N/A when the VPN runs in the kernel or inside the OS. |
-| D3 | outage | 10 | Tunnel adapter goes down | The tunnel adapter is taken down; no leak until the VPN is back. N/A for Windows' own VPN client. |
-| D4 | outage | 13 | Physical link drops and comes back | The physical adapter is taken down for up to 10 s and brought back; no leak until the VPN is back. |
-| D5 | outage | 7 | No DNS leak during any outage | No DNS packet on the physical adapter during any of D1-D4, T1, T2. |
+| D1 | outage | 12 | VPN server unreachable | A firewall rule blocks the VPN server until the tunnel goes down (+5 s, at most 60 s); no leak until the VPN is back. |
+| D2 | outage | 8 | VPN client process killed | The process that owns the VPN connection is killed; no leak until the VPN is back. N/A when the VPN runs in the kernel or inside the OS. |
+| D3 | outage | 9 | Tunnel adapter goes down | The tunnel adapter is taken down; no leak until the VPN is back. N/A for Windows' own VPN client. |
+| D4 | outage | 12 | Physical link drops and comes back | The physical adapter is taken down for up to 10 s and brought back; no leak until the VPN is back. |
+| D5 | outage | 7 | No DNS leak during any outage | No DNS packet on the physical adapter during those of D1-D4, T1, T2 that took the tunnel down (or leaked), from the fault until the VPN is back - or until the bench asks you to reconnect by hand. |
+| V1 | outage | 7 | Virtual machines and WSL stay inside | No packet that this computer forwarded for a VM, WSL or a container (TTL 63 or 127, see below) leaves the physical adapter while the VPN is down, or past the tunnel while it is up. N/A when there are no VMs, WSL or containers. Not a critical test: it does not cap the score. |
 | T1 | tamper | 10 | Another program adds a firewall allow rule | A firewall allow rule for the probe addresses is added, then the physical adapter is taken down for 10 s; no leak until the VPN is back (the rule stays until then). |
-| T2 | tamper | 7 | The kill-switch app is killed | The process you name is killed, then the physical adapter is taken down for 10 s; no leak until the VPN is back. An expert test: N/A unless the process is named (`--app-process` / `-AppProcess`); the bench never asks. |
+| T2 | tamper | 5 | The kill-switch app is killed | The process you name is killed, then the physical adapter is taken down for 10 s; no leak until the VPN is back. An expert test: N/A unless the process is named (`--app-process` / `-AppProcess`); the bench never asks. |
 
 During every outage test the bench sends, every 250 ms, UDP and TCP to `198.51.100.7:443` (and
 `2001:db8::7` with IPv6), and every 2 s a DNS look-up of a random name. Background traffic of any app
 counts the same way. The window runs from the fault until the VPN is back (plus 1.5 s), so a leak while
 reconnecting counts.
+
+**Who sent it.** Every packet leaves with a TTL (IPv6: hop limit). What the computer sends itself leaves with 64,
+128 or 255; a packet it forwards for a VM, WSL or a container has used one hop already - 63 (Linux, macOS guests) or
+127 (Windows guests). The bench counts the computer's own leaks in D1-D4, T1 and T2, and the forwarded ones only in V1:
+many kill-switches never claim to cover VMs, and V1 says plainly whether this one does.
 
 A fault that never takes the tunnel down (for example a WireGuard tunnel that keeps its routes while the
 server is unreachable) makes the test **N/A**: nothing could leak, so the kill-switch was not tested.
@@ -38,7 +44,7 @@ server is unreachable) makes the test **N/A**: nothing could leak, so the kill-s
 
 - The weights add up to 100. Score = points of passed tests / points of the tests that ran x 100: a test that
   cannot run on a setup (N/A, skipped, not run, invalid) counts neither way. The summary says how many tests ran.
-- A leak in a critical test (S1, S2, S3, D1, D2, D3, D4, T1, T2) **caps the score at 40**: a
+- A leak in a critical test (S1, S2, S3, D1, D2, D3, D4, T1, T2) **caps the score at 40** (V1 and D5 do not): a
   kill-switch that leaks when the VPN fails has failed its one job.
 - Verdict: **STRONG** 90-100, **FAIR** 70-89, **POOR** below 70, **UNCLEAR** when less than half of all
   points ran.
