@@ -109,6 +109,7 @@ namespace KsBench
     {
         public int Ver; public string Src; public string Dst; public int Proto;
         public int SPort = -1; public int DPort = -1; public int IType = -1; public int Ttl = -1; public double Ts;
+        public string QName;
         public string Where()
         {
             string n = Proto == 6 ? "tcp" : Proto == 17 ? "udp" : Proto == 1 ? "icmp" : Proto == 58 ? "icmp6" : "proto" + Proto;
@@ -168,9 +169,25 @@ namespace KsBench
             {
                 p.SPort = (b[o + off] << 8) | b[o + off + 1];
                 p.DPort = (b[o + off + 2] << 8) | b[o + off + 3];
+                if (proto == 17 && p.DPort == 53) p.QName = DnsName(b, o + off + 8 + 12, o + n);
             }
             else if ((proto == 1 || proto == 58) && n > off) p.IType = b[o + off];
             return p;
+        }
+
+        // the name a DNS query asks for, or null when the captured bytes do not hold it whole
+        static string DnsName(byte[] b, int pos, int end)
+        {
+            var labels = new List<string>();
+            while (pos < end)
+            {
+                int len = b[pos];
+                if (len == 0) return labels.Count > 0 ? string.Join(".", labels.ToArray()).ToLowerInvariant() : null;
+                if (len > 63 || pos + 1 + len > end) return null;
+                labels.Add(System.Text.Encoding.ASCII.GetString(b, pos + 1, len));
+                pos += 1 + len;
+            }
+            return null;
         }
 
         public static Pkt Frame(byte[] d, int o, int n, int lt)
@@ -626,6 +643,16 @@ function Get-Evidence($Items, [double]$T0) {
     }
 }
 
+function Get-ServerName([string[]]$Name, [string[]]$Server) {
+    <# Of the names looked up, those that resolve to a VPN server address - the client finding its own server for the
+       reconnect. Your provider sees the connection to that address anyway, so the look-up tells it nothing new. Resolved
+       after the outages, through the VPN. #>
+    foreach ($n in $Name) {
+        $a = try { @([System.Net.Dns]::GetHostAddresses($n) | ForEach-Object { $_.IPAddressToString }) } catch { @() }
+        if (@($a | Where-Object { $Server -contains $_ }).Count) { $n }
+    }
+}
+
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {
     return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, [string[]]@($script:Servers.Keys), $Class)
 }
@@ -933,9 +960,18 @@ function Invoke-Disruptive {
         else {
             $dns = New-Object 'System.Collections.Generic.List[KsBench.Pkt]'
             foreach ($w in $script:DnsWindows) { $dns.AddRange((Get-Leak $w[0] $w[1] 'dns')) }
+            $own = @(Get-ServerName -Name @($dns | ForEach-Object { $_.QName } | Where-Object { $_ } | Select-Object -Unique) -Server @($script:Servers.Keys))
+            $mine = @($dns | Where-Object { $_.QName -and $own -contains $_.QName })    # the VPN server's own name: not a leak, shown
+            $dns = @($dns | Where-Object { -not ($_.QName -and $own -contains $_.QName) })
             $ev = Get-Evidence $dns $script:DnsWindows[0][0]
-            if ($dns.Count) { Set-Result 'D5' 'fail' "$($ev.packets) DNS packets went out while the VPN was down, to $(@($ev.to)[0..([Math]::Min(2, $ev.to.Count - 1))] -join ', ')" $ev }
-            else { Set-Result 'D5' 'pass' }
+            $names = @($dns | ForEach-Object { $_.QName } | Where-Object { $_ } | Sort-Object -Unique | Select-Object -First 5)
+            if ($ev -and $names.Count) { $ev['names'] = $names }
+            if ($mine.Count) { if (-not $ev) { $ev = [ordered]@{} }; $ev['server_name_lookups'] = [ordered]@{ packets = $mine.Count; names = @($own | Sort-Object) } }
+            $note = if ($mine.Count) { "$($mine.Count) look-ups of the VPN server's own name ($((@($own | Sort-Object)) -join ', ')) not counted" } else { '' }
+            if ($dns.Count) {
+                $d = "$($ev.packets) DNS packets went out while the VPN was down, to $(@($ev.to)[0..([Math]::Min(2, $ev.to.Count - 1))] -join ', ')" + $(if ($names.Count) { " - names: $($names -join ', ')" } else { '' })
+                Set-Result 'D5' 'fail' $(if ($note) { "$d; $note" } else { $d }) $ev
+            } else { Set-Result 'D5' 'pass' $note $ev }
         }
     }
     if (Test-Wanted 'V1') {

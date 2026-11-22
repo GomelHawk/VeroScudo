@@ -135,3 +135,10 @@ def test_constants_in_sync_with_ps1():
 
 def test_weights_add_up_to_100():
     assert sum(w for _, _, w, _ in ksbench.SCENARIOS) == 100
+
+
+def test_server_name_lookups_are_the_names_that_resolve_to_a_vpn_server():
+    answers = {"vpn.example.com": {"203.0.113.5"}, "news.example.org": {"198.51.100.7"}}
+    got = ksbench.server_names({"vpn.example.com", "news.example.org", None}, {"203.0.113.5": ("udp", 1194)},
+                               resolve=lambda n: answers.get(n, set()))
+    assert got == {"vpn.example.com"}

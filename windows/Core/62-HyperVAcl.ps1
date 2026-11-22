@@ -260,19 +260,20 @@ function Invoke-VeroActionNetDown {
     Invoke-VeroLocked {
         param($c, $a)
         if (-not (Test-VeroArmed)) { return }
-        $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]0 }
-        if (-not (Get-VeroNetSuspect)) { Write-VeroLog 'network disconnected - Hyper-V VMs blocked until the tunnel is proven to work again' $a }
-        # WSL first: one switch of its ready block rule (the VMs' port ACLs take seconds); then the VMs; then the note of why
-        $wsl = Test-VeroVmWanted -Config $c
-        try { if ($wsl) { Lock-VeroWslNow } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
-        # open connections of WSL and the VMs must not follow the route onto the physical adapter: at once, also while RAS
-        # still says "connected" (the sync keeps them while this drop is unproven, at most 30 s, or the tunnel is down)
-        if ($wsl -or (Get-VeroSwitchLuid)) {
+        # open connections of WSL and the VMs must not follow the route onto the physical adapter: first, before the firewall
+        # calls that take a second, also while RAS still says "connected" (the sync keeps them while this drop is unproven,
+        # at most 30 s, or the tunnel is down). A WSL or Default Switch adapter is up: .NET list, ~ms
+        if (Get-VeroNic | Where-Object { $_.Name -like 'vEthernet*' -and [string]$_.OperationalStatus -eq 'Up' }) {
             try {
                 $th = Get-VeroTypeHandler (Get-VeroConfigType $c); $st = Get-VeroAppliedState
                 if ($th.Dials -and -not (& $th.CrlWindow) -and $st -and @($st.Servers).Count) { Sync-VeroBlackhole -Want $true -ServerIps @($st.Servers) -Action $a }
             } catch { Write-VeroLog "ERROR: routes for WSL and VMs: $($_.Exception.Message)" $a }
         }
+        $tun = try { Get-VeroTunnelLuid $c.Profile -Type (Get-VeroConfigType $c) } catch { [uint64]0 }
+        if (-not (Get-VeroNetSuspect)) { Write-VeroLog 'network disconnected - Hyper-V VMs blocked until the tunnel is proven to work again' $a }
+        # WSL first: one switch of its ready block rule (the VMs' port ACLs take seconds); then the VMs; then the note of why
+        $wsl = Test-VeroVmWanted -Config $c
+        try { if ($wsl) { Lock-VeroWslNow } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
         $null = Set-VeroVmBlock -Block $true -Action $a
         try { if ($wsl) { Set-VeroVmAccess -Allow $false -Action $a } } catch { Write-VeroLog "ERROR: WSL could not be blocked: $($_.Exception.Message)" $a }
         try { Write-VeroStateFile -Path (Get-VeroPath).NetSuspect -Text (@{ Time = (Get-Date).ToString('o'); Tunnel = [string]$tun } | ConvertTo-Json) }

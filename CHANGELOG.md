@@ -39,6 +39,11 @@ All notable changes to VeroScudo are recorded here. The format follows
   Windows empties its DNS cache at a drop, so before this every redial opened DNS for about a second. If the rule is
   refused, the one-second DNS window is the fallback.
 
+### ksbench: D5 shows the names that leaked
+- D5 lists the names in the DNS packets it saw. A look-up of the VPN server's own name (it resolves to the server
+  address) is shown but not counted: the client needs it to reconnect, and your provider sees the connection to that
+  address anyway.
+
 ### ksbench: who sent a leak
 - Each leaked packet is told apart by its TTL: sent by the computer itself, or forwarded for a VM, WSL or a container.
   The computer's own leaks count in D1-D4, T1, T2; forwarded ones in the new test V1 *Virtual machines and WSL stay

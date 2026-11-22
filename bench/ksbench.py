@@ -70,11 +70,12 @@ _LAN = [ipaddress.ip_network(n) for n in (
 # ---------------------------------------------------------------- packets
 
 class Pkt:
-    __slots__ = ("dport", "dst", "itype", "proto", "sport", "src", "ttl", "ver")
+    __slots__ = ("dport", "dst", "itype", "proto", "qname", "sport", "src", "ttl", "ver")
 
     def __init__(self, ver, src, dst, proto, sport=None, dport=None, itype=None, ttl=None):
         self.ver, self.src, self.dst, self.proto = ver, src, dst, proto
         self.sport, self.dport, self.itype, self.ttl = sport, dport, itype, ttl
+        self.qname = None
 
     def where(self):
         name = {6: "tcp", 17: "udp", 1: "icmp", 58: "icmp6"}.get(self.proto, f"proto{self.proto}")
@@ -111,9 +112,38 @@ def parse_ip(b):
         return None
     if proto in (6, 17) and len(b) >= off + 4:
         p.sport, p.dport = struct.unpack_from("!HH", b, off)
+        if proto == 17 and p.dport == 53:
+            p.qname = dns_qname(b[off + 8:])
     elif proto in (1, 58) and len(b) > off:
         p.itype = b[off]
     return p
+
+
+def dns_qname(m):
+    """The name a DNS query asks for ('vpn.example.com'), or None when the captured bytes do not hold it whole."""
+    pos, labels = 12, []
+    while pos < len(m):
+        n = m[pos]
+        if n == 0:
+            return ".".join(labels).lower() if labels else None
+        if n > 63 or pos + 1 + n > len(m):
+            return None
+        labels.append(m[pos + 1:pos + 1 + n].decode("ascii", "replace"))
+        pos += 1 + n
+    return None
+
+
+def server_names(names, servers, resolve=None):
+    """Of the names looked up, those that resolve to a VPN server address - the client finding its own server for the
+    reconnect. Your provider sees the connection to that address anyway, so the look-up tells it nothing new. Resolved
+    after the outages, through the VPN."""
+    def lookup(n):
+        try:
+            return {ai[4][0].split("%")[0] for ai in socket.getaddrinfo(n, None)}
+        except OSError:
+            return set()
+    resolve = resolve or lookup
+    return {n for n in names if n and resolve(n) & set(servers)}
 
 
 def parse_frame(data, linktype):
@@ -1050,9 +1080,19 @@ class Bench:
                 dns = []
                 for t0, t1 in self.dns_windows:
                     dns += self.leaks(t0, t1)[1]
+                own = server_names({p.qname for _, p in dns}, self.servers)
+                mine = [x for x in dns if x[1].qname in own]          # the VPN server's own name: not a leak, shown
+                dns = [x for x in dns if x[1].qname not in own]
                 ev = self.evidence(dns, self.dns_windows[0][0]) if dns else {}
+                if dns:
+                    ev["names"] = sorted({p.qname for _, p in dns if p.qname})[:5]
+                if mine:
+                    ev["server_name_lookups"] = {"packets": len(mine), "names": sorted(own)}
+                note = f"; {len(mine)} look-ups of the VPN server's own name ({', '.join(sorted(own))}) not counted" if mine else ""
+                names = f" - names: {', '.join(ev['names'])}" if dns and ev.get("names") else ""
                 self.set("D5", "fail" if dns else "pass",
-                         f"{ev['packets']} DNS packets went out while the VPN was down, to {', '.join(ev['to'][:3])}" if dns else "", dns=ev)
+                         ((f"{ev['packets']} DNS packets went out while the VPN was down, to {', '.join(ev['to'][:3])}{names}" if dns else "")
+                         + note).lstrip("; "), dns=ev)
         if self.wanted("V1"):
             spans = list(windows) + ([self.steady_window] if getattr(self, "steady_window", (0, None))[1] else [])
             vm = []

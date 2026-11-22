@@ -206,6 +206,17 @@
     "cls": "vmleak",
     "ttl": 127
    }
+  },
+  {
+   "name": "dns query: the name it asks for",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500003d0000000040110000c0a80114c0a80101c7380035002900001234010000010000000000000376706e076578616d706c6503636f6d0000010001",
+   "expect": {
+    "dst": "192.168.1.1",
+    "dport": 53,
+    "qname": "vpn.example.com",
+    "cls": "dns"
+   }
   }
  ],
  "pcapng": {

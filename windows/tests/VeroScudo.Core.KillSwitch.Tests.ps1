@@ -1027,7 +1027,8 @@ Describe 'WSL and VMs: the internet routed to nowhere while the tunnel is down (
         Mock -ModuleName VeroScudo.Core Sync-VeroBlackhole { [void]$global:VeroTestRoutes.Add("want $Want $($ServerIps -join ',')") }
         Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
         Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $true }
-        Mock -ModuleName VeroScudo.Core Lock-VeroWslNow { }
+        Mock -ModuleName VeroScudo.Core Lock-VeroWslNow { [void]$global:VeroTestRoutes.Add('wsl rule') }
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { [pscustomobject]@{ Name = 'vEthernet (WSL)'; OperationalStatus = 'Up' } }
         Mock -ModuleName VeroScudo.Core Set-VeroVmAccess { }
         Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { 1 }
         Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]42 }
@@ -1035,7 +1036,7 @@ Describe 'WSL and VMs: the internet routed to nowhere while the tunnel is down (
         Remove-TestFile @((Get-VeroPath).NetSuspect)
         $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"},"vm":true}'
         Invoke-VeroAction -Action netdown -Config $c
-        @($global:VeroTestRoutes) | Should -Be @('want True 203.0.113.5')
+        @($global:VeroTestRoutes) | Should -Be @('want True 203.0.113.5', 'wsl rule')      # the routes first: the rule's call takes a second
         Remove-TestFile @((Get-VeroPath).NetSuspect)
     }
 }
