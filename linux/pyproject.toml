@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==80.9.0"]     # exact: what builds the package in CI
+requires = ["setuptools==84.2.1"]     # exact: what builds the package in CI
 build-backend = "setuptools.build_meta"
 
 [project]
