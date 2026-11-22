@@ -231,10 +231,19 @@ Their packets are forwarded, not sent by the host, so they need their own contro
   (`VeroScudo-WSL-Block`, off while the tunnel is up) is switched on first at a drop - one switch, it beats the allow rule;
   removed first on Off. The drop is noticed by the watchdog itself: it looks every second whether the route to the
   internet still leads into the tunnel it saw holding it (`GetBestInterface`, `Test-VeroRouteLeft`) and listens for
-  Windows' address changes - RAS reports a dead SSTP tunnel up to ~20 s late. Limit: in WSL's NAT mode connections WSL
-  had already opened go on over the physical card until they break (~10 s measured); the Hyper-V firewall judges only
-  new connections, and WFP never sees the translated traffic (its forwarding layers included - tested). WSL's mirrored
-  mode routes WSL through Windows' own stack and closes this.
+  Windows' address changes - RAS reports a dead SSTP tunnel up to ~20 s late. In WSL's NAT mode the Hyper-V firewall judges only
+  new connections and WFP never sees the translated traffic (its forwarding layers included - tested), so connections
+  WSL had already opened would follow the route onto the physical card. While armed, the tunnel down, VMs protected and
+  a type VeroScudo dials: `Sync-VeroBlackhole` (62-HyperVAcl.ps1) adds IPv4 routes on the loopback adapter covering
+  everything except the VPN server addresses, the adapters' on-link networks and (while the redial's DNS window is open)
+  the DNS servers - `Get-VeroBlackholePrefix`, about 30 per excluded address - through `CreateIpForwardEntry2`
+  (`VeroScudo.Route`, metric 7, active store only), recorded in `state\blackhole.json`. At once in the NetDown path (the
+  watchdog saw the route leave the tunnel - also while RAS still says "connected"), kept by the sync while that drop is
+  unproven (the net-suspect note, at most 30 s) or the tunnel is down - before its route checks (a tunnel that is back
+  must not look split); the proof is sent from the tunnel's own address, so the routes do not stand in its way. Removed
+  when the tunnel is up or proven,
+  by Off (`Remove-VeroBlackhole`, also leftovers with metric 7 on loopback) and by uninstall. Not for Hiddify, not during
+  the SSTP revocation window.
 - **Windows (Hyper-V Default Switch)**: Windows itself is its VMs' DHCP server and DNS proxy, on the host adapter
   `vEthernet (Default Switch)`. That adapter is allowed by interface only while the tunnel is up (the DNS proxy then
   resolves through the tunnel); while blocked the VMs get nothing from Windows. `vm: false`: always open (left alone).
@@ -451,7 +460,10 @@ how long the profile was connected that day and *good %* (the share of that time
 - **Colours:** a bar is cut into rating windows of Settings > *Rate the last* minutes (1 min: 10 windows, 2 min: 5; a
   shorter rest joins the last window), each rated with the connection check's thresholds - green under 10 % lost, amber
   10-50 %, brown over 50 % - and the bar takes the **worst** window's colour; its tooltip names that window ("14:23-14:24:
-  1 of 3 checks lost; all 10 min: ..."). Grey = this profile not connected. With the check off there is nothing to rate:
+  1 of 3 checks lost; all 10 min: ..."). A bar is also never better than the **live rating** shown in it: the status
+  window rates the last minutes counted back from now, which can straddle two windows here, so each minute keeps the
+  worst rating shown in it (`,"rated":"bad"` / `"unstable"`) and the bar takes it ("the connection check rated it bad at
+  14:33"). Grey = this profile not connected. With the check off there is nothing to rate:
   connected time is green. A bar with a **lost connection** (VeroScudo redialed) is brown ("connection lost at 14:23"),
   and so is a bar with **2 or more minutes on but not connected** ("could not connect N of 10 min"); the day's line adds
   *· no connection 42 min*, and *good %* is counted over connected + not-connected time. A later change of *Rate the

@@ -5,6 +5,18 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Windows: connections WSL already had open stop too when the VPN drops
+- The Hyper-V firewall blocks WSL's new connections at a drop, but ones already open followed the route onto the
+  Wi-Fi/Ethernet card (up to 25 s measured). While the tunnel is down, VeroScudo now also routes the internet to nowhere
+  on the loopback adapter - everything except the VPN server and the networks you are on - so they have no way out.
+  They come within a second of the drop, also while Windows' VPN client still reports the tunnel as connected.
+  The routes go the moment the tunnel is up, and with Off, uninstall or a reboot. The same for Hyper-V Default Switch VMs.
+
+### Statistics: a bar is never better than what the status showed
+- When the status window rated the connection bad (or unstable), the statistics bar for that time now shows it too. The
+  status rates the last minutes counted back from now; the bars rated whole clock minutes, so a bad stretch across two
+  minutes (e.g. 5 of 10 lost, then 2 of 10) could show amber or green while the status said "bad - 70 % lost".
+
 ### Connection check on by default: a tunnel that carries nothing is reconnected
 - The connection check (Settings > Connection) is now on unless turned off - a config without it gets it. It is what
   notices a tunnel that is up but carries nothing (a server gone silent, a tunnel adapter that lost its routes) and
@@ -35,9 +47,7 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ### Windows: WSL blocked within a second of a drop
 - The watchdog looks every second whether the route to the internet still leads into the tunnel - RAS reports a dead
-  SSTP tunnel up to ~20 s late - and WSL is then blocked first, by switching on a ready Hyper-V block rule. Connections
-  WSL already had open can still go on for a few seconds in WSL's default (NAT) mode; WSL's mirrored mode closes that
-  (README, *WSL on Windows*).
+  SSTP tunnel up to ~20 s late - and WSL is then blocked first, by switching on a ready Hyper-V block rule.
 
 ### Windows, SSTP: the revocation window after a connect lasts 20 s
 - After an SSTP tunnel connects, HTTP for the certificate-revocation check stays allowed for 20 s instead of 2 minutes:

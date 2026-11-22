@@ -363,6 +363,7 @@ function Update-VeroQuality {
     $keep = @($script:QualitySamples.ToArray() | Where-Object { ($now - [double]$_.T) -le ($win + 1) })   # .ToArray(): @(<List>) throws on PowerShell 5.1
     $script:QualitySamples.Clear(); foreach ($s in $keep) { $script:QualitySamples.Add($s) }
     $q = Measure-VeroQuality -Samples $script:QualitySamples.ToArray() -Now $now -WindowSeconds $win -Since $script:QualityStarted
+    try { Add-VeroStatsRating -State $q.State -Id $cfg.ProfileId -Name $cfg.Profile } catch { Write-VeroLog "ERROR: statistics: $($_.Exception.Message)" $Action }   # the bar is never better than what the status showed
     $p = (Get-VeroPath).Quality
     $per = @(Get-VeroQualityPerTarget -Samples $script:QualitySamples.ToArray() -Targets @($chk.Targets) -Now $now -WindowSeconds $win)
     $json = [ordered]@{ profile = $cfg.Profile; state = $q.State; lossPct = $q.LossPct; rttMs = $q.RttMs; checks = $q.Checks; lost = $q.Lost; slow = $q.Slow

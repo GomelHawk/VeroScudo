@@ -252,14 +252,14 @@ side-channel - it is needed to find the VPN server (on Windows and macOS another
 out too). Nothing else leaves the machine: no LAN, no printers over the network, no QUIC, no
 ping, no IPv6, and no app gets through on the strength of its own firewall rule.
 
-**WSL on Windows - one known limit.** In WSL's default network mode (NAT), Windows translates WSL's
+**WSL and Hyper-V VMs on Windows.** In WSL's default network mode (NAT), Windows translates WSL's
 traffic below every filter a program can set, so VeroScudo controls it with the Hyper-V firewall: WSL
-may go out only while the tunnel is proven to work. When the tunnel drops, VeroScudo blocks WSL within
-about a second - but connections WSL already had open can go on over the Wi-Fi/Ethernet card for a
-few seconds until they break by themselves (the Hyper-V firewall judges only new connections).
-Programs on Windows itself are not affected. To close this for WSL too, switch WSL to mirrored
-networking (`networkingMode=mirrored` under `[wsl2]` in `%USERPROFILE%\.wslconfig`, then
-`wsl --shutdown`): WSL then uses Windows' own network stack and VeroScudo's filters like any program.
+may go out only while the tunnel is proven to work. That firewall judges only new connections - those
+WSL already had open would follow the route onto the Wi-Fi/Ethernet card. So while the tunnel is down,
+VeroScudo also routes the internet to nowhere: routes on the loopback adapter, more specific than the
+default route, for everything except the VPN server and the networks you are on (your LAN keeps
+working). They exist only while the tunnel is down - removed the moment it is up, by Off and by
+uninstall, and a reboot clears them anyway (`route print` shows them with metric 7 meanwhile).
 
 ## Profile types
 

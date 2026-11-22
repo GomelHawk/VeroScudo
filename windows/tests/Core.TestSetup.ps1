@@ -46,6 +46,10 @@
     Mock -ModuleName VeroScudo.Core Start-VeroDnsLookup { [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@()) }
     # the local DNS answer (Update-VeroLocalDns): never a real listener on 127.0.0.53:53 from a test (the watchdog loop runs it)
     Mock -ModuleName VeroScudo.Core Update-VeroLocalDns { }
+    # routes (Sync-VeroBlackhole): never a real route from a test - "added" / "removed" at once, an empty routing table
+    Mock -ModuleName VeroScudo.Core Add-VeroRoute { [uint32]0 }
+    Mock -ModuleName VeroScudo.Core Remove-VeroRoute { [uint32]0 }
+    Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { }
     Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { }
     Mock -ModuleName VeroScudo.Core Get-VeroVmAdapterAcl { }
     Mock -ModuleName VeroScudo.Core Add-VeroVmAdapterAcl { }

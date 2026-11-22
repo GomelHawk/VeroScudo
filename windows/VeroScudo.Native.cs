@@ -483,6 +483,86 @@ namespace VeroScudo
         }
     }
 
+    /// <summary>Routes for the "internet leads nowhere" while the tunnel is down (WSL and VM traffic is NAT-forwarded by
+    /// Windows and follows the routing table, not the host's WFP filters). Created in the active store only - gone after a
+    /// reboot - with Marker as their metric, so a route VeroScudo made is recognised again. One system call per route (the
+    /// CIM cmdlets take ~100 ms each). MIB_IPFORWARD_ROW2 is read and written as raw bytes at its documented offsets; Read()
+    /// is how a test checks those offsets against the real table.</summary>
+    public static class Route
+    {
+        public const int Marker = 7;
+        const int RowSize = 104;              // sizeof(MIB_IPFORWARD_ROW2)
+        const int OffIndex = 8, OffPrefix = 12, OffPrefixLen = 40, OffNextHop = 44, OffMetric = 84;
+
+        static void WriteAddr(IntPtr row, int off, IPAddress ip)
+        {
+            byte[] b = ip.GetAddressBytes();
+            if (ip.AddressFamily == AddressFamily.InterNetwork) { Marshal.WriteInt16(row, off, 2); Marshal.Copy(b, 0, row + off + 4, 4); }
+            else { Marshal.WriteInt16(row, off, 23); Marshal.Copy(b, 0, row + off + 8, 16); }
+        }
+
+        static IntPtr Build(uint ifIndex, string prefix, int length)
+        {
+            IPAddress ip = IPAddress.Parse(prefix);
+            int max = ip.AddressFamily == AddressFamily.InterNetwork ? 32 : 128;
+            if (length < 1 || length > max) throw new ArgumentOutOfRangeException("length");
+            IntPtr row = Marshal.AllocHGlobal(RowSize);
+            for (int i = 0; i < RowSize; i++) Marshal.WriteByte(row, i, 0);
+            Native.InitializeIpForwardEntry(row);
+            Marshal.WriteInt64(row, 0, 0);                                  // by index, not LUID
+            Marshal.WriteInt32(row, OffIndex, (int)ifIndex);
+            WriteAddr(row, OffPrefix, ip);
+            Marshal.WriteByte(row, OffPrefixLen, (byte)length);
+            WriteAddr(row, OffNextHop, ip.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any);   // on-link
+            Marshal.WriteInt32(row, OffMetric, Marker);
+            return row;
+        }
+
+        /// <summary>0 = added; 5010 = it exists already; any other value: the Win32 error.</summary>
+        public static uint Add(uint ifIndex, string prefix, int length)
+        {
+            IntPtr row = Build(ifIndex, prefix, length);
+            try { return Native.CreateIpForwardEntry2(row); } finally { Marshal.FreeHGlobal(row); }
+        }
+
+        /// <summary>0 = removed; 1168 = not there; any other value: the Win32 error.</summary>
+        public static uint Delete(uint ifIndex, string prefix, int length)
+        {
+            IntPtr row = Build(ifIndex, prefix, length);
+            try { return Native.DeleteIpForwardEntry2(row); } finally { Marshal.FreeHGlobal(row); }
+        }
+
+        static string ReadAddr(IntPtr row, int off)
+        {
+            short fam = Marshal.ReadInt16(row, off);
+            byte[] b = new byte[fam == 2 ? 4 : 16];
+            if (fam == 2) Marshal.Copy(row + off + 4, b, 0, 4); else if (fam == 23) Marshal.Copy(row + off + 8, b, 0, 16); else return null;
+            return new IPAddress(b).ToString();
+        }
+
+        /// <summary>The whole routing table (IPv4 and IPv6) as "ifIndex|prefix/length|nextHop|metric".</summary>
+        public static string[] Read()
+        {
+            IntPtr table;
+            uint r = Native.GetIpForwardTable2(0, out table);
+            if (r != 0) throw new InvalidOperationException("GetIpForwardTable2 failed: " + r);
+            try
+            {
+                int n = Marshal.ReadInt32(table, 0);
+                var list = new List<string>(n);
+                for (int i = 0; i < n; i++)
+                {
+                    IntPtr row = table + 8 + i * RowSize;
+                    string pre = ReadAddr(row, OffPrefix), hop = ReadAddr(row, OffNextHop);
+                    if (pre == null || hop == null) continue;
+                    list.Add(string.Format("{0}|{1}/{2}|{3}|{4}", (uint)Marshal.ReadInt32(row, OffIndex), pre, Marshal.ReadByte(row, OffPrefixLen), hop, (uint)Marshal.ReadInt32(row, OffMetric)));
+                }
+                return list.ToArray();
+            }
+            finally { Native.FreeMibTable(table); }
+        }
+    }
+
     /// <summary>A DNS responder on a loopback address that answers ONLY the VPN server's names, with the addresses
     /// VeroScudo has cached - for the NRPT rule that sends exactly those names here while the tunnel is down, so the redial
     /// finds its server without a DNS packet leaving the PC. Every other name: REFUSED. Never reachable from the network.</summary>
@@ -782,6 +862,11 @@ namespace VeroScudo
         [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)] internal static extern uint FwpmGetAppIdFromFileName0(string fileName, out IntPtr appId);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceIndexToLuid(uint ifIndex, out ulong luid);
         [DllImport("iphlpapi.dll")] internal static extern uint GetBestInterface(uint destAddr, out uint bestIfIndex);
+        [DllImport("iphlpapi.dll")] internal static extern void InitializeIpForwardEntry(IntPtr row);
+        [DllImport("iphlpapi.dll")] internal static extern uint CreateIpForwardEntry2(IntPtr row);
+        [DllImport("iphlpapi.dll")] internal static extern uint DeleteIpForwardEntry2(IntPtr row);
+        [DllImport("iphlpapi.dll")] internal static extern uint GetIpForwardTable2(ushort family, out IntPtr table);
+        [DllImport("iphlpapi.dll")] internal static extern void FreeMibTable(IntPtr memory);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceGuidToLuid(ref Guid guid, out ulong luid);
         [DllImport("rasapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "RasDialW")]
         internal static extern uint RasDial(IntPtr extensions, string phonebook, IntPtr dialParams, uint notifierType, IntPtr notifier, out IntPtr rasConn);

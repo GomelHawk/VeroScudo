@@ -49,6 +49,9 @@ if (Test-Path $core) {
     Remove-NetFirewallHyperVRule -Name VeroScudo-WSL-Block -ErrorAction SilentlyContinue
     Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { [string]$_.Comment -eq 'VeroScudo: the VPN server while the tunnel is down' } |
         ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }
+    # the routes to nowhere for WSL and VMs: on the loopback adapter with VeroScudo's metric (7), never 127.x / ::1
+    Get-NetRoute -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'Loopback*' -and $_.RouteMetric -eq 7 -and $_.DestinationPrefix -notlike '127.*' -and $_.DestinationPrefix -ne '::1/128' } |
+        Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
 }
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WcmSvc' -Name EnableBadStateTracking -ErrorAction SilentlyContinue
 $d = [Environment]::GetFolderPath('Desktop')

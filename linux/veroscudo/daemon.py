@@ -737,6 +737,10 @@ class Guard:
             log.exception("statistics")
         self.dead_check(cfg, results)
         q = self.quality.add_round(chk, cfg.profile, results, down_at=self.store.last_down())
+        try:
+            self.stats.rated(q.state, cfg.current.id, cfg.profile)          # the bar is never better than what the status showed
+        except OSError:
+            log.exception("statistics")
         if q.state != "checking" and q.state != self.quality.last_state:
             log.info("connection quality: %s (%s of %s checks lost, %s slow, %s)", q.state, q.lost, q.checks, q.slow,
                      f"{q.rtt_ms} ms" if q.rtt_ms is not None else "no answer")

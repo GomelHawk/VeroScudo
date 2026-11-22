@@ -931,3 +931,120 @@ Describe 'the note that the local DNS answer runs' {
         & (Get-Module VeroScudo.Core) { Get-VeroLocalDnsAddress } | Should -BeNullOrEmpty         # never a non-loopback address
     }
 }
+
+Describe 'WSL and VMs: the internet routed to nowhere while the tunnel is down (routes mocked)' {
+    BeforeEach {
+        $global:VeroTestRoutes = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Add-VeroRoute { [void]$global:VeroTestRoutes.Add("add $IfIndex $Prefix/$Length"); [uint32]0 }
+        Mock -ModuleName VeroScudo.Core Remove-VeroRoute { [void]$global:VeroTestRoutes.Add("del $IfIndex $Prefix/$Length"); [uint32]0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { '12|192.168.100.0/24|0.0.0.0|256', '12|0.0.0.0/0|192.168.100.1|25', '1|127.0.0.0/8|0.0.0.0|256' }
+        $p = (Get-VeroPath).Blackhole; if (Test-Path $p) { Remove-TestFile @($p) }
+        $script:lo = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
+    }
+    It 'covers everything but the server, the LAN and the DNS servers given - each address exactly once' {
+        $ex = Get-VeroBlackholeExclude -ServerIps @('203.0.113.5', 'not-an-ip') -Dns @('198.51.100.53') -Table @('12|192.168.100.0/24|0.0.0.0|256', '12|0.0.0.0/0|192.168.100.1|25', '5|0.0.0.0/1|0.0.0.0|5', '1|127.0.0.0/8|0.0.0.0|256') -Loopback @(1)
+        @($ex) | Should -Be @('203.0.113.5', '198.51.100.53', '192.168.100.0/24')         # no default route, nothing wider than /4, not loopback
+        $all = Get-VeroBlackholePrefix -Exclude $ex
+        $all = @($all | Where-Object { -not $_.Contains(':') })
+        $in = { param($a, $pre) $x = [System.Net.IPAddress]::Parse($a).GetAddressBytes(); $q = $pre.Split('/'); $y = [System.Net.IPAddress]::Parse($q[0]).GetAddressBytes(); $n = [int]$q[1]
+            for ($i = 0; $i -lt $n; $i++) { if ((($x[$i -shr 3] -shr (7 - ($i -band 7))) -band 1) -ne (($y[$i -shr 3] -shr (7 - ($i -band 7))) -band 1)) { return $false } }; $true }
+        foreach ($a in '203.0.113.5', '198.51.100.53', '192.168.100.7') { @($all | Where-Object { & $in $a $_ }).Count | Should -Be 0 -Because $a }
+        foreach ($a in '203.0.113.4', '203.0.113.6', '8.8.8.8', '160.79.104.10', '192.168.101.1', '255.255.255.254') { @($all | Where-Object { & $in $a $_ }).Count | Should -Be 1 -Because $a }
+        $z = Get-VeroBlackholePrefix; $z | Should -Be @('0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1')
+    }
+    It 'tunnel down: adds the routes on the loopback adapter and records them; the next pass asks Windows nothing' {
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        $n = @($global:VeroTestRoutes | Where-Object { $_ -like "add $script:lo *" }).Count
+        $n | Should -BeGreaterThan 30
+        @($global:VeroTestRoutes | Where-Object { $_ -like 'del *' }).Count | Should -Be 0
+        @(& (Get-Module VeroScudo.Core) { Get-VeroBlackholeRecord }).Count | Should -Be $n
+        $global:VeroTestRoutes.Clear()
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        $global:VeroTestRoutes.Count | Should -Be 0
+    }
+    It 'tunnel up: removes exactly what it added, and the record' {
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        $added = @($global:VeroTestRoutes | ForEach-Object { $_.Substring(4) }); $global:VeroTestRoutes.Clear()
+        Sync-VeroBlackhole -Want $false -Action test
+        @($global:VeroTestRoutes | ForEach-Object { $_.Substring(4) } | Sort-Object) | Should -Be @($added | Sort-Object)
+        @(& (Get-Module VeroScudo.Core) { Get-VeroBlackholeRecord }).Count | Should -Be 0
+    }
+    It 'a route Windows refuses: logged once, kept out of the record, tried again' {
+        Mock -ModuleName VeroScudo.Core Add-VeroRoute { [uint32]5 }
+        Mock -ModuleName VeroScudo.Core Write-VeroLog { [void]$global:VeroTestRoutes.Add("log $Message") }
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        @($global:VeroTestRoutes | Where-Object { $_ -like 'log WARNING: Windows refused a route*' }).Count | Should -Be 1
+        Test-Path (Get-VeroPath).Blackhole | Should -BeFalse
+    }
+    It 'Off: also removes a leftover with VeroScudo''s metric on the loopback adapter, never 127.x or other routes' {
+        Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { "$script:lo|0.0.0.0/1|0.0.0.0|7", "$script:lo|127.0.0.0/8|0.0.0.0|7", "$script:lo|10.0.0.0/8|0.0.0.0|256", '12|128.0.0.0/1|0.0.0.0|7' }
+        Remove-VeroBlackhole -Action test
+        @($global:VeroTestRoutes) | Should -Be @("del $script:lo 0.0.0.0/1")
+    }
+    It 'the sync: routes only while the tunnel is down, VMs protected and a server address known' {
+        Remove-TestFile @((Get-VeroPath).NetSuspect)
+        Mock -ModuleName VeroScudo.Core Sync-VeroBlackhole { [void]$global:VeroTestRoutes.Add("want $Want") }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]0 }
+        Mock -ModuleName VeroScudo.Core Get-VeroWslLuid { [uint64]77 }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $true }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmAccess { }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { 1 }
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelHoldsDefault { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelCarries { $true }
+        $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"},"vm":true}'
+        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
+        @($global:VeroTestRoutes) | Should -Contain 'want True'
+        $global:VeroTestRoutes.Clear()
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]42 }
+        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
+        @($global:VeroTestRoutes) | Should -Contain 'want False'
+        # a drop the watchdog saw while RAS still says "connected" (the same tunnel, not proven): routes for at most 30 s
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelCarries { $false }
+        @{ Time = (Get-Date).AddSeconds(-3).ToString('o'); Tunnel = '42' } | ConvertTo-Json | Set-Content (Get-VeroPath).NetSuspect
+        $global:VeroTestRoutes.Clear()
+        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
+        @($global:VeroTestRoutes) | Should -Contain 'want True'
+        @{ Time = (Get-Date).AddSeconds(-40).ToString('o'); Tunnel = '42' } | ConvertTo-Json | Set-Content (Get-VeroPath).NetSuspect
+        $global:VeroTestRoutes.Clear()
+        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
+        @($global:VeroTestRoutes) | Should -Contain 'want False'
+        # proven (the tunnel carries traffic): the note goes, and so do the routes
+        @{ Time = (Get-Date).AddSeconds(-3).ToString('o'); Tunnel = '42' } | ConvertTo-Json | Set-Content (Get-VeroPath).NetSuspect
+        Mock -ModuleName VeroScudo.Core Test-VeroTunnelCarries { $true }
+        $global:VeroTestRoutes.Clear()
+        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
+        @($global:VeroTestRoutes) | Should -Contain 'want False'
+        Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
+    }
+    It 'a drop note counts for 30 s; an unreadable time never' {
+        Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-10).ToString('o') }) | Should -BeTrue
+        Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-31).ToString('o') }) | Should -BeFalse
+        Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = '' }) | Should -BeFalse
+    }
+    It 'netdown: routes at once, also while RAS still says connected' {
+        Mock -ModuleName VeroScudo.Core Sync-VeroBlackhole { [void]$global:VeroTestRoutes.Add("want $Want $($ServerIps -join ',')") }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $true }
+        Mock -ModuleName VeroScudo.Core Lock-VeroWslNow { }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmAccess { }
+        Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { 1 }
+        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]42 }
+        Mock -ModuleName VeroScudo.Core Get-VeroAppliedState { [pscustomobject]@{ Servers = @('203.0.113.5') } }
+        Remove-TestFile @((Get-VeroPath).NetSuspect)
+        $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"},"vm":true}'
+        Invoke-VeroAction -Action netdown -Config $c
+        @($global:VeroTestRoutes) | Should -Be @('want True 203.0.113.5')
+        Remove-TestFile @((Get-VeroPath).NetSuspect)
+    }
+}
+
+Describe 'the native route reader (read-only: the real routing table)' {
+    It 'reads the loopback adapter''s own 127.0.0.0/8 route at the offsets the route helper writes' {
+        $lo = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
+        $t = @([VeroScudo.Route]::Read())
+        $t.Count | Should -BeGreaterThan 0
+        @($t | Where-Object { $_ -like "$lo|127.0.0.0/8|0.0.0.0|*" }).Count | Should -Be 1
+    }
+}

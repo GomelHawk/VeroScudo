@@ -279,6 +279,21 @@ Describe 'Statistics: minutes per profile, day rows, bar texts' {
         Update-VeroStats -Up $false -Now $t.AddSeconds(120)
         @(Get-Content -LiteralPath (Join-Path $script:statsDir '2026-11-07.jsonl')) | Should -Be @('{"m":605,"id":"aaa","p":"Work","sent":3,"lost":1}', '{"m":605,"id":"bbb","p":"Home"}')
     }
+    It 'a bar is never better than the live rating shown in it (the status window straddles two minutes)' {
+        # 14:32 lost 5 of 10 (unstable), 14:33 lost 2 of 10 - the status window's last minute held all 7: 70 %, bad
+        $t = [datetime]'2026-11-20 14:32:30'
+        Add-VeroStatsChecks -Sent 10 -Lost 5 -Id 'h' -Name 'Hiddify' -Now $t
+        Add-VeroStatsChecks -Sent 10 -Lost 2 -Id 'h' -Name 'Hiddify' -Now $t.AddSeconds(50)
+        Add-VeroStatsRating -State 'unstable' -Id 'h' -Name 'Hiddify' -Now $t.AddSeconds(55)
+        Add-VeroStatsRating -State 'bad' -Id 'h' -Name 'Hiddify' -Now $t.AddSeconds(60)
+        Add-VeroStatsRating -State 'good' -Id 'h' -Name 'Hiddify' -Now $t.AddSeconds(70)
+        Save-VeroStatsMinute
+        $text = [IO.File]::ReadAllText((Join-Path $script:statsDir '2026-11-20.jsonl'))
+        $text | Should -BeLike '*{"m":873,"id":"h","p":"Hiddify","sent":10,"lost":2,"rated":"bad"}*'
+        $bar = (ConvertTo-VeroStatsDay -Minutes (ConvertFrom-VeroStatsText -Text $text).Data['h']).Bars[87]
+        $bar.State | Should -Be 'bad'; $bar.RatedAt | Should -Be 873
+        Format-VeroStatsBar -Bar $bar | Should -BeLike '*rated it bad at 14:33*'
+    }
     It 'writes an up minute without checks, and the last minute when the watchdog stops' {
         Update-VeroStats -Up $true -Id 'aaa' -Name 'Work' -Now ([datetime]'2026-11-07 23:59:30')
         Save-VeroStatsMinute

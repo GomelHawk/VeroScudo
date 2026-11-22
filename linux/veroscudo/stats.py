@@ -2,7 +2,8 @@
 
 The daemon notes, minute by minute, which VeroScudo profile was up and - when the connection check is on - how many of its
 checks were sent, lost and slow (answered, but over 1 s per round trip) in that minute. One file per local day, <state>/stats/yyyy-mm-dd.jsonl, one line per minute and
-profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1 (+ ,"slow":2 when any);
+profile with the VPN up: {"m":605,"id":"3f2a9c0d1e2b","p":"Work"} (up, check off) or the same with "sent":3,"lost":1 (+ ,"slow":2 when any;
++ ,"rated":"bad" or "unstable" when the live rating - the status window's, over the last minutes - showed that in this minute);
 a minute VeroScudo was on but could not connect: the same with "down":1 (shown as bad - a redial that keeps failing);
 a minute the connected profile was lost (VeroScudo on, the same profile, then redialed): + ,"drop":1 (its bar is bad).
 Per profile: a corporate VPN and a home one are different connections - their problems must not be mixed. "id" is the
@@ -27,17 +28,21 @@ _FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 
 
 def format_line(minute: int, pid: str, name: str, sent: int = 0, lost: int = 0, down: bool = False, slow: int = 0,
-                drop: bool = False) -> str:
+                drop: bool = False, rated: int = 0) -> str:
     head = f'{{"m":{minute},"id":{json.dumps(pid)},"p":{json.dumps(name, ensure_ascii=True)}'
     tail = ',"drop":1}' if drop else "}"
     if down:
         return head + ',"down":1' + tail
     if sent <= 0:
         return head + tail
-    return f'{head},"sent":{sent},"lost":{lost}' + (f',"slow":{slow}' if slow > 0 else "") + tail
+    return (f'{head},"sent":{sent},"lost":{lost}' + (f',"slow":{slow}' if slow > 0 else "")
+            + (f',"rated":"{_NAME[rated]}"' if rated in (1, 2) else "") + tail)
 
 
-Minutes = dict[int, tuple]  # minute -> (sent, lost, down, slow, drop); down: on, but not connected all minute; drop: the connection was lost
+Minutes = dict[int, tuple]  # minute -> (sent, lost, down, slow, drop, rated); down: on, but not connected all minute; drop: the
+#                             connection was lost; rated: the worst live rating shown in the minute (0 good/none, 1 unstable, 2 bad)
+_RANK = {"good": 0, "unstable": 1, "bad": 2}
+_NAME = {v: k for k, v in _RANK.items()}
 
 
 def parse(text: str) -> tuple[dict[str, Minutes], dict[str, str]]:
@@ -55,14 +60,15 @@ def parse(text: str) -> tuple[dict[str, Minutes], dict[str, str]]:
             slow = min(int(j.get("slow", 0)), sent - lost)
             down = j.get("down") == 1
             drop = j.get("drop") == 1
+            rated = _RANK.get(j.get("rated"), 0) if isinstance(j.get("rated"), str) else 0
         except (ValueError, KeyError, TypeError):
             continue
         if not (isinstance(pid, str) and pid and isinstance(name, str) and 0 <= minute < 1440 and sent >= 0 and lost >= 0
                 and slow >= 0):
             continue
         day = out.setdefault(pid, {})
-        s0, l0, d0, w0, x0 = day.get(minute, (0, 0, True, 0, False))
-        day[minute] = (s0 + sent, l0 + lost, d0 and down, w0 + slow, x0 or drop)
+        s0, l0, d0, w0, x0, r0 = day.get(minute, (0, 0, True, 0, False, 0))
+        day[minute] = (s0 + sent, l0 + lost, d0 and down, w0 + slow, x0 or drop, max(r0, rated))
         names[pid] = name
     return out, names
 
@@ -92,6 +98,7 @@ class Bar:
     worst_lost: int = 0
     worst_slow: int = 0
     drop_at: int = -1                 # the bar's first minute the connection was lost (VeroScudo redialed); -1: none
+    rated_at: int = -1                # the live rating made the bar worse: its first minute with that rating; -1: it did not
 
 
 DOWN_BAD = 2                          # a bar with this many minutes on-but-not-connected is bad (a redial that keeps failing)
@@ -104,8 +111,6 @@ class Day:
     good_pct: int | None = None       # good connected minutes out of connected + down minutes
     down_minutes: int = 0             # on, but not connected
 
-
-_RANK = {"good": 0, "unstable": 1, "bad": 2}
 
 
 def _worst_window(minutes: Minutes, start: int, end: int, window: int) -> tuple[int, int, int, int, int] | None:
@@ -135,15 +140,18 @@ def day_row(minutes: Minutes, bucket: int = BUCKET_MINUTES, until: int = 1440, w
     """A day's minutes -> its bars and totals. A bar is as good as its worst rating window of `window` minutes (Settings >
     "Rate the last"): one bad minute in ten makes the bar bad. good_pct: the share of good minutes ('up' counts as good:
     the VPN worked and nothing was measured) out of the connected and the could-not-connect minutes. A bar with DOWN_BAD
-    or more could-not-connect minutes is bad. until: today - later empty bars are 'future'. Pure."""
+    or more could-not-connect minutes is bad. Never better than the worst live rating shown in it (the status window rates the
+    last minutes, which can straddle two windows here). until: today - later empty bars are 'future'. Pure."""
     bars, vpn, good, down_all = [], 0, 0, 0
     for start in range(0, 1440, bucket):
-        up = down = sent = lost = slow = 0
-        drop_at = -1
+        up = down = sent = lost = slow = rated = 0
+        drop_at = rated_first = -1
         for m in range(start, min(start + bucket, 1440)):
             v = minutes.get(m)
             if v is None:
                 continue
+            if len(v) > 5 and v[5] > rated:
+                rated, rated_first = v[5], m
             if len(v) > 4 and v[4] and drop_at < 0:
                 drop_at = m
             if len(v) > 2 and v[2]:
@@ -156,11 +164,14 @@ def day_row(minutes: Minutes, bucket: int = BUCKET_MINUTES, until: int = 1440, w
         worst = _worst_window(minutes, start, min(start + bucket, 1440), window)
         state = ("future" if start >= until and up == 0 and down == 0 else "bad" if down >= DOWN_BAD or drop_at >= 0
                  else bar_state(up, *worst[2:]) if worst else bar_state(up, sent, lost, slow))
+        rated_at = -1
+        if state in ("up", "good", "unstable") and up and rated > _RANK.get(state, 0):
+            state, rated_at = _NAME[rated], rated_first
         vpn += up
         down_all += down
         if state in ("good", "up"):
             good += up
-        bars.append(Bar(start, state, up, sent, lost, down, slow, *(worst or (0, 0, 0, 0, 0)), drop_at))
+        bars.append(Bar(start, state, up, sent, lost, down, slow, *(worst or (0, 0, 0, 0, 0)), drop_at, rated_at))
     total = vpn + down_all
     return Day(bars, vpn, round(100.0 * good / total) if total else None, down_all)
 
@@ -184,6 +195,10 @@ def bar_text(bar: Bar, bucket: int = BUCKET_MINUTES) -> str:
         return f"{span}  not connected"
     if bar.state == "up":
         return f"{span}  connected {bar.up_minutes} of {bucket} min – not rated (connection check off)"
+    if bar.rated_at >= 0:
+        whole = (f"{round(100.0 * bar.lost / bar.sent)} % lost ({bar.lost} of {bar.sent} checks), " if bar.sent else "") \
+            + f"connected {bar.up_minutes} of {bucket} min"
+        return f"{span}  {bar.state} – the connection check rated it {bar.state} at {_hm(bar.rated_at)}; all {bucket} min: {whole}"
     pct = round(100.0 * bar.lost / bar.sent)
     whole = (f"{pct} % lost ({bar.lost} of {bar.sent} checks), " + (f"{bar.slow} slow (over 1 s), " if bar.slow else "")
              + f"connected {bar.up_minutes} of {bucket} min")
@@ -268,7 +283,7 @@ class Recorder:
     def __init__(self, state_dir: Path) -> None:
         self.dir = stats_dir(state_dir)
         self._lock = threading.Lock()
-        self._cur: dict | None = None            # {date, m, p: {id: [up, sent, lost, name, down, slow, drop]}}
+        self._cur: dict | None = None            # {date, m, p: {id: [up, sent, lost, name, down, slow, drop, rated]}}
         self._pruned = ""
         self._was_up = ""                        # the profile seen connected since VeroScudo was last off: a down pass for it = a drop
 
@@ -281,7 +296,7 @@ class Recorder:
 
     def _save(self) -> None:
         c = self._cur
-        lines = [format_line(c["m"], pid, v[3], v[1], v[2], down=not v[0], slow=v[5], drop=v[6]) for pid, v in c["p"].items() if v[0] or v[4]] \
+        lines = [format_line(c["m"], pid, v[3], v[1], v[2], down=not v[0], slow=v[5], drop=v[6], rated=v[7]) for pid, v in c["p"].items() if v[0] or v[4]] \
             if c else []
         if not lines:
             return
@@ -296,7 +311,7 @@ class Recorder:
         with self._lock:
             c = self._select(now)
             if (up or down) and pid:
-                v = c["p"].setdefault(pid, [False, 0, 0, name, False, 0, False])
+                v = c["p"].setdefault(pid, [False, 0, 0, name, False, 0, False, 0])
                 v[3] = name
                 if up:
                     v[0] = True
@@ -312,11 +327,19 @@ class Recorder:
         if not pid:
             return
         with self._lock:
-            v = self._select(now or datetime.now())["p"].setdefault(pid, [False, 0, 0, name, False, 0, False])
+            v = self._select(now or datetime.now())["p"].setdefault(pid, [False, 0, 0, name, False, 0, False, 0])
             v[0], v[3] = True, name
             v[1] += sent
             v[2] += lost
             v[5] += slow
+
+    def rated(self, state: str, pid: str, name: str, now: datetime | None = None) -> None:
+        """The live rating after a round (quality: over the last minutes): the minute keeps the worst one shown."""
+        if not pid or state not in ("unstable", "bad"):
+            return
+        with self._lock:
+            v = self._select(now or datetime.now())["p"].setdefault(pid, [False, 0, 0, name, False, 0, False, 0])
+            v[7] = max(v[7], _RANK[state])
 
     def flush(self) -> None:
         """The daemon stops: the minute so far (a restart adds to it)."""

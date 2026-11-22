@@ -649,8 +649,17 @@ function Sync-VeroKillSwitchCore {
             }
         } catch { Write-VeroLog "ERROR: could not tell whether the tunnel carries traffic again ($($_.Exception.Message)) - Hyper-V VMs stay blocked for now" $Action }
     }
-    # a split-tunnel profile: the VMs and WSL stay blocked even while it is up (they would reach the rest past the tunnel)
-    $full = if ($tun -and $Config.Vm) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
+    # WSL / Default Switch VMs: the internet routed to nowhere while the tunnel is down (62-HyperVAcl.ps1), and right
+    # after a drop the watchdog saw while RAS still says "connected" (the note of the drop, at most 30 s: RAS tells within
+    # ~20 s) - gone once the tunnel is proven (above: the proof is sent from the tunnel's own address, past these routes).
+    # Before the route check below: a tunnel that is back must find them gone, or it would look like a split tunnel. Not
+    # for a type VeroScudo does not dial (Hiddify reaches its servers itself), not during the revocation window
+    $holeDrop = (-not $tun) -or ($suspect -and $suspect -isnot [bool] -and (Test-VeroNetSuspectFresh $suspect))
+    $holeWant = $holeDrop -and [bool]$Config.Vm -and ([bool]$wsl -or [bool]$sw) -and [bool]$plan.Handler.Dials -and -not [bool](& $plan.Handler.CrlWindow) -and @($ips).Count -gt 0
+    try { Sync-VeroBlackhole -Want $holeWant -ServerIps $ips -Dns $dns -Action $Action } catch { Write-VeroLog "ERROR: routes for WSL and VMs: $($_.Exception.Message) - tried again on the next pass" $Action }
+    # a split-tunnel profile: the VMs and WSL stay blocked even while it is up (they would reach the rest past the tunnel);
+    # not asked while a drop is unproven - they are blocked anyway, and the routes above would look like a split tunnel
+    $full = if ($tun -and $Config.Vm -and -not $suspect) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
     if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "the route to the internet does not lead into the tunnel of '$($Config.Profile)' (a split-tunnel profile, or the network is changing) - VMs and WSL stay blocked" $Action }
     $script:SplitLogged = -not $full
     # the tunnel that holds the route to the internet, for the watchdog's 1-second look (Test-VeroRouteLeft): only a full
@@ -700,6 +709,7 @@ function Disable-VeroKillSwitch {
         try { $null = Set-VeroVmBlock -Block $false -Action $a } catch { Write-VeroLog "ERROR: Hyper-V port ACLs not removed: $($_.Exception.Message) - will retry" $a }
         $script:AclBlocked = $null
         try { Remove-VeroNrpt -Action $a } catch { Write-VeroLog "ERROR: NRPT rules not removed: $($_.Exception.Message) - will retry" $a }
+        try { Remove-VeroBlackhole -Action $a } catch { Write-VeroLog "ERROR: routes for WSL and VMs not removed: $($_.Exception.Message) - will retry" $a }
         Write-VeroLog 'kill-switch OFF (filters removed)' $a
     } -Arguments @($Action)
 }

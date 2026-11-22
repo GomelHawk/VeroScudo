@@ -355,7 +355,8 @@ namespace KsBench
             catch (Exception) { return -1; }
         }
 
-        public static bool TunnelUp() { int i = BestIf("198.51.100.7"); return i > 0 && !Phys.Contains(i); }
+        // a route to the loopback adapter is a kill-switch's dead end, not a tunnel
+        public static bool TunnelUp() { int i = BestIf("198.51.100.7"); return i > 0 && !Phys.Contains(i) && i != System.Net.NetworkInformation.NetworkInterface.LoopbackInterfaceIndex; }
 
         static Socket Make(string dst, SocketType st, ProtocolType pt, int ifIdx)
         {

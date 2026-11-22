@@ -59,12 +59,16 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   Switch VM left through the ISP for 2-7 s per Reconnect or Wi-Fi drop; after it, two Reconnects and a 30 s Wi-Fi outage
   showed only the VPN's exit address (VMs blocked 1 s after the Wi-Fi went away). Remaining: a VPN that dies while the
   network itself stays up is caught when the route to the internet leaves the tunnel (the watchdog looks every second).
-- **WSL in its default (NAT) network mode - a few seconds at a drop.** WSL is blocked within about a second of the route
-  leaving the tunnel (a ready Hyper-V block rule, switched on first), but connections WSL had already opened go on over
-  the physical card until they break by themselves: the Hyper-V firewall judges only new connections, and Windows moves
-  the translated ones to the new route. Measured with ksbench (SSTP server blocked): those connections sent for
-  ~10 s. Windows programs are not affected. WSL's mirrored network mode (`networkingMode=mirrored`) removes this: WSL
-  then goes through Windows' own stack and VeroScudo's filters. Not tested: Windows Sandbox and Docker in
+- **WSL in its default (NAT) network mode.** WSL is blocked within about a second of the route leaving the tunnel (a
+  ready Hyper-V block rule, switched on first). That firewall judges only new connections, and Windows moves the
+  translated ones WSL had already opened to the new route (ksbench measured up to 25 s of them before). So while the
+  tunnel is down the internet is also routed to nowhere - routes on the loopback adapter, more specific than the
+  default route, for everything but the VPN server and the networks the adapters are on: an open connection then has
+  no way out (tested: a kept-alive connection from WSL stalled until the routes were gone). They come the moment the
+  watchdog sees the route leave the tunnel, also while Windows' VPN client still says "connected" (at most 30 s that
+  way); should the tunnel prove alive after all, they go again - Windows programs wait for that proof too. Not used for Hiddify
+  (VeroScudo does not dial it) or during the SSTP revocation window; a route Windows refuses is logged, and WSL is then
+  covered by the Hyper-V firewall alone. Not tested: Windows Sandbox and Docker in
   Hyper-V mode. Without the Hyper-V PowerShell tools VeroScudo logs that these VMs are not covered.
 - **Bridged virtual machines** (Hyper-V external switch, VirtualBox/VMware/Parallels/libvirt bridged mode) and **Docker
   macvlan/ipvlan networks** - their frames bypass the host's IP stack, so no host firewall can see them. VeroScudo does

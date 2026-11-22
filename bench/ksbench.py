@@ -704,7 +704,7 @@ class Bench:
 
     def tunnel_iface(self):
         dev = self.p.route_iface(P_OUT4)
-        return dev if dev and dev not in self.phys_names else None
+        return dev if dev and dev not in self.phys_names and dev not in ("lo", "lo0") else None   # loopback: a dead end, not a tunnel
 
     def tunnel_up(self):
         return self.tunnel_iface() is not None
