@@ -319,6 +319,15 @@ def test_hiddify_is_never_reconnected_by_the_guard(dead, caplog):
     assert sum("does not dial Hiddify" in r.getMessage() for r in caplog.records) == 1     # said once, not every round
 
 
+def test_failed_rounds_of_an_earlier_connection_never_count_for_the_next(guard):
+    g, connected, _ = guard
+    g.store.set_armed(True)
+    g.dead_rounds = daemon.DEAD_ROUNDS - 1                            # the last connection failed its checks, then dropped
+    connected["up"] = False
+    g.quality_tick()
+    assert g.dead_rounds == 0
+
+
 def test_the_guard_runs_the_dead_check_after_each_round(guard, monkeypatch):
     g, _, _ = guard
     g.store.set_armed(True)

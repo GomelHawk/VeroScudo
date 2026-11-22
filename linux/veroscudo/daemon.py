@@ -728,6 +728,7 @@ class Guard:
         if not chk.enabled or not self.store.armed or not nm.is_connected(cfg.profile):
             if self.quality.samples or self.quality.path.exists():
                 self.quality.reset()
+            self.dead_rounds = 0                 # failed rounds of an earlier connection never count for the next
             return 5.0 if not chk.enabled else min(5.0, chk.interval_seconds)
         results = quality.run_round(chk.targets, tls=cfg.current.vpn_type == hiddify.KIND)   # Hiddify answers ping/TCP itself
         try:

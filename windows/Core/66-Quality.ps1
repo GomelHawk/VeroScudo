@@ -345,6 +345,7 @@ function Update-VeroQuality {
     $chk = if ($cfg) { $cfg.ConnectionCheck } else { $null }
     if (-not $chk -or -not $chk.Enabled -or -not (Test-VeroArmed) -or -not (Test-VeroVpnConnected $cfg.Profile -Type $cfg.Type)) {
         if ($script:QualitySamples.Count -gt 0 -or (Test-Path -LiteralPath (Get-VeroPath).Quality)) { Reset-VeroQuality }
+        $script:DeadCount = 0                                              # failed rounds of an earlier connection never count for the next
         return 5
     }
     $now = Get-VeroEpoch

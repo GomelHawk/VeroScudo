@@ -117,6 +117,12 @@ Describe 'Connection check: the watchdog (mocked checks)' {
         (Read-VeroQuality -ProfileName 'Work').State | Should -Be 'checking'
         Read-VeroQuality -ProfileName 'Backup' | Should -BeNullOrEmpty
     }
+    It 'failed rounds of an earlier connection never count for the next' {
+        InModuleScope VeroScudo.Core { $script:DeadCount = 2 }
+        Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
+        Update-VeroQuality | Out-Null
+        InModuleScope VeroScudo.Core { $script:DeadCount } | Should -Be 0
+    }
     It 'does not check while blocked, and drops the rating' {
         Update-VeroQuality | Out-Null
         Mock -ModuleName VeroScudo.Core Test-VeroVpnConnected { $false }
