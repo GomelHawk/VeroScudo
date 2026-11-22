@@ -332,9 +332,9 @@ function Get-VeroBlackholePrefix {
     , $out.ToArray()
 }
 
-function Get-VeroRouteTable { [VeroScudo.Route]::Read() }
-function Add-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { [VeroScudo.Route]::Add($IfIndex, $Prefix, $Length) }
-function Remove-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { [VeroScudo.Route]::Delete($IfIndex, $Prefix, $Length) }
+function Get-VeroRouteTable { Import-VeroNative; [VeroScudo.Route]::Read() }
+function Add-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Add($IfIndex, $Prefix, $Length) }
+function Remove-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Delete($IfIndex, $Prefix, $Length) }
 
 function Get-VeroBlackholeExclude {
     <# What must keep its normal route: the VPN server addresses, the -Dns servers (only while the redial's DNS window is
