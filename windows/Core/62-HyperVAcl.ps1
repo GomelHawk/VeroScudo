@@ -336,27 +336,6 @@ function Get-VeroRouteTable { Import-VeroNative; [VeroScudo.Route]::Read() }
 function Add-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Add($IfIndex, $Prefix, $Length) }
 function Remove-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Delete($IfIndex, $Prefix, $Length) }
 
-function Get-VeroIfIndex([uint64]$Luid) {
-    <# The IPv4 interface index of the adapter with this LUID, 0 when there is none. .NET list, ~ms. #>
-    Import-VeroNative
-    $nic = Get-VeroNic | Where-Object { try { [VeroScudo.Iface]::LuidFromGuid([guid]$_.Id) -eq $Luid } catch { $false } } | Select-Object -First 1
-    if (-not $nic) { return [uint32]0 }
-    try { [uint32]$nic.GetIPProperties().GetIPv4Properties().Index } catch { [uint32]0 }
-}
-
-function Test-VeroTunnelOwnsDefault {
-    <# With the routes under the tunnel in place every route check says "the tunnel": then the tunnel's own routes tell a full
-       tunnel (0.0.0.0/0, or 0.0.0.0/1 + 128.0.0.0/1) from a split one. -Table: Get-VeroRouteTable lines. #>
-    [CmdletBinding()] param([string[]]$Table = @(), [uint32]$TunnelIndex)
-    Import-VeroNative                                                       # for the marker metric
-    foreach ($line in $Table) {
-        $f = $line.Split('|')
-        if ($f.Count -lt 4 -or [uint32]$f[0] -ne $TunnelIndex -or [int]$f[3] -eq [VeroScudo.Route]::Marker) { continue }
-        if ($f[1] -eq '0.0.0.0/0' -or $f[1] -eq '0.0.0.0/1') { return $true }
-    }
-    $false
-}
-
 function Get-VeroBlackholeExclude {
     <# What must keep its normal route: the VPN server addresses, the -Dns servers (only while the redial's DNS window is
        open), and every network an adapter is on (its on-link routes: the LAN, WSL's subnet; not loopback, nothing wider
@@ -384,21 +363,14 @@ function Get-VeroBlackholeRecord {
 function Sync-VeroBlackhole {
     <# -Want: the routes to nowhere, all but the excluded; otherwise none. Only what changed is asked of Windows; a route
        Windows (or security software) refuses is logged once - WSL is then protected as before (the Hyper-V firewall). #>
-    # -TunnelIndex: the tunnel is up - the same routes on the tunnel too (its interface metric is far lower than the loopback
-    # adapter's, so they win): the routes to nowhere wait underneath, and when the tunnel goes its routes go with it - a drop
-    # finds the way out closed already, nothing has to react first
-    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Want, [string[]]$ServerIps = @(), [string[]]$Dns = @(), [uint32]$TunnelIndex = 0, [string]$Action = 'core')
+    [CmdletBinding()] param([Parameter(Mandatory)][bool]$Want, [string[]]$ServerIps = @(), [string[]]$Dns = @(), [string]$Action = 'core')
     $have = @(Get-VeroBlackholeRecord)
     if (-not $Want -and $have.Count -eq 0) { return }
     $lo4 = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
     $wantSet = @{}
     if ($Want) {
         $ex = Get-VeroBlackholeExclude -ServerIps $ServerIps -Dns $Dns -Table @(Get-VeroRouteTable) -Loopback @($lo4)
-        foreach ($p in (Get-VeroBlackholePrefix -Exclude $ex)) {
-            if ($p.Contains(':')) { continue }
-            $wantSet["$lo4|$p"] = $true
-            if ($TunnelIndex) { $wantSet["$TunnelIndex|$p"] = $true }
-        }
+        foreach ($p in (Get-VeroBlackholePrefix -Exclude $ex)) { if (-not $p.Contains(':')) { $wantSet["$lo4|$p"] = $true } }
     }
     $keep = New-Object System.Collections.Generic.List[string]
     $failed = $null; $changed = $false
@@ -406,8 +378,7 @@ function Sync-VeroBlackhole {
         if ($wantSet.ContainsKey($r)) { $keep.Add($r); continue }
         $f = $r.Split('|'); $pp = $f[1].Split('/')
         $e = Remove-VeroRoute -IfIndex ([uint32]$f[0]) -Prefix $pp[0] -Length ([int]$pp[1])
-        # one on a tunnel that is gone went with it (whatever the error says): only the loopback adapter's are kept to retry
-        if ($e -ne 0 -and $e -ne 1168 -and [uint32]$f[0] -eq $lo4) { $keep.Add($r); $failed = "removing $($f[1]): error $e" } else { $changed = $true }
+        if ($e -ne 0 -and $e -ne 1168) { $keep.Add($r); $failed = "removing $($f[1]): error $e" } else { $changed = $true }
     }
     foreach ($k in $wantSet.Keys) {
         if ($keep.Contains($k)) { continue }
@@ -417,8 +388,7 @@ function Sync-VeroBlackhole {
     }
     if ($changed) {
         Write-VeroStateFile -Path (Get-VeroPath).Blackhole -Text (ConvertTo-Json -InputObject @($keep) -Compress)
-        Write-VeroLog $(if ($TunnelIndex -and $keep.Count) { "WSL and VMs: routes to nowhere ready under the tunnel - a drop finds the way out closed ($($keep.Count) routes)" }
-                        elseif ($keep.Count) { "WSL and VMs: the internet routed to nowhere while the tunnel is down ($($keep.Count) routes; the VPN server and the local networks excepted)" } else { 'routes to nowhere removed - the tunnel is up' }) $Action
+        Write-VeroLog $(if ($keep.Count) { "WSL and VMs: the internet routed to nowhere while the tunnel is down ($($keep.Count) routes; the VPN server and the local networks excepted)" } else { 'routes to nowhere removed - the tunnel is up' }) $Action
     }
     if ($failed -and $script:BlackholeSaid -ne $failed) { Write-VeroLog "WARNING: Windows refused a route for WSL and VMs ($failed) - they stay protected by the Hyper-V firewall only" $Action }
     $script:BlackholeSaid = $failed

@@ -655,25 +655,11 @@ function Sync-VeroKillSwitchCore {
     # Before the route check below: a tunnel that is back must find them gone, or it would look like a split tunnel. Not
     # for a type VeroScudo does not dial (Hiddify reaches its servers itself), not during the revocation window
     $holeDrop = (-not $tun) -or ($suspect -and $suspect -isnot [bool] -and (Test-VeroNetSuspectFresh $suspect))
-    $holeFor = [bool]$Config.Vm -and ([bool]$wsl -or [bool]$sw) -and [bool]$plan.Handler.Dials -and @($ips).Count -gt 0
-    $holeWant = $holeDrop -and $holeFor -and -not [bool](& $plan.Handler.CrlWindow)
-    # the tunnel is up and full: the same routes wait under it (Sync-VeroBlackhole -TunnelIndex) - never for a split tunnel,
-    # whose own routes would be widened to everything; once per tunnel not, when Windows then does not send through it
-    $tunIdx = [uint32]0; $full = $null
-    if ($tun -and -not $holeDrop -and -not $suspect -and $holeFor -and $script:HoleReadyOff -ne [string]$tun) {
-        $tunIdx = try { Get-VeroIfIndex -Luid $tun } catch { [uint32]0 }
-        if ($tunIdx) { $full = Test-VeroTunnelOwnsDefault -Table @(Get-VeroRouteTable) -TunnelIndex $tunIdx; if (-not $full) { $tunIdx = [uint32]0 } }
-    }
-    try {
-        Sync-VeroBlackhole -Want ($holeWant -or [bool]$tunIdx) -ServerIps $ips -Dns $(if ($holeWant) { $dns } else { @() }) -TunnelIndex $tunIdx -Action $Action
-        if ($tunIdx -and [uint64](Get-VeroBestLuid) -ne [uint64]$tun) {
-            Sync-VeroBlackhole -Want $false -Action $Action; $script:HoleReadyOff = [string]$tun
-            Write-VeroLog "WARNING: with the routes under the tunnel Windows did not send through the tunnel - removed; WSL and VMs are closed off after a drop as before" $Action
-        }
-    } catch { Write-VeroLog "ERROR: routes for WSL and VMs: $($_.Exception.Message) - tried again on the next pass" $Action }
+    $holeWant = $holeDrop -and [bool]$Config.Vm -and ([bool]$wsl -or [bool]$sw) -and [bool]$plan.Handler.Dials -and -not [bool](& $plan.Handler.CrlWindow) -and @($ips).Count -gt 0
+    try { Sync-VeroBlackhole -Want $holeWant -ServerIps $ips -Dns $dns -Action $Action } catch { Write-VeroLog "ERROR: routes for WSL and VMs: $($_.Exception.Message) - tried again on the next pass" $Action }
     # a split-tunnel profile: the VMs and WSL stay blocked even while it is up (they would reach the rest past the tunnel);
     # not asked while a drop is unproven - they are blocked anyway, and the routes above would look like a split tunnel
-    if ($null -eq $full) { $full = if ($tun -and $Config.Vm -and -not $suspect) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true } }
+    $full = if ($tun -and $Config.Vm -and -not $suspect) { Test-VeroTunnelHoldsDefault -Luid $tun } else { $true }
     if (-not $full -and -not $script:SplitLogged) { Write-VeroLog "the route to the internet does not lead into the tunnel of '$($Config.Profile)' (a split-tunnel profile, or the network is changing) - VMs and WSL stay blocked" $Action }
     $script:SplitLogged = -not $full
     # the tunnel that holds the route to the internet, for the watchdog's 1-second look (Test-VeroRouteLeft): only a full
@@ -708,7 +694,6 @@ $script:NoDnsLogged = $false
 $script:VmAllowed = $null
 $script:SplitLogged = $false
 $script:AclBlocked = $null
-$script:HoleReadyOff = $null
 
 function Disable-VeroKillSwitch {
     [CmdletBinding()] param([string]$Action = 'core')

@@ -1018,51 +1018,6 @@ Describe 'WSL and VMs: the internet routed to nowhere while the tunnel is down (
         @($global:VeroTestRoutes) | Should -Contain 'want False'
         Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
     }
-    It 'tunnel up and full: the same routes wait under the tunnel; a drop keeps only the loopback adapter''s' {
-        Mock -ModuleName VeroScudo.Core Write-VeroLog { [void]$global:VeroTestRoutes.Add("log $Message") }
-        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -TunnelIndex 51 -Action test
-        $lo = @($global:VeroTestRoutes | Where-Object { $_ -like "add $script:lo *" } | ForEach-Object { $_.Split(' ')[2] })
-        $tu = @($global:VeroTestRoutes | Where-Object { $_ -like 'add 51 *' } | ForEach-Object { $_.Split(' ')[2] })
-        $lo.Count | Should -BeGreaterThan 30
-        @($tu | Sort-Object) | Should -Be @($lo | Sort-Object)
-        @($global:VeroTestRoutes | Where-Object { $_ -like 'log *ready under the tunnel*' }).Count | Should -Be 1
-        $global:VeroTestRoutes.Clear()
-        Mock -ModuleName VeroScudo.Core Remove-VeroRoute { [void]$global:VeroTestRoutes.Add("del $IfIndex $Prefix/$Length"); [uint32]87 }   # the tunnel is gone
-        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
-        @($global:VeroTestRoutes | Where-Object { $_ -like 'del 51 *' }).Count | Should -Be $tu.Count
-        @($global:VeroTestRoutes | Where-Object { $_ -like 'add *' -or $_ -like "del $script:lo *" }).Count | Should -Be 0
-        @(& (Get-Module VeroScudo.Core) { Get-VeroBlackholeRecord }).Count | Should -Be $lo.Count
-    }
-    It 'a full tunnel is told by its own routes, not by the ones VeroScudo put under it' {
-        Test-VeroTunnelOwnsDefault -Table @('51|0.0.0.0/0|0.0.0.0|1') -TunnelIndex 51 | Should -BeTrue
-        Test-VeroTunnelOwnsDefault -Table @('51|0.0.0.0/1|10.8.0.1|0', '51|128.0.0.0/1|10.8.0.1|0') -TunnelIndex 51 | Should -BeTrue
-        Test-VeroTunnelOwnsDefault -Table @('51|10.0.0.0/8|0.0.0.0|1', '51|0.0.0.0/1|0.0.0.0|7', '12|0.0.0.0/0|192.168.1.1|0') -TunnelIndex 51 | Should -BeFalse
-    }
-    It 'the sync: routes under a full tunnel; removed for that tunnel when Windows then does not send through it' {
-        Remove-TestFile @((Get-VeroPath).NetSuspect)
-        Mock -ModuleName VeroScudo.Core Sync-VeroBlackhole { [void]$global:VeroTestRoutes.Add("want $Want $TunnelIndex") }
-        Mock -ModuleName VeroScudo.Core Get-VeroTunnelLuid { [uint64]42 }
-        Mock -ModuleName VeroScudo.Core Get-VeroWslLuid { [uint64]77 }
-        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
-        Mock -ModuleName VeroScudo.Core Test-VeroVmWanted { $true }
-        Mock -ModuleName VeroScudo.Core Set-VeroVmAccess { }
-        Mock -ModuleName VeroScudo.Core Set-VeroVmBlock { 1 }
-        Mock -ModuleName VeroScudo.Core Get-VeroIfIndex { [uint32]51 }
-        Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { '51|0.0.0.0/0|0.0.0.0|1', '12|0.0.0.0/0|192.168.1.1|0' }
-        Mock -ModuleName VeroScudo.Core Get-VeroBestLuid { [uint64]42 }
-        InModuleScope VeroScudo.Core { $script:HoleReadyOff = $null }
-        $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"},"vm":true}'
-        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
-        @($global:VeroTestRoutes) | Should -Be @('want True 51')
-        $global:VeroTestRoutes.Clear()
-        Mock -ModuleName VeroScudo.Core Get-VeroBestLuid { [uint64]5 }                  # Windows sends past the tunnel now
-        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh
-        @($global:VeroTestRoutes) | Should -Be @('want True 51', 'want False ')            # the removal names no tunnel
-        $global:VeroTestRoutes.Clear()
-        Sync-VeroKillSwitch -Config $c -Action test -Force -NoRefresh                    # not again for this tunnel
-        @($global:VeroTestRoutes) | Should -Be @('want False 0')
-        InModuleScope VeroScudo.Core { $script:HoleReadyOff = $null }
-    }
     It 'a drop note counts for 30 s; an unreadable time never' {
         Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-10).ToString('o') }) | Should -BeTrue
         Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-31).ToString('o') }) | Should -BeFalse
