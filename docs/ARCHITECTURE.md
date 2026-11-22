@@ -241,7 +241,12 @@ Their packets are forwarded, not sent by the host, so they need their own contro
   watchdog saw the route leave the tunnel - also while RAS still says "connected"), kept by the sync while that drop is
   unproven (the net-suspect note, at most 30 s) or the tunnel is down - before its route checks (a tunnel that is back
   must not look split); the proof is sent from the tunnel's own address, so the routes do not stand in its way. Removed
-  when the tunnel is up or proven,
+  from under the loopback adapter only when the tunnel is up and proven - while a full tunnel is up the same routes are
+  also put on the tunnel itself (`-TunnelIndex`; its interface metric is far below the loopback adapter's, so traffic
+  still goes into the tunnel): the routes to nowhere wait underneath, and the tunnel's copies go with the tunnel, so a drop
+  finds the way out closed without anything reacting first. Not for a split tunnel (`Test-VeroTunnelOwnsDefault`: the
+  tunnel's own 0.0.0.0/0 or /1 routes), and removed for that tunnel when Windows then does not send through it
+  (`Get-VeroBestLuid`). The tunnel's copies are dropped from the record when the tunnel is gone; the rest is removed
   by Off (`Remove-VeroBlackhole`, also leftovers with metric 7 on loopback) and by uninstall. Not for Hiddify, not during
   the SSTP revocation window.
 - **Windows (Hyper-V Default Switch)**: Windows itself is its VMs' DHCP server and DNS proxy, on the host adapter

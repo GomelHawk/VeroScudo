@@ -9,7 +9,8 @@ All notable changes to VeroScudo are recorded here. The format follows
 - The Hyper-V firewall blocks WSL's new connections at a drop, but ones already open followed the route onto the
   Wi-Fi/Ethernet card (up to 25 s measured). While the tunnel is down, VeroScudo now also routes the internet to nowhere
   on the loopback adapter - everything except the VPN server and the networks you are on - so they have no way out.
-  They come within a second of the drop, also while Windows' VPN client still reports the tunnel as connected.
+  While a full tunnel is up they already wait underneath it (the same routes on the tunnel win, and go away with it),
+  so a drop finds the way out closed with nothing that has to react first.
   The routes go the moment the tunnel is up, and with Off, uninstall or a reboot. The same for Hyper-V Default Switch VMs.
 
 ### Statistics: a bar is never better than what the status showed

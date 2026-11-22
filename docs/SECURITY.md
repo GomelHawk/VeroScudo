@@ -64,9 +64,10 @@ VeroScudo is a **network kill-switch for the VPN client your OS already has**. W
   translated ones WSL had already opened to the new route (ksbench measured up to 25 s of them before). So while the
   tunnel is down the internet is also routed to nowhere - routes on the loopback adapter, more specific than the
   default route, for everything but the VPN server and the networks the adapters are on: an open connection then has
-  no way out (tested: a kept-alive connection from WSL stalled until the routes were gone). They come the moment the
-  watchdog sees the route leave the tunnel, also while Windows' VPN client still says "connected" (at most 30 s that
-  way); should the tunnel prove alive after all, they go again - Windows programs wait for that proof too. Not used for Hiddify
+  no way out (tested: a kept-alive connection from WSL stalled until the routes were gone). While a full tunnel is up
+  they wait under it (the same routes on the tunnel win and go away with it), so a drop finds them in force; else they
+  come the moment the watchdog sees the route leave the tunnel, also while Windows' VPN client still says "connected"
+  (at most 30 s that way); should the tunnel prove alive after all, they go again - Windows programs wait for that proof too. Not used for Hiddify
   (VeroScudo does not dial it) or during the SSTP revocation window; a route Windows refuses is logged, and WSL is then
   covered by the Hyper-V firewall alone. Not tested: Windows Sandbox and Docker in
   Hyper-V mode. Without the Hyper-V PowerShell tools VeroScudo logs that these VMs are not covered.

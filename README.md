@@ -258,8 +258,10 @@ may go out only while the tunnel is proven to work. That firewall judges only ne
 WSL already had open would follow the route onto the Wi-Fi/Ethernet card. So while the tunnel is down,
 VeroScudo also routes the internet to nowhere: routes on the loopback adapter, more specific than the
 default route, for everything except the VPN server and the networks you are on (your LAN keeps
-working). They exist only while the tunnel is down - removed the moment it is up, by Off and by
-uninstall, and a reboot clears them anyway (`route print` shows them with metric 7 meanwhile).
+working). While a full tunnel is up they wait underneath it: VeroScudo puts the same routes on the
+tunnel, where they win, and those go away with the tunnel - so a drop finds the way out closed
+already. Removed by Off and by uninstall, and a reboot clears them anyway (`route print` shows them
+with metric 7).
 
 ## Profile types
 
