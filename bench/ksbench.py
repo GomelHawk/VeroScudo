@@ -336,7 +336,8 @@ class Capture:
 
 
 class Owners:
-    """Which program held each local port when, looked up every 0.2 s through the run (a packet capture does not tell).
+    """Which program held each local port when, looked up every 0.05 s through the run (macOS: 0.2 s - lsof is slow) - a
+    packet capture does not tell; a VPN app's short checks (a few hundred ms) must be seen too.
     Ports come back (ephemeral ports): a packet belongs to the program that held its port at that moment."""
 
     def __init__(self, listing, path):
@@ -365,7 +366,7 @@ class Owners:
                         spans[-1][2] = now
                     else:
                         spans.append([pid, now, now])
-            self.stop_ev.wait(0.2)
+            self.stop_ev.wait(0.2 if IS_MAC else 0.05)
 
     def program(self, proto, port, ts):
         """The program file that held this local port at ts (0.5 s either side), or None - also when two could have."""

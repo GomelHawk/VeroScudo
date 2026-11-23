@@ -368,7 +368,7 @@ namespace KsBench
         }
     }
 
-    // which program owns each local port, looked up every 0.1 s through the run (a packet capture does not tell)
+    // which program owns each local port, looked up every 0.05 s through the run (a packet capture does not tell)
     public static class Owners
     {
         [DllImport("iphlpapi.dll")] static extern uint GetExtendedTcpTable(IntPtr t, ref int size, bool order, int af, int cls, uint res);
@@ -388,7 +388,7 @@ namespace KsBench
         {
             if (T != null) return;
             Stop = false;
-            T = new Thread(delegate () { while (!Stop) { try { Poll(); } catch (Exception) { } Thread.Sleep(100); } });
+            T = new Thread(delegate () { while (!Stop) { try { Poll(); } catch (Exception) { } Thread.Sleep(50); } });   // a VPN app's short checks too
             T.IsBackground = true;
             T.Start();
         }
@@ -482,7 +482,7 @@ namespace KsBench
             return who >= 0 && paths.TryGetValue(who, out f) ? f : null;
         }
 
-        // the program of each packet - once, for packets older than `before` (the look is every 0.1 s)
+        // the program of each packet - once, for packets older than `before` (the look is every 0.05 s)
         public static void Know(List<Pkt> pkts, double before)
         {
             lock (Held)
