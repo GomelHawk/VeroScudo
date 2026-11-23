@@ -532,6 +532,7 @@ namespace KsBench
         public static double DownAt;
         public static string Label;
         public static HashSet<string> VpnIps = new HashSet<string>();
+        public static string[] ExitIps() { lock (VpnIps) return new List<string>(VpnIps).ToArray(); }
         public static List<string[]> Hits = new List<string[]>();
         static readonly List<KeyValuePair<double, Socket>> Keep = new List<KeyValuePair<double, Socket>>();
         static readonly Random Rnd = new Random();
@@ -835,13 +836,18 @@ function Get-ServerName([string[]]$Name, [string[]]$Server) {
 
 function Get-AppProgram {
     <# The VPN app's program files - those that sent to the VPN server and the others in their folder. #>
-    [KsBench.Owners]::Know($script:Pkts, [KsBench.Probe]::Now() - 1)
+    [KsBench.Owners]::Know($script:Pkts, [KsBench.Probe]::Now() - 0.7)       # 0.5 s margin + one look
     return , [KsBench.Owners]::App($script:Pkts, [string[]]@($script:Servers.Keys), [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'))
 }
 
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {
+    <# The VPN server(s) and the exit addresses the online check saw through the tunnel count as the VPN's: a VPN with
+       several servers (Hiddify) talks to all of them, also over connections too short to see which program made them. #>
+    $wait = [Math]::Min(0.7, $T1 + 0.7 - [KsBench.Probe]::Now())
+    if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }      # the program of the last packets is looked up too
     $srv = [string[]]@($script:Servers.Keys)
-    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, $srv, $Class, (Get-AppProgram), [KsBench.Owners]::Own($script:Pkts, $srv))
+    $vpn = [string[]]@($srv + [KsBench.Probe]::ExitIps())
+    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, $vpn, $Class, (Get-AppProgram), [KsBench.Owners]::Own($script:Pkts, $srv))
 }
 
 function Get-PhysicalAdapter {

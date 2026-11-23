@@ -3,7 +3,8 @@
 Every test watches the **physical network adapter** (Wi-Fi, Ethernet) for outbound packets. A packet
 counts as a **leak** when it goes to a public address that is not the VPN server. Not counted: the VPN
 server itself (also another address of it: a packet from the very connection the VPN uses for its server,
-to the server's port - a VPN whose server name has several addresses moves between them), DHCP, IPv6 neighbour discovery and router solicitation, and addresses that are not on the
+to the server's port - a VPN whose server name has several addresses moves between them; and every exit
+address the online check saw through the tunnel - a VPN with several servers talks to all of them), DHCP, IPv6 neighbour discovery and router solicitation, and addresses that are not on the
 internet (private ranges, link-local, multicast, CGNAT, and `198.18.0.0/15`, which proxy apps hand out for
 their fake DNS). A packet to port 53 or 853 (DNS, DNS over TLS) is a **DNS leak**, whatever its address,
 including a router on the local network.

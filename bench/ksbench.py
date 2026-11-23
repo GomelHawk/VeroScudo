@@ -935,7 +935,7 @@ class Bench:
 
     def known(self, items):
         """Look up the program of each packet (Owners) - once, for packets older than 1 s (the look is every 0.2 s)."""
-        before = time.time() - 1
+        before = time.time() - 0.7             # 0.5 s margin + one look
         for x in items:
             p = x[-1]
             if not p.known and x[0] < before:
@@ -1008,13 +1008,20 @@ class Bench:
                 self.online_tick(None)
         return back
 
+    def vpn_addrs(self):
+        """The VPN server(s) and the exit addresses the online check saw through the tunnel: a VPN with several servers
+        (Hiddify) talks to all of them, also over connections too short to see which program made them."""
+        return set(self.servers) | self.vpn_ips
+
     def vmleaks(self, t0, t1):
-        return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, self.servers) == "vmleak"]
+        srv = self.vpn_addrs()
+        return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, srv) == "vmleak"]
 
     def leaks(self, t0, t1):
-        leak, dns, app, own = [], [], self.app(), self.own()
+        time.sleep(max(0.0, min(0.7, t1 + 0.7 - time.time())))   # the program of the last packets is looked up too
+        leak, dns, app, own, srv = [], [], self.app(), self.own(), self.vpn_addrs()
         for ts, _, p in self.known(self.cap.window(t0, t1)):
-            c = classify(p, self.servers, app, own)
+            c = classify(p, srv, app, own)
             if c == "leak":
                 leak.append((ts, p))
             elif c == "dns":
@@ -1440,7 +1447,7 @@ class Bench:
         else:
             print("Online check: not run.")
         app = self.app()
-        own = [(ts, p) for ts, _, p in self.known(self.cap.window(0, time.time())) if classify(p, self.servers, app) == "app"]
+        own = [(ts, p) for ts, _, p in self.known(self.cap.window(0, time.time())) if classify(p, self.vpn_addrs(), app) == "app"]
         app_ev = self.evidence(own, own[0][0]) if own else {}
         if own:
             names = sorted({p.qname for _, p in own if p.qname})[:5]
