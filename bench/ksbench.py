@@ -1118,7 +1118,8 @@ class Bench:
               "dns": self.evidence(dns, t0), "online": hits}
         if not leak and not went_down[0]:
             self.set(sid, "n/a", f"the tunnel stayed up for all {hold} s of the fault, so the kill-switch was not "
-                     "tested (nothing could leak); a longer --hold may help", **ev)
+                     "tested (nothing could leak); " + ("a longer --hold may help" if until_down else
+                                                        "the VPN kept its route into the tunnel meanwhile"), **ev)
         elif leak:
             e = ev["leak"]
             self.set(sid, "fail", f"{e['packets']} packets leaked, first {e['first_ms'] / 1000:.1f} s after the fault, "

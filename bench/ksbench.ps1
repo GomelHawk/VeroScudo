@@ -975,7 +975,8 @@ function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [script
     $hits = @([KsBench.Probe]::Hits | Where-Object { $_[0] -eq $Id } | ForEach-Object { $_[1] })
     $ev = [ordered]@{ tunnel_went_down = $wentDown; recovered = $back; leak = (Get-Evidence $leak $t0); dns = (Get-Evidence $dns $t0); online = $hits }
     if ($leak.Count -eq 0 -and -not $wentDown) {
-        Set-Result $Id 'n/a' "the tunnel stayed up for all $HoldSec s of the fault, so the kill-switch was not tested (nothing could leak); a longer -Hold may help" $ev
+        Set-Result $Id 'n/a' ("the tunnel stayed up for all $HoldSec s of the fault, so the kill-switch was not tested (nothing could leak); " +
+            $(if ($UntilDown) { 'a longer -Hold may help' } else { 'the VPN kept its route into the tunnel meanwhile' })) $ev
     } elseif ($leak.Count -gt 0) {
         $e = $ev.leak
         Set-Result $Id 'fail' (('{0} packets leaked, first {1:N1} s after the fault, to {2}' -f $e.packets, ($e.first_ms / 1000), (@($e.to)[0..([Math]::Min(2, $e.to.Count - 1))] -join ', ')) +
