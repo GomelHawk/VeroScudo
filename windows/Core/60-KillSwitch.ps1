@@ -666,7 +666,8 @@ function Sync-VeroKillSwitchCore {
     # tunnel that carries traffic - a split tunnel or a drop not yet proven over is never watched
     $script:WatchLuid = if ($tun -and $full -and -not $suspect -and $Config.Vm) { [uint64]$tun } else { [uint64]0 }
     $aclWant = ((-not [bool]$tun) -or [bool]$suspect -or -not $full) -and [bool]$Config.Vm
-    if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant) {
+    # the record on disk too: the NetDown task blocks the VMs in its own process, so this one may not know they are blocked
+    if ($applied -or $script:AclBlocked -ne $aclWant -or $aclWant -or (Test-Path -LiteralPath $p.VmAcl)) {
         try { $null = Set-VeroVmBlock -Block $aclWant -Action $Action; $script:AclBlocked = $aclWant }
         catch { Write-VeroLog "ERROR: Hyper-V port ACLs: $($_.Exception.Message)" $Action }
     }
