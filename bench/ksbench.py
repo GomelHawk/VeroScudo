@@ -501,8 +501,32 @@ class Linux:
 
     def route_iface(self, dst):
         fam = "-6" if ":" in dst else "-4"
-        r = run_json(["ip", "-j", fam, "route", "get", dst])
+        dev = self._route_get(fam, dst, [])
+        if dev and not self._tunnel_dev(dev):
+            # a proxy app's tunnel (sing-box: Hiddify) can live outside the main table: its firewall marks the traffic and
+            # a rule sends marked packets to its own table - the plain look-up does not see that
+            for rl in run_json(["ip", "-j", fam, "rule"]):
+                if rl.get("fwmark") and "not" not in rl and str(rl.get("table", "main")) not in ("main", "local", "default"):
+                    d = self._route_get(fam, dst, ["mark", rl["fwmark"]])
+                    if d and self._tunnel_dev(d):
+                        return d
+        return dev
+
+    @staticmethod
+    def _route_get(fam, dst, extra):
+        r = run_json(["ip", "-j", fam, "route", "get", dst] + extra)
         return r[0].get("dev") if r and r[0].get("type", "unicast") == "unicast" else None
+
+    @staticmethod
+    def _tunnel_dev(dev):
+        """A tun/tap device (OpenVPN, sing-box), WireGuard or another interface without Ethernet frames."""
+        if os.path.exists(f"/sys/class/net/{dev}/tun_flags"):
+            return True
+        try:
+            with open(f"/sys/class/net/{dev}/type") as f:
+                return f.read().strip() not in ("1", "772")        # 1 Ethernet, 772 loopback
+        except OSError:
+            return False
 
     def _fw(self):
         return "iptables" if shutil.which("iptables") else "nft" if shutil.which("nft") else None
