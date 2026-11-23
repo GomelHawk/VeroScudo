@@ -32,20 +32,27 @@ def test_parse_and_classify(v):
     cls = exp.pop("cls")
     for k, want in exp.items():
         assert getattr(p, k) == want, k
-    assert ksbench.classify(p, set(VEC["servers"]), {tuple(x) for x in VEC["app"]}, {tuple(x) for x in VEC["own"]}) == cls
+    p.prog = v.get("prog")
+    assert ksbench.classify(p, set(VEC["servers"]), set(VEC["app"]), {tuple(x) for x in VEC["own"]}) == cls
 
 
-def test_vpn_app_ports():
-    ports = {(6, 1): {10}, (17, 2): {11}, (6, 3): {12}, (6, 4): {13}, (6, 5): {10, 14}, (6, 6): {15}}
-    paths = {10: "/opt/Hiddify/HiddifyCli", 11: "/opt/Hiddify/Hiddify", 12: "/usr/bin/curl", 13: None,
-             14: "/usr/bin/firefox", 15: "/usr/bin/python3"}
-    got, apps = ksbench.vpn_app_ports(ports, paths, {(6, 1)})
-    assert got == {(6, 1), (17, 2)} and apps == ["/opt/Hiddify/HiddifyCli"]    # its UI in the same folder too
-    got, apps = ksbench.vpn_app_ports({(17, 1): {20}, (6, 2): {21}}, {20: "/usr/sbin/openvpn", 21: "/usr/sbin/sshd"},
-                                      {(17, 1)})
-    assert got == {(17, 1)} and apps == ["/usr/sbin/openvpn"]      # a system folder: only the program itself
-    assert ksbench.vpn_app_ports({(6, 1): {30}}, {30: "/usr/bin/python3"}, {(6, 1)}) == (set(), [])
-    assert ksbench.vpn_app_ports(ports, paths, set()) == (set(), [])     # kernel WireGuard: no program at all
+def test_vpn_app():
+    progs = {"/opt/Hiddify/HiddifyCli", "/opt/Hiddify/hiddify", "/usr/bin/firefox", "/usr/lib/systemd/systemd-resolved",
+             "/usr/bin/python3.14"}
+    assert ksbench.vpn_app({"/opt/Hiddify/HiddifyCli"}, progs) == {"/opt/Hiddify/HiddifyCli", "/opt/Hiddify/hiddify"}
+    assert ksbench.vpn_app({"/usr/sbin/openvpn"}, {"/usr/sbin/sshd"}) == {"/usr/sbin/openvpn"}   # a system folder: only itself
+    assert ksbench.vpn_app({"/usr/bin/python3.14", "/usr/lib/systemd/systemd-resolved"}, progs) == set()  # the bench, the system
+    assert ksbench.vpn_app({None}, progs) == set()                     # kernel WireGuard: no program at all
+
+
+def test_owners_follow_a_port_from_program_to_program():
+    o = ksbench.Owners(lambda: [], lambda pid: {1: "/opt/vpn/vpnd", 2: "/usr/bin/firefox"}[pid])
+    o.paths = {1: "/opt/vpn/vpnd", 2: "/usr/bin/firefox"}
+    o.held = {(6, 40000): [[1, 100.0, 105.0], [2, 200.0, 210.0]], (17, 5353): [[1, 100.0, 300.0], [2, 150.0, 160.0]]}
+    assert o.program(6, 40000, 104.0) == "/opt/vpn/vpnd"
+    assert o.program(6, 40000, 205.0) == "/usr/bin/firefox"        # the same port, later another program's
+    assert o.program(6, 40000, 150.0) is None                      # nobody held it then
+    assert o.program(17, 5353, 155.0) is None                      # two could have: counted
 
 
 def test_pcap_stream_both_byte_orders():

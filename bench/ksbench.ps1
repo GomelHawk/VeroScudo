@@ -110,6 +110,7 @@ namespace KsBench
         public int Ver; public string Src; public string Dst; public int Proto;
         public int SPort = -1; public int DPort = -1; public int IType = -1; public int Ttl = -1; public double Ts;
         public string QName;
+        public string Prog; public bool Known;     // the program that sent it (Owners), once looked up
         public string Where()
         {
             string n = Proto == 6 ? "tcp" : Proto == 17 ? "udp" : Proto == 1 ? "icmp" : Proto == 58 ? "icmp6" : "proto" + Proto;
@@ -247,7 +248,8 @@ namespace KsBench
 
         public static string Classify(Pkt p, ICollection<string> servers) { return Classify(p, servers, null, null); }
 
-        // app: "proto|local port" of the VPN app's own sockets - a kill-switch lets the VPN app out; never the bench's own test traffic.
+        // app: the VPN app's program files - a packet its programs sent (p.Prog) is its own: a kill-switch lets the VPN app out;
+        // never the bench's own test traffic.
         // own: "proto|local port|server port" of the VPN's connection to its server - from that socket to that port it is the VPN
         // moving to another of its servers (a name with several addresses), also when no program owns the socket (kernel WireGuard)
         public static string Classify(Pkt p, ICollection<string> servers, ICollection<string> app, ICollection<string> own)
@@ -256,7 +258,7 @@ namespace KsBench
             if (servers.Contains(p.Dst) || (own != null && own.Contains(p.Proto + "|" + p.SPort + "|" + p.DPort) && !Forwarded(p.Ttl))) return "server";
             if (p.Proto == 17 && (Is(p.DPort, 67, 68, 546, 547) || Is(p.SPort, 67, 68, 546, 547))) return "ignore";
             if (p.Proto == 58 && Is(p.IType, 130, 131, 132, 133, 134, 135, 136, 137, 143)) return "ignore";
-            if (app != null && app.Contains(p.Proto + "|" + p.SPort) && !Forwarded(p.Ttl) && !IsTest(p)) return "app";
+            if (app != null && p.Prog != null && app.Contains(p.Prog) && !Forwarded(p.Ttl) && !IsTest(p)) return "app";
             if ((p.Proto == 6 || p.Proto == 17) && (p.DPort == 53 || p.DPort == 853)) return "dns";
             if (IsLan(p.Dst)) return "lan";
             return Forwarded(p.Ttl) ? "vmleak" : "leak";
@@ -375,7 +377,9 @@ namespace KsBench
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
-        public static readonly Dictionary<string, HashSet<int>> Ports = new Dictionary<string, HashSet<int>>();
+        // "proto|port" -> spans {pid, first seen, last seen}: ports come back (ephemeral ports), a packet belongs to the
+        // program that held its port at that moment
+        public static readonly Dictionary<string, List<double[]>> Held = new Dictionary<string, List<double[]>>();
         public static readonly Dictionary<int, string> Paths = new Dictionary<int, string>();
         static Thread T;
         static volatile bool Stop;
@@ -395,19 +399,22 @@ namespace KsBench
         {
             List<int[]> rows = new List<int[]>();
             Read(true, 2, rows); Read(true, 23, rows); Read(false, 2, rows); Read(false, 23, rows);
+            double now = Probe.Now();
             List<int> fresh = new List<int>();
-            lock (Ports) foreach (int[] r in rows) if (!Paths.ContainsKey(r[2]) && !fresh.Contains(r[2])) fresh.Add(r[2]);
+            lock (Held) foreach (int[] r in rows) if (!Paths.ContainsKey(r[2]) && !fresh.Contains(r[2])) fresh.Add(r[2]);
             Dictionary<int, string> found = new Dictionary<int, string>();
             foreach (int pid in fresh) found[pid] = Image(pid);
-            lock (Ports)
+            lock (Held)
             {
                 foreach (KeyValuePair<int, string> kv in found) Paths[kv.Key] = kv.Value;
                 foreach (int[] r in rows)
                 {
                     string k = r[0] + "|" + r[1];
-                    HashSet<int> s;
-                    if (!Ports.TryGetValue(k, out s)) Ports[k] = s = new HashSet<int>();
-                    s.Add(r[2]);
+                    List<double[]> spans;
+                    if (!Held.TryGetValue(k, out spans)) Held[k] = spans = new List<double[]>();
+                    double[] last = spans.Count > 0 ? spans[spans.Count - 1] : null;
+                    if (last != null && (int)last[0] == r[2] && now - last[2] < 1.0) last[2] = now;
+                    else spans.Add(new double[] { r[2], now, now });
                 }
             }
         }
@@ -451,14 +458,6 @@ namespace KsBench
             finally { CloseHandle(h); }
         }
 
-        // "proto|local port" of every packet this computer sent to a VPN server
-        public static HashSet<string> Outer(List<Pkt> pkts, ICollection<string> servers)
-        {
-            HashSet<string> r = new HashSet<string>();
-            foreach (Pkt p in pkts) if (p.SPort > 0 && servers.Contains(p.Dst)) r.Add(p.Proto + "|" + p.SPort);
-            return r;
-        }
-
         // "proto|local port|server port" of the VPN's connection to its server (Parse.Classify)
         public static HashSet<string> Own(List<Pkt> pkts, ICollection<string> servers)
         {
@@ -467,43 +466,49 @@ namespace KsBench
             return r;
         }
 
-        public static HashSet<string> AppPorts(ICollection<string> outer, ICollection<string> never, string sysDir, List<string> apps)
+        // the program file that held this local port at ts (0.5 s either side), or null - also when two could have
+        public static string Program(Dictionary<string, List<double[]>> held, Dictionary<int, string> paths, int proto, int port, double ts)
         {
-            lock (Ports) return AppPorts(Ports, Paths, outer, never, sysDir, apps);
+            List<double[]> spans;
+            if (!held.TryGetValue(proto + "|" + port, out spans)) return null;
+            int who = -1;
+            foreach (double[] sp in spans)
+            {
+                if (ts < sp[1] - 0.5 || ts > sp[2] + 0.5) continue;
+                if (who >= 0 && who != (int)sp[0]) return null;
+                who = (int)sp[0];
+            }
+            string f;
+            return who >= 0 && paths.TryGetValue(who, out f) ? f : null;
         }
 
-        // the local ports of the VPN app: of the programs that sent to the VPN server (outer), and of other programs in the
-        // same folder (its tray or UI) - never a system program, never a program under the Windows folder. A port that
-        // another program also had during the run is not the app's. apps: the programs found
-        public static HashSet<string> AppPorts(Dictionary<string, HashSet<int>> ports, Dictionary<int, string> paths,
-            ICollection<string> outer, ICollection<string> never, string sysDir, List<string> apps)
+        // the program of each packet - once, for packets older than `before` (the look is every 0.1 s)
+        public static void Know(List<Pkt> pkts, double before)
+        {
+            lock (Held)
+                foreach (Pkt p in pkts)
+                    if (!p.Known && p.Ts < before) { p.Prog = p.SPort > 0 ? Program(Held, Paths, p.Proto, p.SPort, p.Ts) : null; p.Known = true; }
+        }
+
+        // the VPN app's program files: those that sent to the VPN server (pkts known), and the other programs in their folder
+        // (its tray or UI) - never a system program or the bench itself, never by the Windows folder
+        public static HashSet<string> App(List<Pkt> pkts, ICollection<string> servers, ICollection<string> never, string sysDir)
+        {
+            List<string> sent = new List<string>();
+            foreach (Pkt p in pkts) if (p.Prog != null && servers.Contains(p.Dst)) sent.Add(p.Prog);
+            List<string> all;
+            lock (Held) all = new List<string>(Paths.Values);
+            return App(sent, all, never, sysDir);
+        }
+
+        public static HashSet<string> App(ICollection<string> sent, ICollection<string> progs, ICollection<string> never, string sysDir)
         {
             HashSet<string> app = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string k in outer)
-            {
-                HashSet<int> s;
-                if (!ports.TryGetValue(k, out s)) continue;
-                foreach (int pid in s) { string f; if (paths.TryGetValue(pid, out f) && f != null && !Sys(f, never)) app.Add(f); }
-            }
+            foreach (string f in sent) if (f != null && !Sys(f, never)) app.Add(f);
             HashSet<string> dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string f in app)
-            {
-                string d = Dir(f);
-                if (d != null && !d.StartsWith(sysDir, StringComparison.OrdinalIgnoreCase)) dirs.Add(d);
-            }
-            apps.AddRange(app);
-            apps.Sort(StringComparer.OrdinalIgnoreCase);
-            HashSet<string> r = new HashSet<string>();
-            foreach (KeyValuePair<string, HashSet<int>> kv in ports)
-            {
-                bool all = kv.Value.Count > 0;
-                foreach (int pid in kv.Value)
-                {
-                    string f;
-                    if (!paths.TryGetValue(pid, out f) || f == null || Sys(f, never) || !(app.Contains(f) || (Dir(f) != null && dirs.Contains(Dir(f))))) { all = false; break; }
-                }
-                if (all) r.Add(kv.Key);
-            }
+            foreach (string f in app) { string d = Dir(f); if (d != null && !d.StartsWith(sysDir, StringComparison.OrdinalIgnoreCase)) dirs.Add(d); }
+            HashSet<string> r = new HashSet<string>(app, StringComparer.OrdinalIgnoreCase);
+            foreach (string f in progs) if (f != null && !Sys(f, never) && Dir(f) != null && dirs.Contains(Dir(f))) r.Add(f);
             return r;
         }
 
@@ -513,7 +518,7 @@ namespace KsBench
         {
             string n = f.Substring(f.LastIndexOfAny(new char[] { '\\', '/' }) + 1).ToLowerInvariant();
             if (n.EndsWith(".exe")) n = n.Substring(0, n.Length - 4);
-            return never.Contains(n);
+            return never.Contains(n) || n.StartsWith("python") || n.StartsWith("systemd") || n == "powershell" || n == "pwsh";
         }
     }
 
@@ -809,32 +814,34 @@ function Get-Evidence($Items, [double]$T0) {
         first_ms = [int](($Items[0].Ts - $T0) * 1000)
         last_ms  = [int](($Items[$Items.Count - 1].Ts - $T0) * 1000)
         to       = @($top | ForEach-Object { "$($_.Name) ($($_.Count))" })
+        programs = @($Items | Where-Object { $_.Prog } | ForEach-Object { Split-Path -Leaf $_.Prog } | Sort-Object -Unique)
     }
 }
 
 function Get-ServerName([string[]]$Name, [string[]]$Server) {
     <# Of the names looked up, those that resolve to a VPN server address - the client finding its own server for the
        reconnect. Your provider sees the connection to that address anyway, so the look-up tells it nothing new. Resolved
-       after the outages, through the VPN. #>
-    foreach ($n in $Name) {
-        $a = try { @([System.Net.Dns]::GetHostAddresses($n) | ForEach-Object { $_.IPAddressToString }) } catch { @() }
-        if (@($a | Where-Object { $Server -contains $_ }).Count) { $n }
+       after the outages, through the VPN - all at once, at most 5 s: a dead resolver must not stall the bench. #>
+    $ask = @(foreach ($n in $Name) { if ($n) { @{ Name = $n; Ar = $(try { [System.Net.Dns]::BeginGetHostAddresses($n, $null, $null) } catch { $null }) } } })
+    $end = [KsBench.Probe]::Now() + 5
+    foreach ($q in $ask) {
+        if (-not $q.Ar) { continue }
+        $left = [int][Math]::Max(0, ($end - [KsBench.Probe]::Now()) * 1000)
+        if (-not $q.Ar.AsyncWaitHandle.WaitOne($left)) { continue }
+        $a = try { @([System.Net.Dns]::EndGetHostAddresses($q.Ar) | ForEach-Object { $_.IPAddressToString }) } catch { @() }
+        if (@($a | Where-Object { $Server -contains $_ }).Count) { $q.Name }
     }
 }
 
-function Get-AppPort {
-    <# The VPN app's own sockets ("proto|port") - of the programs that sent to the VPN server and of the others in their
-       folder; $script:AppFiles: those programs. #>
-    $files = New-Object 'System.Collections.Generic.List[string]'
-    $outer = [KsBench.Owners]::Outer($script:Pkts, [string[]]@($script:Servers.Keys))
-    $ports = [KsBench.Owners]::AppPorts($outer, [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'), $files)
-    $script:AppFiles = @($files)
-    return , $ports
+function Get-AppProgram {
+    <# The VPN app's program files - those that sent to the VPN server and the others in their folder. #>
+    [KsBench.Owners]::Know($script:Pkts, [KsBench.Probe]::Now() - 1)
+    return , [KsBench.Owners]::App($script:Pkts, [string[]]@($script:Servers.Keys), [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'))
 }
 
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {
     $srv = [string[]]@($script:Servers.Keys)
-    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, $srv, $Class, (Get-AppPort), [KsBench.Owners]::Own($script:Pkts, $srv))
+    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, $srv, $Class, (Get-AppProgram), [KsBench.Owners]::Own($script:Pkts, $srv))
 }
 
 function Get-PhysicalAdapter {
@@ -937,7 +944,8 @@ function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [script
         Set-Result $Id 'n/a' "the tunnel stayed up for all $HoldSec s of the fault, so the kill-switch was not tested (nothing could leak); a longer -Hold may help" $ev
     } elseif ($leak.Count -gt 0) {
         $e = $ev.leak
-        Set-Result $Id 'fail' ('{0} packets leaked, first {1:N1} s after the fault, to {2}' -f $e.packets, ($e.first_ms / 1000), (@($e.to)[0..([Math]::Min(2, $e.to.Count - 1))] -join ', ')) $ev
+        Set-Result $Id 'fail' (('{0} packets leaked, first {1:N1} s after the fault, to {2}' -f $e.packets, ($e.first_ms / 1000), (@($e.to)[0..([Math]::Min(2, $e.to.Count - 1))] -join ', ')) +
+            $(if ($e.programs) { " - sent by $($e.programs -join ', ')" } else { '' })) $ev
     } elseif ($hits) {
         Set-Result $Id 'invalid' 'the online check saw your real IP but the capture did not - traffic left through an adapter the bench does not watch (use -Iface)' $ev
     } else {
@@ -1229,9 +1237,9 @@ function Write-Report {
     $appEv = Get-Evidence $own $(if ($own.Count) { $own[0].Ts } else { 0 })
     if ($own.Count) {
         $names = @($own | ForEach-Object { $_.QName } | Where-Object { $_ } | Sort-Object -Unique | Select-Object -First 5)
-        $appEv['programs'] = $script:AppFiles; $appEv['names'] = $names
+        $appEv['names'] = $names
         Write-Host ("Not counted - the VPN app's own connections outside the tunnel ({0}): {1} packets, to {2}{3}" -f
-            (@($script:AppFiles | ForEach-Object { Split-Path -Leaf $_ }) -join ', '), $appEv.packets, (@($appEv.to | Select-Object -First 3) -join ', '),
+            ($appEv.programs -join ', '), $appEv.packets, (@($appEv.to | Select-Object -First 3) -join ', '),
             $(if ($names) { " - names: $($names -join ', ')" } else { '' }))
     }
     $os = Get-CimInstance Win32_OperatingSystem
@@ -1314,7 +1322,7 @@ function Invoke-Bench {
             if (-not (Read-YesNo 'Is this your VPN server? [Y/n]' $true)) { throw 'ksbench: name the VPN server with -Server and run again.' }
             foreach ($c in $cand) { $script:Servers[$c.Ip] = @{ Proto = $c.Proto; Port = $c.Port } }
         }
-        $script:OuterPorts = @($script:Pkts | Where-Object { $script:Servers.ContainsKey($_.Dst) -and $_.SPort -gt 0 } | ForEach-Object SPort | Sort-Object -Unique)
+        $script:OuterPorts = @($script:Pkts | Where-Object { $script:Servers.ContainsKey($_.Dst) -and $_.SPort -gt 0 -and $_.Proto -eq 17 } | ForEach-Object SPort | Sort-Object -Unique)   # UDP: D2 looks them up as UDP endpoints
         if ($doOnline) {
             [KsBench.Probe]::Online = $true
             [KsBench.Probe]::OnlineTick($null); Start-Sleep -Seconds 3

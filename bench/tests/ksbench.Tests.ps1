@@ -6,7 +6,7 @@ BeforeAll {
 
 Describe 'parse and classify' {
     It '<name>' -ForEach @((Get-Content -Raw (Join-Path $PSScriptRoot 'vectors.json') | ConvertFrom-Json).vectors |
-            ForEach-Object { @{ name = $_.name; hex = $_.hex; linktype = $_.linktype; expect = $_.expect } }) {
+            ForEach-Object { @{ name = $_.name; hex = $_.hex; linktype = $_.linktype; prog = $_.prog; expect = $_.expect } }) {
         $p = [KsBench.Parse]::Hex($hex, [int]$linktype)
         if ($null -eq $expect) { $p | Should -BeNullOrEmpty; return }
         $map = @{ ver = 'Ver'; src = 'Src'; dst = 'Dst'; proto = 'Proto'; sport = 'SPort'; dport = 'DPort'; itype = 'IType'; ttl = 'Ttl'; qname = 'QName' }
@@ -16,42 +16,35 @@ Describe 'parse and classify' {
             if ($null -eq $want) { $want = -1 }
             $p.($map[$k]) | Should -Be $want -Because $k
         }
-        $app = [string[]]@($script:Vec.app | ForEach-Object { "$($_[0])|$($_[1])" })
+        $p.Prog = $prog
+        $app = [string[]]@($script:Vec.app)
         $own = [string[]]@($script:Vec.own | ForEach-Object { "$($_[0])|$($_[1])|$($_[2])" })
         [KsBench.Parse]::Classify($p, [string[]]$script:Vec.servers, $app, $own) | Should -Be $expect.cls
     }
 }
 
-Describe 'the VPN app''s own sockets' {
-    BeforeAll {
-        function New-Port([hashtable]$Map) {
-            $d = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.HashSet[int]]'
-            foreach ($k in $Map.Keys) { $s = New-Object 'System.Collections.Generic.HashSet[int]'; foreach ($p in $Map[$k]) { [void]$s.Add($p) }; $d[$k] = $s }
-            , $d
-        }
-        function New-Path([hashtable]$Map) {
-            $d = New-Object 'System.Collections.Generic.Dictionary[int,string]'
-            foreach ($k in $Map.Keys) { $d[[int]$k] = $Map[$k] }
-            , $d
-        }
-        function Get-App($Ports, $Paths, [string[]]$Outer) {
-            $files = New-Object 'System.Collections.Generic.List[string]'
-            $r = [KsBench.Owners]::AppPorts($Ports, $Paths, $Outer, [string[]]$NeverKill, 'C:\Windows', $files)
-            @{ Ports = @($r | Sort-Object); Files = @($files) }
-        }
-    }
+Describe 'the VPN app''s own programs' {
     It 'the program that talks to the server and the others in its folder; never another program' {
-        $ports = New-Port @{ '6|1' = 10; '17|2' = 11; '6|3' = 12; '6|4' = 13; '6|5' = 10, 14; '6|6' = 15 }
-        $paths = New-Path @{ 10 = 'C:\Program Files\Hiddify\HiddifyCore.exe'; 11 = 'C:\Program Files\Hiddify\Hiddify.exe'
-            12 = 'C:\Program Files\Mozilla Firefox\firefox.exe'; 13 = $null; 14 = 'C:\Program Files\Google\Chrome\chrome.exe'; 15 = 'C:\Windows\System32\svchost.exe' }
-        $r = Get-App $ports $paths @('6|1')
-        $r.Ports | Should -Be @('17|2', '6|1')
-        $r.Files | Should -Be @('C:\Program Files\Hiddify\HiddifyCore.exe')
+        $progs = [string[]]@('C:\Program Files\Hiddify\HiddifyCore.exe', 'C:\Program Files\Hiddify\Hiddify.exe',
+            'C:\Program Files\Mozilla Firefox\firefox.exe', 'C:\Windows\System32\svchost.exe', 'C:\Python314\python.exe')
+        $r = [KsBench.Owners]::App([string[]]@('C:\Program Files\Hiddify\HiddifyCore.exe'), $progs, [string[]]$NeverKill, 'C:\Windows')
+        @($r | Sort-Object) | Should -Be @('C:\Program Files\Hiddify\Hiddify.exe', 'C:\Program Files\Hiddify\HiddifyCore.exe')
     }
-    It 'the Windows folder: only the program itself; a system program: nothing' {
-        $r = Get-App (New-Port @{ '17|1' = 20; '6|2' = 21 }) (New-Path @{ 20 = 'C:\Windows\System32\vpnclient.exe'; 21 = 'C:\Windows\System32\curl.exe' }) @('17|1')
-        $r.Ports | Should -Be @('17|1')
-        (Get-App (New-Port @{ '6|1' = 30 }) (New-Path @{ 30 = 'C:\Windows\System32\svchost.exe' }) @('6|1')).Ports.Count | Should -Be 0
+    It 'the Windows folder: only the program itself; a system program or the bench: nothing' {
+        $r = [KsBench.Owners]::App([string[]]@('C:\Windows\System32\vpnclient.exe'), [string[]]@('C:\Windows\System32\curl.exe'), [string[]]$NeverKill, 'C:\Windows')
+        @($r) | Should -Be @('C:\Windows\System32\vpnclient.exe')
+        $r = [KsBench.Owners]::App([string[]]@('C:\Windows\System32\svchost.exe', 'C:\Python314\python.exe'), [string[]]@(), [string[]]$NeverKill, 'C:\Windows')
+        $r.Count | Should -Be 0
+    }
+    It 'a port that comes back belongs to the program that held it at that moment' {
+        $held = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[double[]]]'
+        $l = New-Object 'System.Collections.Generic.List[double[]]'
+        $l.Add([double[]]@(1, 100, 105)); $l.Add([double[]]@(2, 200, 210)); $held['6|40000'] = $l
+        $paths = New-Object 'System.Collections.Generic.Dictionary[int,string]'
+        $paths[1] = 'C:\vpn\vpnd.exe'; $paths[2] = 'C:\ff\firefox.exe'
+        [KsBench.Owners]::Program($held, $paths, 6, 40000, 104) | Should -Be 'C:\vpn\vpnd.exe'
+        [KsBench.Owners]::Program($held, $paths, 6, 40000, 205) | Should -Be 'C:\ff\firefox.exe'
+        [KsBench.Owners]::Program($held, $paths, 6, 40000, 150) | Should -BeNullOrEmpty
     }
 }
 

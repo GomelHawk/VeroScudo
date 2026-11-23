@@ -9,10 +9,10 @@ their fake DNS). A packet to port 53 or 853 (DNS, DNS over TLS) is a **DNS leak*
 including a router on the local network.
 
 **The VPN app's own traffic** is not counted either: a kill-switch must let the VPN app out, or it could
-never reconnect. While the bench runs it notes which program owns each connection. The VPN app is the
-program that sends to the VPN server, plus the other programs in its folder (its user interface, its
-tray). A system program and the Windows folder never count as the VPN app, and neither does a connection
-another program also used. Its packets are listed at the end of the report with their addresses and
+never reconnect. While the bench runs it notes which program holds each connection, and a packet belongs to
+the program that held its port at that moment. The VPN app is the program that sends to the VPN server,
+plus the other programs in its folder (its user interface, its tray). A system program, the bench itself
+and the Windows folder never count as the VPN app. Its packets are listed at the end of the report with their addresses and
 DNS names, because those sites saw your real address. The bench's own test traffic always counts, even
 when it went out through the VPN app. Turn off split tunnelling for the test: traffic the VPN app sends
 past the tunnel on purpose would be counted as its own.

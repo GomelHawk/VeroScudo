@@ -3,14 +3,7 @@
   "203.0.113.1"
  ],
  "app": [
-  [
-   6,
-   51001
-  ],
-  [
-   17,
-   51002
-  ]
+  "/opt/vpn/vpnd"
  ],
  "own": [
   [
@@ -239,6 +232,7 @@
    "name": "the VPN app's own connection: not counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff0800450000280000000040060000c0a8011422753b51c73901bb00000000000000005002000000000000",
+   "prog": "/opt/vpn/vpnd",
    "expect": {
     "dst": "34.117.59.81",
     "sport": 51001,
@@ -249,6 +243,7 @@
    "name": "the VPN app's own dns query: not counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff0800450000370000000040110000c0a8011401010101c73a003500230000000101000001000000000000066970696e666f02696f0000010001",
+   "prog": "/opt/vpn/vpnd",
    "expect": {
     "dst": "1.1.1.1",
     "qname": "ipinfo.io",
@@ -256,36 +251,40 @@
    }
   },
   {
-   "name": "the bench's test address from the VPN app's port: counted",
+   "name": "the bench's test address sent by the VPN app: counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff0800450000280000000040060000c0a80114c6336407c73901bb00000000000000005002000000000000",
+   "prog": "/opt/vpn/vpnd",
    "expect": {
     "dst": "198.51.100.7",
     "cls": "leak"
    }
   },
   {
-   "name": "the bench's dns name from the VPN app's port: counted",
+   "name": "the bench's dns name asked by the VPN app: counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff0800450000440000000040110000c0a8011401010101c73a0035003000000001010000010000000000000a6b73622d616263313233076578616d706c6503636f6d0000010001",
+   "prog": "/opt/vpn/vpnd",
    "expect": {
     "qname": "ksb-abc123.example.com",
     "cls": "dns"
    }
   },
   {
-   "name": "forwarded for a VM from the VPN app's port number: counted",
+   "name": "forwarded for a VM, the VPN app's port number: counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff080045000028000000003f060000c0a8011422753b51c73901bb00000000000000005002000000000000",
+   "prog": "/opt/vpn/vpnd",
    "expect": {
     "ttl": 63,
     "cls": "vmleak"
    }
   },
   {
-   "name": "another program's port: counted",
+   "name": "another program: counted",
    "linktype": 1,
    "hex": "001122334455aabbccddeeff0800450000280000000040060000c0a8011422753b51c73b01bb00000000000000005002000000000000",
+   "prog": "/usr/bin/firefox",
    "expect": {
     "sport": 51003,
     "cls": "leak"

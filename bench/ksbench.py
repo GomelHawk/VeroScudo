@@ -67,6 +67,7 @@ _LAN = [ipaddress.ip_network(n) for n in (
     "224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/8", "fe80::/10", "fc00::/7", "ff00::/8", "::1/128", "::/128",
     "198.18.0.0/15")]                       # not on the internet either: proxy apps' fake DNS answers with these
 _TEST = [ipaddress.ip_network(n) for n in ("198.51.100.0/24", "2001:db8::/32")]   # where the bench sends its own traffic
+SYSTEM_NAMES = ("python", "systemd", "powershell", "pwsh")      # never the VPN app, never killed: the bench, the system
 SYSTEM_DIRS = {"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/usr/libexec",
                "/usr/lib", "/opt/homebrew/bin"}
 
@@ -74,12 +75,13 @@ SYSTEM_DIRS = {"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr
 # ---------------------------------------------------------------- packets
 
 class Pkt:
-    __slots__ = ("dport", "dst", "itype", "proto", "qname", "sport", "src", "ttl", "ver")
+    __slots__ = ("dport", "dst", "itype", "known", "prog", "proto", "qname", "sport", "src", "ttl", "ver")
 
     def __init__(self, ver, src, dst, proto, sport=None, dport=None, itype=None, ttl=None):
         self.ver, self.src, self.dst, self.proto = ver, src, dst, proto
         self.sport, self.dport, self.itype, self.ttl = sport, dport, itype, ttl
         self.qname = None
+        self.prog, self.known = None, False     # the program that sent it (Owners), once looked up
 
     def where(self):
         name = {6: "tcp", 17: "udp", 1: "icmp", 58: "icmp6"}.get(self.proto, f"proto{self.proto}")
@@ -146,8 +148,14 @@ def server_names(names, servers, resolve=None):
             return {ai[4][0].split("%")[0] for ai in socket.getaddrinfo(n, None)}
         except OSError:
             return set()
-    resolve = resolve or lookup
-    return {n for n in names if n and resolve(n) & set(servers)}
+    resolve, got = resolve or lookup, {}
+    threads = [threading.Thread(target=lambda n=n: got.update({n: resolve(n)}), daemon=True) for n in names if n]
+    for t in threads:
+        t.start()
+    end = time.time() + 5                   # a dead resolver must not stall the bench: what is not answered by then is counted
+    for t in threads:
+        t.join(max(0.0, end - time.time()))
+    return {n for n, a in list(got.items()) if a & set(servers)}
 
 
 def parse_frame(data, linktype):
@@ -193,8 +201,8 @@ def forwarded(ttl):
 
 def classify(p, servers, app=(), own=()):
     """'server' | 'ignore' | 'app' | 'dns' | 'lan' | 'leak' (sent by the computer itself) | 'vmleak' (forwarded for a VM
-    or WSL) for an outbound packet on the physical adapter. app: the (proto, local port) pairs of the VPN app's own
-    sockets - a kill-switch lets the VPN app out; never the bench's own test traffic. own: (proto, local port, server port)
+    or WSL) for an outbound packet on the physical adapter. app: the VPN app's program files - a packet its programs sent
+    (p.prog) is the VPN app's own: a kill-switch lets the VPN app out; never the bench's own test traffic. own: (proto, local port, server port)
     of the VPN's connection to its server - from that socket to that port it is the VPN moving to another of its servers
     (a name with several addresses), also when no program owns the socket (kernel WireGuard)."""
     if p is None:
@@ -205,7 +213,7 @@ def classify(p, servers, app=(), own=()):
         return "ignore"                     # DHCP
     if p.proto == 58 and p.itype in (130, 131, 132, 133, 134, 135, 136, 137, 143):
         return "ignore"                     # neighbour discovery, router solicitation, MLD
-    if (p.proto, p.sport) in app and not forwarded(p.ttl) and not is_test(p):
+    if p.prog and p.prog in app and not forwarded(p.ttl) and not is_test(p):
         return "app"
     if p.proto in (6, 17) and p.dport in (53, 853):
         return "dns"
@@ -328,11 +336,12 @@ class Capture:
 
 
 class Owners:
-    """Which program owns each local port, looked up every 0.2 s through the run (a packet capture does not tell)."""
+    """Which program held each local port when, looked up every 0.2 s through the run (a packet capture does not tell).
+    Ports come back (ephemeral ports): a packet belongs to the program that held its port at that moment."""
 
     def __init__(self, listing, path):
         self.listing, self.path = listing, path     # () -> [(proto, port, pid)]; pid -> program file or None
-        self.ports, self.paths, self.lock, self.stop_ev = {}, {}, threading.Lock(), threading.Event()
+        self.held, self.paths, self.lock, self.stop_ev = {}, {}, threading.Lock(), threading.Event()
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -343,36 +352,43 @@ class Owners:
     def _loop(self):
         while not self.stop_ev.is_set():
             try:
-                rows = self.listing()
+                rows = set(self.listing())
             except Exception:               # noqa: BLE001 - a failed look: try again on the next round
-                rows = []
-            new = {pid for _, _, pid in rows if pid not in self.paths}
-            paths = {pid: self.path(pid) for pid in new}
+                rows = set()
+            now = time.time()
+            paths = {pid: self.path(pid) for _, _, pid in rows if pid not in self.paths}
             with self.lock:
-                for proto, port, pid in rows:
-                    self.ports.setdefault((proto, port), set()).add(pid)
                 self.paths.update(paths)
+                for proto, port, pid in rows:
+                    spans = self.held.setdefault((proto, port), [])     # [pid, first seen, last seen]
+                    if spans and spans[-1][0] == pid and now - spans[-1][2] < 1.0:
+                        spans[-1][2] = now
+                    else:
+                        spans.append([pid, now, now])
             self.stop_ev.wait(0.2)
 
-    def snapshot(self):
+    def program(self, proto, port, ts):
+        """The program file that held this local port at ts (0.5 s either side), or None - also when two could have."""
         with self.lock:
-            return {k: set(v) for k, v in self.ports.items()}, dict(self.paths)
+            pids = {pid for pid, a, b in self.held.get((proto, port), ()) if a - 0.5 <= ts <= b + 0.5}
+            return self.paths.get(pids.pop()) if len(pids) == 1 else None
+
+    def programs(self):
+        with self.lock:
+            return {f for f in self.paths.values() if f}
 
 
-def vpn_app_ports(ports, paths, outer):
-    """The local ports of the VPN app: of the programs that sent to the VPN server (outer: their (proto, port)), and of
-    other programs in the same folder (its tray or UI) - never a system program, never a system folder. A port that
-    another program also had during the run is not the app's. -> (set of (proto, port), sorted program files)"""
-    def system(path):
-        name = os.path.basename(path).lower().removesuffix(".exe")
-        return name in NEVER_KILL
-    apps = {paths[pid] for k in outer for pid in ports.get(k, ()) if paths.get(pid) and not system(paths[pid])}
+def system_program(path):
+    name = os.path.basename(path).lower().removesuffix(".exe")
+    return name in NEVER_KILL or name.startswith(SYSTEM_NAMES)
+
+
+def vpn_app(server_progs, progs):
+    """The VPN app's program files: those that sent to the VPN server, and the other programs in their folder (its tray
+    or UI) - never a system program or the bench itself, never by a system folder."""
+    apps = {f for f in server_progs if f and not system_program(f)}
     dirs = {os.path.dirname(a) for a in apps} - SYSTEM_DIRS
-
-    def mine(pid):
-        f = paths.get(pid)
-        return bool(f) and not system(f) and (f in apps or os.path.dirname(f) in dirs)
-    return {k for k, pids in ports.items() if pids and all(mine(p) for p in pids)}, sorted(apps)
+    return {f for f in set(progs) | apps if f and not system_program(f) and (f in apps or os.path.dirname(f) in dirs)}
 
 
 # ---------------------------------------------------------------- shell helpers
@@ -595,7 +611,7 @@ class Linux:
             if len(f) < 6:
                 continue
             local, peer = _host_port(f[4]), _host_port(f[5])
-            if peer[0] in servers or local[1] in lports:
+            if peer[0] in servers or ((6 if f[0] == "tcp" else 17), local[1]) in lports:   # the port of that protocol only
                 for name, pid in re.findall(r'\("([^"]+)",pid=(\d+)', line):
                     out[int(pid)] = name
         return out
@@ -695,7 +711,7 @@ class Mac:
             j.undo_last()
 
     def conn_pids(self, servers, lports):
-        out, sel = {}, ["-i@" + s for s in servers] + [f"-i:{p}" for p in lports]
+        out, sel = {}, ["-i@" + s for s in servers] + [f"-i{'TCP' if pr == 6 else 'UDP'}:{p}" for pr, p in lports]
         for s in sel:
             for line in run(["lsof", "-nP", s]).stdout.splitlines()[1:]:
                 f = line.split()
@@ -917,21 +933,28 @@ class Bench:
             return {ip: (pr, po) for (ip, pr, po), n in found if (pr, po) in ports and n >= 5}
         return found
 
+    def known(self, items):
+        """Look up the program of each packet (Owners) - once, for packets older than 1 s (the look is every 0.2 s)."""
+        before = time.time() - 1
+        for x in items:
+            p = x[-1]
+            if not p.known and x[0] < before:
+                p.prog = self.owners.program(p.proto, p.sport, x[0]) if p.sport else None
+                p.known = True
+        return items
+
     def app(self):
-        """The VPN app's own sockets and program files (vpn_app_ports)."""
-        outer = {(p.proto, p.sport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
-        return vpn_app_ports(*self.owners.snapshot(), outer)
+        """The VPN app's program files (vpn_app)."""
+        pk = self.known(self.cap.window(0, time.time()))
+        return vpn_app({p.prog for _, _, p in pk if p.dst in self.servers}, self.owners.programs())
 
     def own(self):
         """(proto, local port, server port) of the VPN's connection to its server (classify)."""
         return {(p.proto, p.sport, p.dport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
 
     def outer_lports(self):
-        ports = set()
-        for _, _, p in self.cap.window(0, time.time()):
-            if p.dst in self.servers and p.sport:
-                ports.add(p.sport)
-        return ports
+        """(proto, local port) of the VPN's connections to its server."""
+        return {(p.proto, p.sport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
 
     # -- probing during outages
     def probe_until(self, deadline, label, until=None):
@@ -989,8 +1012,8 @@ class Bench:
         return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, self.servers) == "vmleak"]
 
     def leaks(self, t0, t1):
-        leak, dns, app, own = [], [], self.app()[0], self.own()
-        for ts, _, p in self.cap.window(t0, t1):
+        leak, dns, app, own = [], [], self.app(), self.own()
+        for ts, _, p in self.known(self.cap.window(t0, t1)):
             c = classify(p, self.servers, app, own)
             if c == "leak":
                 leak.append((ts, p))
@@ -1007,8 +1030,9 @@ class Bench:
         for _, p in items:
             dst[p.where()] = dst.get(p.where(), 0) + 1
         top = sorted(dst.items(), key=lambda kv: -kv[1])[:5]
+        by = sorted({os.path.basename(p.prog) for _, p in items if p.prog})
         return {"packets": len(items), "first_ms": int((items[0][0] - t0) * 1000),
-                "last_ms": int((items[-1][0] - t0) * 1000), "to": [f"{d} ({n})" for d, n in top]}
+                "last_ms": int((items[-1][0] - t0) * 1000), "to": [f"{d} ({n})" for d, n in top], "programs": by}
 
     def fits(self, seconds):
         return time.time() + seconds <= self.deadline
@@ -1068,7 +1092,7 @@ class Bench:
         elif leak:
             e = ev["leak"]
             self.set(sid, "fail", f"{e['packets']} packets leaked, first {e['first_ms'] / 1000:.1f} s after the fault, "
-                     f"to {', '.join(e['to'][:3])}", **ev)
+                     f"to {', '.join(e['to'][:3])}" + (f" - sent by {', '.join(e['programs'])}" if e["programs"] else ""), **ev)
         elif hits:
             self.set(sid, "invalid", "the online check saw your real IP but the capture did not - "
                      "traffic left through an adapter the bench does not watch (use --iface)", **ev)
@@ -1182,7 +1206,7 @@ class Bench:
             self.outage("T1", inject, restore, FAULT)
         if self.wanted("D2") and not self.stopped:
             pids = {p: n for p, n in self.p.conn_pids(servers, self.outer_lports()).items()
-                    if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL}
+                    if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL and not n.lower().startswith(SYSTEM_NAMES)}
             if not pids:
                 self.set("D2", "n/a", "no user process owns the VPN connection (the VPN runs in the kernel "
                          "or in a system service) - nothing to kill safely")
@@ -1203,7 +1227,8 @@ class Bench:
                 self.set("T2", "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
             else:
                 pids = {int(x): pname for x in run(["pgrep", "-x", pname]).stdout.split()}
-                pids = {p: n for p, n in pids.items() if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL}
+                pids = {p: n for p, n in pids.items() if p > 1 and p != os.getpid() and n.lower() not in NEVER_KILL
+                        and not n.lower().startswith(SYSTEM_NAMES)}
                 if not pids:
                     self.set("T2", "skipped", f"no running process named {pname}")
                 elif self.adapter_ok("T2", name):
@@ -1414,14 +1439,14 @@ class Bench:
             print("Online check: Cloudflare only ever saw the VPN's address ({}).".format(", ".join(sorted(self.vpn_ips))))
         else:
             print("Online check: not run.")
-        ports, apps = self.app()
-        own = [(ts, p) for ts, _, p in self.cap.window(0, time.time()) if classify(p, self.servers, ports) == "app"]
+        app = self.app()
+        own = [(ts, p) for ts, _, p in self.known(self.cap.window(0, time.time())) if classify(p, self.servers, app) == "app"]
         app_ev = self.evidence(own, own[0][0]) if own else {}
         if own:
             names = sorted({p.qname for _, p in own if p.qname})[:5]
-            app_ev.update(programs=apps, names=names)
+            app_ev["names"] = names
             print("Not counted - the VPN app's own connections outside the tunnel ({}): {} packets, to {}{}".format(
-                ", ".join(os.path.basename(a) for a in apps), app_ev["packets"], ", ".join(app_ev["to"][:3]),
+                ", ".join(app_ev["programs"]), app_ev["packets"], ", ".join(app_ev["to"][:3]),
                 f" - names: {', '.join(names)}" if names else ""))
         doc = {"tool": "ksbench", "version": VERSION, "os": self.p.os_desc(), "product": self.product,
                "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "score": score, "level": level, "capped": capped,
