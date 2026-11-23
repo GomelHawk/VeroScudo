@@ -2,9 +2,19 @@
 
 Every test watches the **physical network adapter** (Wi-Fi, Ethernet) for outbound packets. A packet
 counts as a **leak** when it goes to a public address that is not the VPN server. Not counted: the VPN
-server itself, DHCP, IPv6 neighbour discovery and router solicitation, and the local network (private
-ranges, link-local, multicast, CGNAT). A packet to port 53 or 853 (DNS, DNS over TLS) is a **DNS leak**,
-whatever its address, including a router on the local network.
+server itself, DHCP, IPv6 neighbour discovery and router solicitation, and addresses that are not on the
+internet (private ranges, link-local, multicast, CGNAT, and `198.18.0.0/15`, which proxy apps hand out for
+their fake DNS). A packet to port 53 or 853 (DNS, DNS over TLS) is a **DNS leak**, whatever its address,
+including a router on the local network.
+
+**The VPN app's own traffic** is not counted either: a kill-switch must let the VPN app out, or it could
+never reconnect. While the bench runs it notes which program owns each connection. The VPN app is the
+program that sends to the VPN server, plus the other programs in its folder (its user interface, its
+tray). A system program and the Windows folder never count as the VPN app, and neither does a connection
+another program also used. Its packets are listed at the end of the report with their addresses and
+DNS names, because those sites saw your real address. The bench's own test traffic always counts, even
+when it went out through the VPN app. Turn off split tunnelling for the test: traffic the VPN app sends
+past the tunnel on purpose would be counted as its own.
 
 The bench's own probe targets are documentation addresses (`198.51.100.0/24`, `2001:db8::/32`). They
 belong to nobody, so no probe ever reaches a third party, and a probe on the physical adapter is a leak
@@ -54,7 +64,8 @@ server is unreachable) makes the test **N/A**: nothing could leak, so the kill-s
 ## Time
 
 The steady tests take about 15 s. The outage and tamper tests have a 240 s budget together; a test that
-would not fit is reported as *not run*. They run in this order, most important first: D1, D3, D4, T1,
+would not fit is reported as *not run*. The time you take to reconnect the VPN by hand, when the bench
+asks you to, is not counted in the budget. They run in this order, most important first: D1, D3, D4, T1,
 D2, T2. A typical run takes about 2-3 minutes: a VPN that notices a blocked server slowly (SSTP) makes D1 longer.
 
 ## Online check (optional)

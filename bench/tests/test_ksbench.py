@@ -32,7 +32,20 @@ def test_parse_and_classify(v):
     cls = exp.pop("cls")
     for k, want in exp.items():
         assert getattr(p, k) == want, k
-    assert ksbench.classify(p, set(VEC["servers"])) == cls
+    assert ksbench.classify(p, set(VEC["servers"]), {tuple(x) for x in VEC["app"]}) == cls
+
+
+def test_vpn_app_ports():
+    ports = {(6, 1): {10}, (17, 2): {11}, (6, 3): {12}, (6, 4): {13}, (6, 5): {10, 14}, (6, 6): {15}}
+    paths = {10: "/opt/Hiddify/HiddifyCli", 11: "/opt/Hiddify/Hiddify", 12: "/usr/bin/curl", 13: None,
+             14: "/usr/bin/firefox", 15: "/usr/bin/python3"}
+    got, apps = ksbench.vpn_app_ports(ports, paths, {(6, 1)})
+    assert got == {(6, 1), (17, 2)} and apps == ["/opt/Hiddify/HiddifyCli"]    # its UI in the same folder too
+    got, apps = ksbench.vpn_app_ports({(17, 1): {20}, (6, 2): {21}}, {20: "/usr/sbin/openvpn", 21: "/usr/sbin/sshd"},
+                                      {(17, 1)})
+    assert got == {(17, 1)} and apps == ["/usr/sbin/openvpn"]      # a system folder: only the program itself
+    assert ksbench.vpn_app_ports({(6, 1): {30}}, {30: "/usr/bin/python3"}, {(6, 1)}) == (set(), [])
+    assert ksbench.vpn_app_ports(ports, paths, set()) == (set(), [])     # kernel WireGuard: no program at all
 
 
 def test_pcap_stream_both_byte_orders():

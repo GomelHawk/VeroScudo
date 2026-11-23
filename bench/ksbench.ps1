@@ -121,7 +121,9 @@ namespace KsBench
     {
         static readonly string[] Lan = {
             "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8",
-            "224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/8", "fe80::/10", "fc00::/7", "ff00::/8", "::1/128", "::/128" };
+            "224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/8", "fe80::/10", "fc00::/7", "ff00::/8", "::1/128", "::/128",
+            "198.18.0.0/15" };                                  // not on the internet either: proxy apps' fake DNS answers with these
+        static readonly string[] Test = { "198.51.100.0/24", "2001:db8::/32" };   // where the bench sends its own traffic
 
         static string Addr(byte[] b, int o, int len)
         {
@@ -216,12 +218,17 @@ namespace KsBench
             return Frame(b, 0, b.Length, lt);
         }
 
-        public static bool IsLan(string addr)
+        public static bool IsLan(string addr) { return In(addr, Lan); }
+
+        // the bench's own test traffic: to its test addresses, or a DNS query for one of its names - always counted
+        public static bool IsTest(Pkt p) { return In(p.Dst, Test) || (p.QName != null && p.QName.StartsWith("ksb-")); }
+
+        static bool In(string addr, string[] nets)
         {
             IPAddress a;
             if (!IPAddress.TryParse(addr, out a)) return false;
             byte[] ab = a.GetAddressBytes();
-            foreach (string c in Lan)
+            foreach (string c in nets)
             {
                 string[] parts = c.Split('/');
                 byte[] nb = IPAddress.Parse(parts[0]).GetAddressBytes();
@@ -238,12 +245,16 @@ namespace KsBench
             return false;
         }
 
-        public static string Classify(Pkt p, ICollection<string> servers)
+        public static string Classify(Pkt p, ICollection<string> servers) { return Classify(p, servers, null); }
+
+        // app: "proto|local port" of the VPN app's own sockets - a kill-switch lets the VPN app out; never the bench's own test traffic
+        public static string Classify(Pkt p, ICollection<string> servers, ICollection<string> app)
         {
             if (p == null) return "ignore";
             if (servers.Contains(p.Dst)) return "server";
             if (p.Proto == 17 && (Is(p.DPort, 67, 68, 546, 547) || Is(p.SPort, 67, 68, 546, 547))) return "ignore";
             if (p.Proto == 58 && Is(p.IType, 130, 131, 132, 133, 134, 135, 136, 137, 143)) return "ignore";
+            if (app != null && app.Contains(p.Proto + "|" + p.SPort) && !Forwarded(p.Ttl) && !IsTest(p)) return "app";
             if ((p.Proto == 6 || p.Proto == 17) && (p.DPort == 53 || p.DPort == 853)) return "dns";
             if (IsLan(p.Dst)) return "lan";
             return Forwarded(p.Ttl) ? "vmleak" : "leak";
@@ -340,11 +351,159 @@ namespace KsBench
 
         public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls)
         {
+            return Pick(pkts, t0, t1, servers, cls, null);
+        }
+
+        public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls, ICollection<string> app)
+        {
             List<Pkt> r = new List<Pkt>();
             foreach (Pkt p in pkts)
-                if (p.Ts >= t0 && p.Ts <= t1 && Classify(p, servers) == cls) r.Add(p);
+                if (p.Ts >= t0 && p.Ts <= t1 && Classify(p, servers, app) == cls) r.Add(p);
             r.Sort(delegate (Pkt a, Pkt b) { return a.Ts.CompareTo(b.Ts); });
             return r;
+        }
+    }
+
+    // which program owns each local port, looked up every 0.1 s through the run (a packet capture does not tell)
+    public static class Owners
+    {
+        [DllImport("iphlpapi.dll")] static extern uint GetExtendedTcpTable(IntPtr t, ref int size, bool order, int af, int cls, uint res);
+        [DllImport("iphlpapi.dll")] static extern uint GetExtendedUdpTable(IntPtr t, ref int size, bool order, int af, int cls, uint res);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+        public static readonly Dictionary<string, HashSet<int>> Ports = new Dictionary<string, HashSet<int>>();
+        public static readonly Dictionary<int, string> Paths = new Dictionary<int, string>();
+        static Thread T;
+        static volatile bool Stop;
+
+        public static void Start()
+        {
+            if (T != null) return;
+            Stop = false;
+            T = new Thread(delegate () { while (!Stop) { try { Poll(); } catch (Exception) { } Thread.Sleep(100); } });
+            T.IsBackground = true;
+            T.Start();
+        }
+
+        public static void Halt() { Stop = true; T = null; }
+
+        static void Poll()
+        {
+            List<int[]> rows = new List<int[]>();
+            Read(true, 2, rows); Read(true, 23, rows); Read(false, 2, rows); Read(false, 23, rows);
+            List<int> fresh = new List<int>();
+            lock (Ports) foreach (int[] r in rows) if (!Paths.ContainsKey(r[2]) && !fresh.Contains(r[2])) fresh.Add(r[2]);
+            Dictionary<int, string> found = new Dictionary<int, string>();
+            foreach (int pid in fresh) found[pid] = Image(pid);
+            lock (Ports)
+            {
+                foreach (KeyValuePair<int, string> kv in found) Paths[kv.Key] = kv.Value;
+                foreach (int[] r in rows)
+                {
+                    string k = r[0] + "|" + r[1];
+                    HashSet<int> s;
+                    if (!Ports.TryGetValue(k, out s)) Ports[k] = s = new HashSet<int>();
+                    s.Add(r[2]);
+                }
+            }
+        }
+
+        // MIB_TCPROW_OWNER_PID 24 bytes (port at 8, pid at 20), MIB_TCP6ROW_OWNER_PID 56 (20, 52),
+        // MIB_UDPROW_OWNER_PID 12 (4, 8), MIB_UDP6ROW_OWNER_PID 28 (20, 24); the port in network byte order
+        static void Read(bool tcp, int af, List<int[]> rows)
+        {
+            int size = 0, cls = tcp ? 5 : 1;
+            if (tcp) GetExtendedTcpTable(IntPtr.Zero, ref size, false, af, cls, 0); else GetExtendedUdpTable(IntPtr.Zero, ref size, false, af, cls, 0);
+            if (size <= 0) return;
+            size += 4096;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
+            {
+                uint rc = tcp ? GetExtendedTcpTable(buf, ref size, false, af, cls, 0) : GetExtendedUdpTable(buf, ref size, false, af, cls, 0);
+                if (rc != 0) return;
+                int n = Marshal.ReadInt32(buf);
+                int len = tcp ? (af == 2 ? 24 : 56) : (af == 2 ? 12 : 28);
+                int po = tcp ? (af == 2 ? 8 : 20) : (af == 2 ? 4 : 20);
+                int pi = tcp ? (af == 2 ? 20 : 52) : (af == 2 ? 8 : 24);
+                for (int i = 0; i < n; i++)
+                {
+                    IntPtr row = new IntPtr(buf.ToInt64() + 4 + (long)i * len);
+                    rows.Add(new int[] { tcp ? 6 : 17, (Marshal.ReadByte(row, po) << 8) | Marshal.ReadByte(row, po + 1), Marshal.ReadInt32(row, pi) });
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        static string Image(int pid)
+        {
+            IntPtr h = OpenProcess(0x1000, false, pid);                 // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return null;
+            try
+            {
+                StringBuilder sb = new StringBuilder(1024);
+                int n = sb.Capacity;
+                return QueryFullProcessImageName(h, 0, sb, ref n) ? sb.ToString() : null;
+            }
+            finally { CloseHandle(h); }
+        }
+
+        // "proto|local port" of every packet this computer sent to a VPN server
+        public static HashSet<string> Outer(List<Pkt> pkts, ICollection<string> servers)
+        {
+            HashSet<string> r = new HashSet<string>();
+            foreach (Pkt p in pkts) if (p.SPort > 0 && servers.Contains(p.Dst)) r.Add(p.Proto + "|" + p.SPort);
+            return r;
+        }
+
+        public static HashSet<string> AppPorts(ICollection<string> outer, ICollection<string> never, string sysDir, List<string> apps)
+        {
+            lock (Ports) return AppPorts(Ports, Paths, outer, never, sysDir, apps);
+        }
+
+        // the local ports of the VPN app: of the programs that sent to the VPN server (outer), and of other programs in the
+        // same folder (its tray or UI) - never a system program, never a program under the Windows folder. A port that
+        // another program also had during the run is not the app's. apps: the programs found
+        public static HashSet<string> AppPorts(Dictionary<string, HashSet<int>> ports, Dictionary<int, string> paths,
+            ICollection<string> outer, ICollection<string> never, string sysDir, List<string> apps)
+        {
+            HashSet<string> app = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string k in outer)
+            {
+                HashSet<int> s;
+                if (!ports.TryGetValue(k, out s)) continue;
+                foreach (int pid in s) { string f; if (paths.TryGetValue(pid, out f) && f != null && !Sys(f, never)) app.Add(f); }
+            }
+            HashSet<string> dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string f in app)
+            {
+                string d = Dir(f);
+                if (d != null && !d.StartsWith(sysDir, StringComparison.OrdinalIgnoreCase)) dirs.Add(d);
+            }
+            apps.AddRange(app);
+            apps.Sort(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> r = new HashSet<string>();
+            foreach (KeyValuePair<string, HashSet<int>> kv in ports)
+            {
+                bool all = kv.Value.Count > 0;
+                foreach (int pid in kv.Value)
+                {
+                    string f;
+                    if (!paths.TryGetValue(pid, out f) || f == null || Sys(f, never) || !(app.Contains(f) || (Dir(f) != null && dirs.Contains(Dir(f))))) { all = false; break; }
+                }
+                if (all) r.Add(kv.Key);
+            }
+            return r;
+        }
+
+        static string Dir(string f) { int i = f.LastIndexOfAny(new char[] { '\\', '/' }); return i > 0 ? f.Substring(0, i) : null; }
+
+        static bool Sys(string f, ICollection<string> never)
+        {
+            string n = f.Substring(f.LastIndexOfAny(new char[] { '\\', '/' }) + 1).ToLowerInvariant();
+            if (n.EndsWith(".exe")) n = n.Substring(0, n.Length - 4);
+            return never.Contains(n);
         }
     }
 
@@ -653,8 +812,18 @@ function Get-ServerName([string[]]$Name, [string[]]$Server) {
     }
 }
 
+function Get-AppPort {
+    <# The VPN app's own sockets ("proto|port") - of the programs that sent to the VPN server and of the others in their
+       folder; $script:AppFiles: those programs. #>
+    $files = New-Object 'System.Collections.Generic.List[string]'
+    $outer = [KsBench.Owners]::Outer($script:Pkts, [string[]]@($script:Servers.Keys))
+    $ports = [KsBench.Owners]::AppPorts($outer, [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'), $files)
+    $script:AppFiles = @($files)
+    return , $ports
+}
+
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {
-    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, [string[]]@($script:Servers.Keys), $Class)
+    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, [string[]]@($script:Servers.Keys), $Class, (Get-AppPort))
 }
 
 function Get-PhysicalAdapter {
@@ -706,6 +875,7 @@ function Wait-Recovery([string]$Label) {
         if (-not (Read-YesNo '  The VPN is not back. Reconnect it (or restart the app), then press Enter (n = stop the bench) [Y/n]' $true)) { break }
         $back = [KsBench.Probe]::ProbeFor(30, 2)
     }
+    if ($null -ne $script:ManualAt -and $script:Deadline) { $script:Deadline += [KsBench.Probe]::Now() - $script:ManualAt }   # the time you took to reconnect is not the bench's
     if ($back) { [void][KsBench.Probe]::ProbeFor(1.5, 0) }
     return $back
 }
@@ -1044,13 +1214,22 @@ function Write-Report {
     if ($real) { Write-Host "Online check: Cloudflare saw an address other than the VPN's: $($real -join ', ')" -ForegroundColor Red }
     elseif ([KsBench.Probe]::Online) { Write-Host "Online check: Cloudflare only ever saw the VPN's address ($(@([KsBench.Probe]::VpnIps) -join ', '))." }
     else { Write-Host 'Online check: not run.' }
+    $own = Get-Leak 0 ([KsBench.Probe]::Now() + 1) 'app'
+    $appEv = Get-Evidence $own $(if ($own.Count) { $own[0].Ts } else { 0 })
+    if ($own.Count) {
+        $names = @($own | ForEach-Object { $_.QName } | Where-Object { $_ } | Sort-Object -Unique | Select-Object -First 5)
+        $appEv['programs'] = $script:AppFiles; $appEv['names'] = $names
+        Write-Host ("Not counted - the VPN app's own connections outside the tunnel ({0}): {1} packets, to {2}{3}" -f
+            (@($script:AppFiles | ForEach-Object { Split-Path -Leaf $_ }) -join ', '), $appEv.packets, (@($appEv.to | Select-Object -First 3) -join ', '),
+            $(if ($names) { " - names: $($names -join ', ')" } else { '' }))
+    }
     $os = Get-CimInstance Win32_OperatingSystem
     $doc = [ordered]@{
         tool = 'ksbench'; version = $Version; os = "$($os.Caption) $($os.Version)"; product = $script:ProductName
         date = (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz'); score = $score; level = $level; capped = $capped
         points_tested = $total; points_total = $allW; adapters = $script:PhysNames; servers = @($script:Servers.Keys)
         online_check = [KsBench.Probe]::Online; online_hits = @([KsBench.Probe]::Hits | ForEach-Object { [ordered]@{ scenario = $_[0]; ip = $_[1] } })
-        vpn_exit_ips = @([KsBench.Probe]::VpnIps)
+        vpn_exit_ips = @([KsBench.Probe]::VpnIps); vpn_app_traffic = $appEv
         scenarios = @($Scenarios | ForEach-Object { [ordered]@{ id = $_[0]; group = $_[1]; weight = $_[2]; title = $_[3]; status = $script:Res[$_[0]].status; detail = $script:Res[$_[0]].detail; evidence = $script:Res[$_[0]].evidence } })
     }
     $path = if ($Out) { $Out } else { Join-Path $script:RunDir 'report.json' }
@@ -1105,6 +1284,7 @@ function Invoke-Bench {
         $a = (Read-Host $OnlinePrompt).Trim().ToLower(); (-not $a) -or $a.StartsWith('y') } else { $false }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $script:TStart = [KsBench.Probe]::Now()
+    [KsBench.Owners]::Start()
     try {
         Write-Host "Watching: $($script:PhysNames -join ', '); tunnel: interface $([KsBench.Probe]::BestIf('198.51.100.7'))"
         Write-Host "Capture files: $script:RunDir"
@@ -1144,6 +1324,7 @@ function Invoke-Bench {
             }
         }
     } finally {
+        [KsBench.Owners]::Halt()
         if (@($script:Journal | Where-Object { -not $_.done -and $_.kind -ne 'pktmon' })) { Write-Host "Undoing the bench's changes:" }
         Undo-Since 0
         if ($script:UndoFailed.Count) {

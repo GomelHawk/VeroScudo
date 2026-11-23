@@ -12,7 +12,7 @@ It takes about 2-3 minutes. Every step is printed as it happens, and every resul
 ## How it works
 
 The bench watches your **physical network adapter** (Wi-Fi or Ethernet) and counts every packet that
-leaves it to anywhere but the VPN server. Meanwhile it:
+leaves it to anywhere but the VPN server. The VPN app's own connections are listed but not counted. Meanwhile it:
 
 1. sends test traffic while the VPN is up (DNS, IPv6, UDP, a program bound to the adapter) - **S1-S4**;
 2. breaks the VPN on purpose - blocks the VPN server, takes the tunnel down, unplugs the adapter for up

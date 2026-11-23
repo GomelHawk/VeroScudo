@@ -64,7 +64,11 @@ NEVER_KILL = {"systemd", "init", "networkmanager", "launchd", "kernel_task", "co
 
 _LAN = [ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8",
-    "224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/8", "fe80::/10", "fc00::/7", "ff00::/8", "::1/128", "::/128")]
+    "224.0.0.0/4", "255.255.255.255/32", "0.0.0.0/8", "fe80::/10", "fc00::/7", "ff00::/8", "::1/128", "::/128",
+    "198.18.0.0/15")]                       # not on the internet either: proxy apps' fake DNS answers with these
+_TEST = [ipaddress.ip_network(n) for n in ("198.51.100.0/24", "2001:db8::/32")]   # where the bench sends its own traffic
+SYSTEM_DIRS = {"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/usr/libexec",
+               "/usr/lib", "/opt/homebrew/bin"}
 
 
 # ---------------------------------------------------------------- packets
@@ -164,12 +168,21 @@ def parse_frame(data, linktype):
     return None
 
 
-def is_lan(addr):
+def _in(addr, nets):
     try:
         a = ipaddress.ip_address(addr)
     except ValueError:
         return False
-    return any(a.version == n.version and a in n for n in _LAN)
+    return any(a.version == n.version and a in n for n in nets)
+
+
+def is_lan(addr):
+    return _in(addr, _LAN)
+
+
+def is_test(p):
+    """The bench's own test traffic: to its test addresses, or a DNS query for one of its names. Always counted."""
+    return _in(p.dst, _TEST) or (p.qname or "").startswith("ksb-")
 
 
 def forwarded(ttl):
@@ -178,9 +191,10 @@ def forwarded(ttl):
     return ttl in (63, 127)
 
 
-def classify(p, servers):
-    """'server' | 'ignore' | 'dns' | 'lan' | 'leak' (sent by the computer itself) | 'vmleak' (forwarded for a VM or WSL)
-    for an outbound packet on the physical adapter."""
+def classify(p, servers, app=()):
+    """'server' | 'ignore' | 'app' | 'dns' | 'lan' | 'leak' (sent by the computer itself) | 'vmleak' (forwarded for a VM
+    or WSL) for an outbound packet on the physical adapter. app: the (proto, local port) pairs of the VPN app's own
+    sockets - a kill-switch lets the VPN app out; never the bench's own test traffic."""
     if p is None:
         return "ignore"
     if p.dst in servers:
@@ -189,6 +203,8 @@ def classify(p, servers):
         return "ignore"                     # DHCP
     if p.proto == 58 and p.itype in (130, 131, 132, 133, 134, 135, 136, 137, 143):
         return "ignore"                     # neighbour discovery, router solicitation, MLD
+    if (p.proto, p.sport) in app and not forwarded(p.ttl) and not is_test(p):
+        return "app"
     if p.proto in (6, 17) and p.dport in (53, 853):
         return "dns"
     if is_lan(p.dst):
@@ -307,6 +323,54 @@ class Capture:
             if p.poll() is None:
                 p.terminate()
             time.sleep(0.3)                 # the adapter went down: start again when it is back
+
+
+class Owners:
+    """Which program owns each local port, looked up every 0.2 s through the run (a packet capture does not tell)."""
+
+    def __init__(self, listing, path):
+        self.listing, self.path = listing, path     # () -> [(proto, port, pid)]; pid -> program file or None
+        self.ports, self.paths, self.lock, self.stop_ev = {}, {}, threading.Lock(), threading.Event()
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self.stop_ev.set()
+
+    def _loop(self):
+        while not self.stop_ev.is_set():
+            try:
+                rows = self.listing()
+            except Exception:               # noqa: BLE001 - a failed look: try again on the next round
+                rows = []
+            new = {pid for _, _, pid in rows if pid not in self.paths}
+            paths = {pid: self.path(pid) for pid in new}
+            with self.lock:
+                for proto, port, pid in rows:
+                    self.ports.setdefault((proto, port), set()).add(pid)
+                self.paths.update(paths)
+            self.stop_ev.wait(0.2)
+
+    def snapshot(self):
+        with self.lock:
+            return {k: set(v) for k, v in self.ports.items()}, dict(self.paths)
+
+
+def vpn_app_ports(ports, paths, outer):
+    """The local ports of the VPN app: of the programs that sent to the VPN server (outer: their (proto, port)), and of
+    other programs in the same folder (its tray or UI) - never a system program, never a system folder. A port that
+    another program also had during the run is not the app's. -> (set of (proto, port), sorted program files)"""
+    def system(path):
+        name = os.path.basename(path).lower().removesuffix(".exe")
+        return name in NEVER_KILL
+    apps = {paths[pid] for k in outer for pid in ports.get(k, ()) if paths.get(pid) and not system(paths[pid])}
+    dirs = {os.path.dirname(a) for a in apps} - SYSTEM_DIRS
+
+    def mine(pid):
+        f = paths.get(pid)
+        return bool(f) and not system(f) and (f in apps or os.path.dirname(f) in dirs)
+    return {k for k, pids in ports.items() if pids and all(mine(p) for p in pids)}, sorted(apps)
 
 
 # ---------------------------------------------------------------- shell helpers
@@ -511,6 +575,25 @@ class Linux:
         return out
 
     @staticmethod
+    def sockets():
+        out = []
+        for line in run(["ss", "-Htunap"]).stdout.splitlines():
+            f = line.split()
+            if len(f) < 6 or f[0] not in ("tcp", "udp"):
+                continue
+            port = _host_port(f[4])[1]
+            for pid in re.findall(r"pid=(\d+)", line):
+                out.append((6 if f[0] == "tcp" else 17, port, int(pid)))
+        return out
+
+    @staticmethod
+    def program(pid):
+        try:
+            return os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+        except OSError:
+            return None
+
+    @staticmethod
     def vm_present():
         """Bridges VMs and containers sit behind (Docker, libvirt, LXD, VirtualBox host-only, VMware)."""
         try:
@@ -593,6 +676,26 @@ class Mac:
                 if len(f) > 1 and f[1].isdigit():
                     out[int(f[1])] = f[0]
         return out
+
+    @staticmethod
+    def sockets():
+        out, pid, proto = [], None, None
+        for line in run(["lsof", "-nP", "-iTCP", "-iUDP", "-F", "pPn"]).stdout.splitlines():
+            k, v = line[:1], line[1:]
+            if k == "p":
+                pid = int(v)
+            elif k == "P":
+                proto = {"TCP": 6, "UDP": 17}.get(v)
+            elif k == "n" and pid and proto:
+                port = _host_port(v.split("->")[0])[1]
+                if port:
+                    out.append((proto, port, pid))
+        return out
+
+    @staticmethod
+    def program(pid):
+        f = run(["ps", "-ww", "-o", "comm=", "-p", str(pid)]).stdout.strip()
+        return f or None
 
     @staticmethod
     def vm_present():
@@ -788,6 +891,11 @@ class Bench:
             return {ip: (pr, po) for (ip, pr, po), n in found if (pr, po) in ports and n >= 5}
         return found
 
+    def app(self):
+        """The VPN app's own sockets and program files (vpn_app_ports)."""
+        outer = {(p.proto, p.sport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
+        return vpn_app_ports(*self.owners.snapshot(), outer)
+
     def outer_lports(self):
         ports = set()
         for _, _, p in self.cap.window(0, time.time()):
@@ -837,6 +945,8 @@ class Bench:
                        "(n = stop the bench) [Y/n] ", True, True):
                 break
             back = self.probe_until(time.time() + 30, label, until=self.tunnel_up)
+        if self.manual_at and hasattr(self, "deadline"):
+            self.deadline += time.time() - self.manual_at    # the time you took to reconnect is not the bench's
         if back:
             self.probe_until(time.time() + 1.5, label)
             new = self.find_servers(1.5, same_port_only=True)
@@ -849,9 +959,9 @@ class Bench:
         return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, self.servers) == "vmleak"]
 
     def leaks(self, t0, t1):
-        leak, dns = [], []
+        leak, dns, app = [], [], self.app()[0]
         for ts, _, p in self.cap.window(t0, t1):
-            c = classify(p, self.servers)
+            c = classify(p, self.servers, app)
             if c == "leak":
                 leak.append((ts, p))
             elif c == "dns":
@@ -1157,6 +1267,8 @@ class Bench:
             self.online = ask(ONLINE_PROMPT, True, sys.stdin.isatty()) if sys.stdin.isatty() else False
         self.cap = Capture(self.phys)
         self.cap.start()
+        self.owners = Owners(self.p.sockets, self.p.program)
+        self.owners.start()
         self.t_start = time.time()
 
         def stop(*_):
@@ -1177,6 +1289,7 @@ class Bench:
                 self.say("!! Some changes could not be undone (lines marked '!'). Run 'sudo python3 ksbench.py "
                          "--restore', or run the commands shown by hand.")
             self.cap.stop()
+            self.owners.stop()
             for _, s in self.keep:
                 s.close()
         return self.report()
@@ -1271,12 +1384,21 @@ class Bench:
             print("Online check: Cloudflare only ever saw the VPN's address ({}).".format(", ".join(sorted(self.vpn_ips))))
         else:
             print("Online check: not run.")
+        ports, apps = self.app()
+        own = [(ts, p) for ts, _, p in self.cap.window(0, time.time()) if classify(p, self.servers, ports) == "app"]
+        app_ev = self.evidence(own, own[0][0]) if own else {}
+        if own:
+            names = sorted({p.qname for _, p in own if p.qname})[:5]
+            app_ev.update(programs=apps, names=names)
+            print("Not counted - the VPN app's own connections outside the tunnel ({}): {} packets, to {}{}".format(
+                ", ".join(os.path.basename(a) for a in apps), app_ev["packets"], ", ".join(app_ev["to"][:3]),
+                f" - names: {', '.join(names)}" if names else ""))
         doc = {"tool": "ksbench", "version": VERSION, "os": self.p.os_desc(), "product": self.product,
                "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "score": score, "level": level, "capped": capped,
                "points_tested": total,
                "points_total": all_w, "adapters": sorted(self.phys_names),
                "servers": sorted(self.servers), "online_check": self.online, "online_hits": self.online_hits,
-               "vpn_exit_ips": sorted(self.vpn_ips),
+               "vpn_exit_ips": sorted(self.vpn_ips), "vpn_app_traffic": app_ev,
                "scenarios": [dict(id=s, group=g, weight=w, title=t, **self.res[s]) for s, g, w, t in SCENARIOS]}
         out = self.a.out or os.path.join(self.tmp, "report-{}.json".format(time.strftime("%Y%m%d-%H%M%S")))
         with open(out, "w") as f:
