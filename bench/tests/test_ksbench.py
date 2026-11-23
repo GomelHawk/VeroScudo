@@ -45,6 +45,23 @@ def test_vpn_app():
     assert ksbench.vpn_app({None}, progs) == set()                     # kernel WireGuard: no program at all
 
 
+def test_credit_near_only_the_same_endpoint_within_a_second():
+    def pkt(dst, sport, prog=None, ttl=128):
+        p = ksbench.Pkt(4, "192.168.1.20", dst, 17, sport, 443, ttl=ttl)
+        p.prog, p.known = prog, True
+        return p
+    app = {"/opt/vpn/vpnd"}
+    a = pkt("203.0.113.9", 50000, "/opt/vpn/vpnd")
+    short = pkt("203.0.113.9", 50001)                 # a socket shorter than one look, 0.03 s before the app's packet
+    late = pkt("203.0.113.9", 50002)                  # the same endpoint, 5 s later: counted
+    other = pkt("203.0.113.10", 50003)                # another address: counted
+    test = pkt("198.51.100.7", 50004)                 # the bench's own test address: never
+    vm = pkt("203.0.113.9", 50005, ttl=127)           # forwarded for a VM: never
+    ksbench.credit_near([(10.0, a), (9.97, short), (15.0, late), (10.0, other), (10.0, test), (10.0, vm)], app)
+    assert short.prog == "/opt/vpn/vpnd"
+    assert late.prog is None and other.prog is None and test.prog is None and vm.prog is None
+
+
 def test_owners_follow_a_port_from_program_to_program():
     o = ksbench.Owners(lambda: [], lambda pid: {1: "/opt/vpn/vpnd", 2: "/usr/bin/firefox"}[pid])
     o.paths = {1: "/opt/vpn/vpnd", 2: "/usr/bin/firefox"}

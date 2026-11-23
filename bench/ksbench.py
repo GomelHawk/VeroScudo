@@ -9,6 +9,7 @@ Needs only Python 3.9+ (standard library). Linux: iproute2, iptables or nft.
 macOS: tcpdump, pfctl, route, ifconfig, lsof (all part of macOS).
 """
 import argparse
+import bisect
 import ipaddress
 import json
 import os
@@ -390,6 +391,25 @@ def vpn_app(server_progs, progs):
     apps = {f for f in server_progs if f and not system_program(f)}
     dirs = {os.path.dirname(a) for a in apps} - SYSTEM_DIRS
     return {f for f in set(progs) | apps if f and not system_program(f) and (f in apps or os.path.dirname(f) in dirs)}
+
+
+def credit_near(items, app, window=1.0):
+    """A packet whose program was not seen (a socket shorter than one look) is the VPN app's when one of its programs
+    sent to the same address, protocol and port within `window` s - never the bench's own test traffic, never a packet
+    forwarded for a VM. items: (ts, Pkt) whose program was looked up."""
+    seen = {}
+    for ts, p in items:
+        if p.prog in app:
+            seen.setdefault((p.dst, p.proto, p.dport), []).append((ts, p.prog))
+    for v in seen.values():
+        v.sort()
+    for ts, p in items:
+        near = seen.get((p.dst, p.proto, p.dport)) if p.known and p.prog is None else None
+        if not near or is_test(p) or forwarded(p.ttl):
+            continue
+        i = bisect.bisect_left(near, (ts - window,))
+        if i < len(near) and near[i][0] <= ts + window:
+            p.prog = near[i][1]
 
 
 # ---------------------------------------------------------------- shell helpers
@@ -947,7 +967,9 @@ class Bench:
     def app(self):
         """The VPN app's program files (vpn_app)."""
         pk = self.known(self.cap.window(0, time.time()))
-        return vpn_app({p.prog for _, _, p in pk if p.dst in self.servers}, self.owners.programs())
+        app = vpn_app({p.prog for _, _, p in pk if p.dst in self.servers}, self.owners.programs())
+        credit_near([(ts, p) for ts, _, p in pk], app)
+        return app
 
     def own(self):
         """(proto, local port, server port) of the VPN's connection to its server (classify)."""

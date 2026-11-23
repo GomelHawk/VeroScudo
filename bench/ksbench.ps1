@@ -491,6 +491,31 @@ namespace KsBench
                     if (!p.Known && p.Ts < before) { p.Prog = p.SPort > 0 ? Program(Held, Paths, p.Proto, p.SPort, p.Ts) : null; p.Known = true; }
         }
 
+        // a packet whose program was not seen (a socket shorter than one look) is the VPN app's when one of its programs sent
+        // to the same address, protocol and port within `window` s - never the bench's own test traffic, never a VM's
+        public static void Near(List<Pkt> pkts, ICollection<string> app, double window)
+        {
+            Dictionary<string, List<Pkt>> seen = new Dictionary<string, List<Pkt>>();
+            foreach (Pkt p in pkts)
+            {
+                if (p.Prog == null || !app.Contains(p.Prog)) continue;
+                string k = p.Dst + "|" + p.Proto + "|" + p.DPort;
+                List<Pkt> l;
+                if (!seen.TryGetValue(k, out l)) seen[k] = l = new List<Pkt>();
+                l.Add(p);
+            }
+            foreach (List<Pkt> l in seen.Values) l.Sort(delegate (Pkt a, Pkt b) { return a.Ts.CompareTo(b.Ts); });
+            foreach (Pkt p in pkts)
+            {
+                List<Pkt> l;
+                if (!p.Known || p.Prog != null || Parse.IsTest(p) || Parse.Forwarded(p.Ttl)) continue;
+                if (!seen.TryGetValue(p.Dst + "|" + p.Proto + "|" + p.DPort, out l)) continue;
+                int lo = 0, hi = l.Count;
+                while (lo < hi) { int mid = (lo + hi) / 2; if (l[mid].Ts < p.Ts - window) lo = mid + 1; else hi = mid; }
+                if (lo < l.Count && l[lo].Ts <= p.Ts + window) p.Prog = l[lo].Prog;
+            }
+        }
+
         // the VPN app's program files: those that sent to the VPN server (pkts known), and the other programs in their folder
         // (its tray or UI) - never a system program or the bench itself, never by the Windows folder
         public static HashSet<string> App(List<Pkt> pkts, ICollection<string> servers, ICollection<string> never, string sysDir)
@@ -838,7 +863,9 @@ function Get-ServerName([string[]]$Name, [string[]]$Server) {
 function Get-AppProgram {
     <# The VPN app's program files - those that sent to the VPN server and the others in their folder. #>
     [KsBench.Owners]::Know($script:Pkts, [KsBench.Probe]::Now() - 0.7)       # 0.5 s margin + one look
-    return , [KsBench.Owners]::App($script:Pkts, [string[]]@($script:Servers.Keys), [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'))
+    $app = [KsBench.Owners]::App($script:Pkts, [string[]]@($script:Servers.Keys), [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'))
+    [KsBench.Owners]::Near($script:Pkts, $app, 1.0)                           # sockets too short for a look
+    return , $app
 }
 
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {

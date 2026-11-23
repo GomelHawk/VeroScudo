@@ -36,6 +36,21 @@ Describe 'the VPN app''s own programs' {
         $r = [KsBench.Owners]::App([string[]]@('C:\Windows\System32\svchost.exe', 'C:\Python314\python.exe'), [string[]]@(), [string[]]$NeverKill, 'C:\Windows')
         $r.Count | Should -Be 0
     }
+    It 'a socket too short for a look: the VPN app''s only at the same address, protocol and port within a second' {
+        function New-P([string]$Dst, [double]$Ts, $Prog, [int]$Ttl = 128) {      # $Prog untyped: [string] would turn $null into ''
+            $p = New-Object KsBench.Pkt; $p.Ver = 4; $p.Dst = $Dst; $p.Proto = 17; $p.DPort = 443; $p.Ts = $Ts; $p.Ttl = $Ttl; $p.Known = $true
+            if ($Prog) { $p.Prog = $Prog }
+            $p
+        }
+        $a = New-P '203.0.113.9' 10 'C:\vpn\vpnd.exe'
+        $short = New-P '203.0.113.9' 9.97 $null; $late = New-P '203.0.113.9' 15 $null; $other = New-P '203.0.113.10' 10 $null
+        $test = New-P '198.51.100.7' 10 $null; $vm = New-P '203.0.113.9' 10 $null 127
+        $l = New-Object 'System.Collections.Generic.List[KsBench.Pkt]'
+        foreach ($x in $a, $short, $late, $other, $test, $vm) { $l.Add($x) }
+        [KsBench.Owners]::Near($l, [string[]]@('C:\vpn\vpnd.exe'), 1.0)
+        $short.Prog | Should -Be 'C:\vpn\vpnd.exe'
+        foreach ($x in $late, $other, $test, $vm) { $x.Prog | Should -BeNullOrEmpty }
+    }
     It 'a port that comes back belongs to the program that held it at that moment' {
         $held = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[double[]]]'
         $l = New-Object 'System.Collections.Generic.List[double[]]'

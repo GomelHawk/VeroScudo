@@ -11,7 +11,8 @@ including a router on the local network.
 
 **The VPN app's own traffic** is not counted either: a kill-switch must let the VPN app out, or it could
 never reconnect. While the bench runs it notes which program holds each connection, and a packet belongs to
-the program that held its port at that moment. The VPN app is the program that sends to the VPN server,
+the program that held its port at that moment. A socket too short to be seen (a few ms) counts as the VPN app's
+only when one of its programs sent to the same address, protocol and port within a second. The VPN app is the program that sends to the VPN server,
 plus the other programs in its folder (its user interface, its tray). A system program, the bench itself
 and the Windows folder never count as the VPN app. Its packets are listed at the end of the report with their addresses and
 DNS names, because those sites saw your real address. The bench's own test traffic always counts, even
