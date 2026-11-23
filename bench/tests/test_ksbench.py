@@ -32,7 +32,7 @@ def test_parse_and_classify(v):
     cls = exp.pop("cls")
     for k, want in exp.items():
         assert getattr(p, k) == want, k
-    assert ksbench.classify(p, set(VEC["servers"]), {tuple(x) for x in VEC["app"]}) == cls
+    assert ksbench.classify(p, set(VEC["servers"]), {tuple(x) for x in VEC["app"]}, {tuple(x) for x in VEC["own"]}) == cls
 
 
 def test_vpn_app_ports():

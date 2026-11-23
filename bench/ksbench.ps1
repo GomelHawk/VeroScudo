@@ -245,13 +245,15 @@ namespace KsBench
             return false;
         }
 
-        public static string Classify(Pkt p, ICollection<string> servers) { return Classify(p, servers, null); }
+        public static string Classify(Pkt p, ICollection<string> servers) { return Classify(p, servers, null, null); }
 
-        // app: "proto|local port" of the VPN app's own sockets - a kill-switch lets the VPN app out; never the bench's own test traffic
-        public static string Classify(Pkt p, ICollection<string> servers, ICollection<string> app)
+        // app: "proto|local port" of the VPN app's own sockets - a kill-switch lets the VPN app out; never the bench's own test traffic.
+        // own: "proto|local port|server port" of the VPN's connection to its server - from that socket to that port it is the VPN
+        // moving to another of its servers (a name with several addresses), also when no program owns the socket (kernel WireGuard)
+        public static string Classify(Pkt p, ICollection<string> servers, ICollection<string> app, ICollection<string> own)
         {
             if (p == null) return "ignore";
-            if (servers.Contains(p.Dst)) return "server";
+            if (servers.Contains(p.Dst) || (own != null && own.Contains(p.Proto + "|" + p.SPort + "|" + p.DPort) && !Forwarded(p.Ttl))) return "server";
             if (p.Proto == 17 && (Is(p.DPort, 67, 68, 546, 547) || Is(p.SPort, 67, 68, 546, 547))) return "ignore";
             if (p.Proto == 58 && Is(p.IType, 130, 131, 132, 133, 134, 135, 136, 137, 143)) return "ignore";
             if (app != null && app.Contains(p.Proto + "|" + p.SPort) && !Forwarded(p.Ttl) && !IsTest(p)) return "app";
@@ -351,14 +353,14 @@ namespace KsBench
 
         public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls)
         {
-            return Pick(pkts, t0, t1, servers, cls, null);
+            return Pick(pkts, t0, t1, servers, cls, null, null);
         }
 
-        public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls, ICollection<string> app)
+        public static List<Pkt> Pick(List<Pkt> pkts, double t0, double t1, ICollection<string> servers, string cls, ICollection<string> app, ICollection<string> own)
         {
             List<Pkt> r = new List<Pkt>();
             foreach (Pkt p in pkts)
-                if (p.Ts >= t0 && p.Ts <= t1 && Classify(p, servers, app) == cls) r.Add(p);
+                if (p.Ts >= t0 && p.Ts <= t1 && Classify(p, servers, app, own) == cls) r.Add(p);
             r.Sort(delegate (Pkt a, Pkt b) { return a.Ts.CompareTo(b.Ts); });
             return r;
         }
@@ -454,6 +456,14 @@ namespace KsBench
         {
             HashSet<string> r = new HashSet<string>();
             foreach (Pkt p in pkts) if (p.SPort > 0 && servers.Contains(p.Dst)) r.Add(p.Proto + "|" + p.SPort);
+            return r;
+        }
+
+        // "proto|local port|server port" of the VPN's connection to its server (Parse.Classify)
+        public static HashSet<string> Own(List<Pkt> pkts, ICollection<string> servers)
+        {
+            HashSet<string> r = new HashSet<string>();
+            foreach (Pkt p in pkts) if (p.SPort > 0 && servers.Contains(p.Dst)) r.Add(p.Proto + "|" + p.SPort + "|" + p.DPort);
             return r;
         }
 
@@ -823,7 +833,8 @@ function Get-AppPort {
 }
 
 function Get-Leak([double]$T0, [double]$T1, [string]$Class = 'leak') {
-    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, [string[]]@($script:Servers.Keys), $Class, (Get-AppPort))
+    $srv = [string[]]@($script:Servers.Keys)
+    return , [KsBench.Parse]::Pick($script:Pkts, $T0, $T1, $srv, $Class, (Get-AppPort), [KsBench.Owners]::Own($script:Pkts, $srv))
 }
 
 function Get-PhysicalAdapter {

@@ -191,13 +191,15 @@ def forwarded(ttl):
     return ttl in (63, 127)
 
 
-def classify(p, servers, app=()):
+def classify(p, servers, app=(), own=()):
     """'server' | 'ignore' | 'app' | 'dns' | 'lan' | 'leak' (sent by the computer itself) | 'vmleak' (forwarded for a VM
     or WSL) for an outbound packet on the physical adapter. app: the (proto, local port) pairs of the VPN app's own
-    sockets - a kill-switch lets the VPN app out; never the bench's own test traffic."""
+    sockets - a kill-switch lets the VPN app out; never the bench's own test traffic. own: (proto, local port, server port)
+    of the VPN's connection to its server - from that socket to that port it is the VPN moving to another of its servers
+    (a name with several addresses), also when no program owns the socket (kernel WireGuard)."""
     if p is None:
         return "ignore"
-    if p.dst in servers:
+    if p.dst in servers or ((p.proto, p.sport, p.dport) in own and not forwarded(p.ttl)):
         return "server"
     if p.proto == 17 and (p.dport in (67, 68, 546, 547) or p.sport in (67, 68, 546, 547)):
         return "ignore"                     # DHCP
@@ -896,6 +898,10 @@ class Bench:
         outer = {(p.proto, p.sport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
         return vpn_app_ports(*self.owners.snapshot(), outer)
 
+    def own(self):
+        """(proto, local port, server port) of the VPN's connection to its server (classify)."""
+        return {(p.proto, p.sport, p.dport) for _, _, p in self.cap.window(0, time.time()) if p.dst in self.servers and p.sport}
+
     def outer_lports(self):
         ports = set()
         for _, _, p in self.cap.window(0, time.time()):
@@ -959,9 +965,9 @@ class Bench:
         return [(ts, p) for ts, _, p in self.cap.window(t0, t1) if classify(p, self.servers) == "vmleak"]
 
     def leaks(self, t0, t1):
-        leak, dns, app = [], [], self.app()[0]
+        leak, dns, app, own = [], [], self.app()[0], self.own()
         for ts, _, p in self.cap.window(t0, t1):
-            c = classify(p, self.servers, app)
+            c = classify(p, self.servers, app, own)
             if c == "leak":
                 leak.append((ts, p))
             elif c == "dns":

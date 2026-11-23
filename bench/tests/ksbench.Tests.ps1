@@ -17,7 +17,8 @@ Describe 'parse and classify' {
             $p.($map[$k]) | Should -Be $want -Because $k
         }
         $app = [string[]]@($script:Vec.app | ForEach-Object { "$($_[0])|$($_[1])" })
-        [KsBench.Parse]::Classify($p, [string[]]$script:Vec.servers, $app) | Should -Be $expect.cls
+        $own = [string[]]@($script:Vec.own | ForEach-Object { "$($_[0])|$($_[1])|$($_[2])" })
+        [KsBench.Parse]::Classify($p, [string[]]$script:Vec.servers, $app, $own) | Should -Be $expect.cls
     }
 }
 

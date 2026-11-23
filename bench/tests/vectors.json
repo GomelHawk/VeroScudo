@@ -12,6 +12,13 @@
    51002
   ]
  ],
+ "own": [
+  [
+   17,
+   40000,
+   51820
+  ]
+ ],
  "vectors": [
   {
    "name": "udp to the VPN server",
@@ -291,6 +298,35 @@
    "expect": {
     "dst": "198.18.0.30",
     "cls": "lan"
+   }
+  },
+  {
+   "name": "the VPN's own socket to another address of its server: not counted",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040110000c0a80114cb0071029c40ca6c00080000",
+   "expect": {
+    "dst": "203.0.113.2",
+    "sport": 40000,
+    "dport": 51820,
+    "cls": "server"
+   }
+  },
+  {
+   "name": "the VPN's own socket to another port: counted",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c0000000040110000c0a80114cb0071029c4001bb00080000",
+   "expect": {
+    "dport": 443,
+    "cls": "leak"
+   }
+  },
+  {
+   "name": "forwarded for a VM with the VPN socket's ports: counted",
+   "linktype": 1,
+   "hex": "001122334455aabbccddeeff08004500001c000000003f110000c0a80114cb0071029c40ca6c00080000",
+   "expect": {
+    "ttl": 63,
+    "cls": "vmleak"
    }
   }
  ],
