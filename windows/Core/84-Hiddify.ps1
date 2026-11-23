@@ -9,7 +9,7 @@
 # writable folder would let any program be planted there under that name. VeroScudo never starts or stops Hiddify:
 # connect, disconnect and reconnect in Hiddify; while its tunnel is down everything else stays blocked.
 
-$script:HiddifyExes = @('Hiddify.exe', 'HiddifyCli.exe', 'HiddifyCoreEngine.exe')   # the core runs as HiddifyCoreEngine.exe in newer versions
+$script:HiddifyExes = @('Hiddify.exe', 'HiddifyCli.exe', 'HiddifyCore.exe', 'HiddifyCoreEngine.exe')   # newer versions: HiddifyCore.exe is the VPN-mode service, HiddifyCoreEngine.exe the proxy-mode core
 $script:HiddifyTunPattern = '^sing-tun'                                  # the Wintun adapter's description in VPN mode
 $script:HiddifyWaitLogged = $false
 $script:HiddifyAppsMissingLogged = $false                               # the 'not in an administrators-only folder' warning: once
@@ -46,7 +46,7 @@ function Get-VeroHiddifyNic {
 }
 
 function Test-VeroHiddifyRunning {
-    [bool](Get-Process -Name 'Hiddify', 'HiddifyCli' -ErrorAction SilentlyContinue)
+    [bool](Get-Process -Name 'Hiddify', 'HiddifyCli', 'HiddifyCore' -ErrorAction SilentlyContinue)
 }
 
 function Test-VeroHiddifyConnected {

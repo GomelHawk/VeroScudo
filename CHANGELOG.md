@@ -5,6 +5,11 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Windows: Hiddify connects while VeroScudo is already on
+- Newer Hiddify versions connect in VPN mode through `HiddifyCore.exe`, which the kill-switch did not let out: with
+  VeroScudo already on (for example after a switch from WireGuard), Hiddify's tunnel came up but nothing got through.
+  `HiddifyCore.exe` from the Hiddify folder is now let out like `Hiddify.exe`.
+
 ### Windows: connections WSL already had open stop too when the VPN drops
 - The Hyper-V firewall blocks WSL's new connections at a drop, but ones already open followed the route onto the
   Wi-Fi/Ethernet card (up to 25 s measured). While the tunnel is down, VeroScudo now also routes the internet to nowhere
