@@ -1018,6 +1018,33 @@ Describe 'WSL and VMs: the internet routed to nowhere while the tunnel is down (
         @($global:VeroTestRoutes) | Should -Contain 'want False'
         Test-Path (Get-VeroPath).NetSuspect | Should -BeFalse
     }
+    It 'routes the route guard added at the drop are taken over: the record gets the wanted ones, the rest goes' {
+        $lo = $script:lo
+        Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { '12|192.168.100.0/24|0.0.0.0|256', '12|0.0.0.0/0|192.168.100.1|25', "$lo|128.0.0.0/1|0.0.0.0|7", "$lo|127.0.0.0/8|0.0.0.0|7" }.GetNewClosure()
+        Sync-VeroBlackhole -Want $true -ServerIps @('203.0.113.5') -Action test
+        @($global:VeroTestRoutes | Where-Object { $_ -eq "del $script:lo 128.0.0.0/1" }).Count | Should -Be 1     # wider than wanted (the server is excepted)
+        @($global:VeroTestRoutes | Where-Object { $_ -like '*127.0.0.0*' }).Count | Should -Be 0                # never the loopback's own
+        @(& (Get-Module VeroScudo.Core) { Get-VeroBlackholeRecord }) | Should -Not -Contain "$script:lo|128.0.0.0/1"
+    }
+    It 'the route guard: armed with the routes while a full tunnel is watched, disarmed otherwise' {
+        $global:VeroTestGuard = New-Object System.Collections.ArrayList
+        Mock -ModuleName VeroScudo.Core Set-VeroRouteGuard { [void]$global:VeroTestGuard.Add(@{ Luid = $Luid; Prefix = @($Prefix) }) }
+        Mock -ModuleName VeroScudo.Core Test-VeroArmed { $true }
+        $c = Get-VeroConfig -Raw '{"vpn":{"profile":"X","server":"203.0.113.5","username":"u"},"vm":true}'
+        Mock -ModuleName VeroScudo.Core Get-VeroConfig { $c }.GetNewClosure()
+        Mock -ModuleName VeroScudo.Core Get-VeroAppliedState { [pscustomobject]@{ Servers = @('203.0.113.5') } }
+        Mock -ModuleName VeroScudo.Core Get-VeroNic { [pscustomobject]@{ Name = 'vEthernet (WSL)'; OperationalStatus = 'Up' } }
+        InModuleScope VeroScudo.Core { $script:WatchLuid = [uint64]42 }
+        Update-VeroRouteGuard
+        $global:VeroTestGuard[-1].Luid | Should -Be 42
+        $pre = $global:VeroTestGuard[-1].Prefix
+        $pre.Count | Should -BeGreaterThan 30
+        @($pre | Where-Object { $_.Contains(':') }).Count | Should -Be 0
+        $pre | Should -Not -Contain '128.0.0.0/1'                                                                # the server is excepted
+        InModuleScope VeroScudo.Core { $script:WatchLuid = [uint64]0 }                                         # a drop, or a split tunnel
+        Update-VeroRouteGuard
+        [uint64]$global:VeroTestGuard[-1].Luid | Should -Be 0                                                  # disarmed: no tunnel given
+    }
     It 'a drop note counts for 30 s; an unreadable time never' {
         Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-10).ToString('o') }) | Should -BeTrue
         Test-VeroNetSuspectFresh ([pscustomobject]@{ Time = (Get-Date).AddSeconds(-31).ToString('o') }) | Should -BeFalse

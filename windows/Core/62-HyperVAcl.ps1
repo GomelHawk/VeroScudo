@@ -336,6 +336,39 @@ function Get-VeroRouteTable { Import-VeroNative; [VeroScudo.Route]::Read() }
 function Add-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Add($IfIndex, $Prefix, $Length) }
 function Remove-VeroRoute([uint32]$IfIndex, [string]$Prefix, [int]$Length) { Import-VeroNative; [VeroScudo.Route]::Delete($IfIndex, $Prefix, $Length) }
 
+$script:RouteMarker = 7                                                    # = [VeroScudo.Route]::Marker (readable without the helper)
+
+function Set-VeroRouteGuard {
+    <# The native route guard (VeroScudo.RouteGuard): -Luid and -Prefix arm it, nothing disarms it. Tests replace this. #>
+    [CmdletBinding()] param([uint64]$Luid = 0, [uint32]$LoIndex = 0, [string[]]$Prefix = @())
+    Import-VeroNative
+    if ($Luid) { [VeroScudo.RouteGuard]::Arm($Luid, $LoIndex, $Prefix, (Get-VeroPath).ArmedFlag) } else { [VeroScudo.RouteGuard]::Disarm() }
+}
+
+function Update-VeroRouteGuard {
+    <# The watchdog, every pass: while a full tunnel is up (the one it watches, $script:WatchLuid), VMs are protected and
+       VeroScudo dials this type with a server address known, the native guard gets the routes to nowhere to add the very
+       moment the route leaves the tunnel; otherwise it is disarmed. The tunnel's own routes make no exception: after the
+       drop they are gone, and the routes must be the ones the drop handling wants (it records them). #>
+    [CmdletBinding()] param()
+    $st = $null; $c = $null
+    $want = [bool]$script:WatchLuid -and (Test-VeroArmed)
+    if ($want) {
+        $c = try { Get-VeroConfig } catch { $null }
+        $st = Get-VeroAppliedState
+        $want = $c -and $c.Vm -and $st -and @($st.Servers).Count -gt 0 -and [bool](Get-VeroTypeHandler (Get-VeroConfigType $c)).Dials -and
+                [bool](Get-VeroNic | Where-Object { $_.Name -like 'vEthernet*' -and [string]$_.OperationalStatus -eq 'Up' })
+    }
+    if (-not $want) { Set-VeroRouteGuard; return }
+    $lo4 = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
+    $table = @(Get-VeroRouteTable)
+    $tunIdx = @($table | ForEach-Object { [uint32]$_.Split('|')[0] } | Select-Object -Unique | Where-Object { try { [VeroScudo.Iface]::LuidFromIndex($_) -eq $script:WatchLuid } catch { $false } })
+    $ex = Get-VeroBlackholeExclude -ServerIps @($st.Servers) -Table $table -Loopback (@($lo4) + $tunIdx)
+    $all = Get-VeroBlackholePrefix -Exclude $ex                                # one array (it returns it whole): assigned, then filtered
+    $pre = @($all | Where-Object { -not $_.Contains(':') })
+    Set-VeroRouteGuard -Luid $script:WatchLuid -LoIndex $lo4 -Prefix $pre
+}
+
 function Get-VeroBlackholeExclude {
     <# What must keep its normal route: the VPN server addresses, the -Dns servers (only while the redial's DNS window is
        open), and every network an adapter is on (its on-link routes: the LAN, WSL's subnet; not loopback, nothing wider
@@ -369,8 +402,15 @@ function Sync-VeroBlackhole {
     $lo4 = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
     $wantSet = @{}
     if ($Want) {
-        $ex = Get-VeroBlackholeExclude -ServerIps $ServerIps -Dns $Dns -Table @(Get-VeroRouteTable) -Loopback @($lo4)
+        $table = @(Get-VeroRouteTable)
+        $ex = Get-VeroBlackholeExclude -ServerIps $ServerIps -Dns $Dns -Table $table -Loopback @($lo4)
         foreach ($p in (Get-VeroBlackholePrefix -Exclude $ex)) { if (-not $p.Contains(':')) { $wantSet["$lo4|$p"] = $true } }
+        # routes the route guard added at the drop (not in the record yet): taken over, so the ones not wanted go again
+        foreach ($line in $table) {
+            $f = $line.Split('|')
+            if ($f.Count -lt 4 -or [uint32]$f[0] -ne $lo4 -or [int]$f[3] -ne $script:RouteMarker -or $f[1].Contains(':') -or $f[1] -like '127.*') { continue }
+            if ($have -notcontains "$lo4|$($f[1])") { $have += "$lo4|$($f[1])" }
+        }
     }
     $keep = New-Object System.Collections.Generic.List[string]
     $failed = $null; $changed = $false

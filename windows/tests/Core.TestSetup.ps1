@@ -48,6 +48,7 @@
     Mock -ModuleName VeroScudo.Core Update-VeroLocalDns { }
     # routes (Sync-VeroBlackhole): never a real route from a test - "added" / "removed" at once, an empty routing table
     Mock -ModuleName VeroScudo.Core Add-VeroRoute { [uint32]0 }
+    Mock -ModuleName VeroScudo.Core Set-VeroRouteGuard { }                   # never the real route watch in a test
     Mock -ModuleName VeroScudo.Core Remove-VeroRoute { [uint32]0 }
     Mock -ModuleName VeroScudo.Core Get-VeroRouteTable { }
     Mock -ModuleName VeroScudo.Core Get-VeroAllVmAdapter { }

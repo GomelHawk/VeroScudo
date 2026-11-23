@@ -563,6 +563,68 @@ namespace VeroScudo
         }
     }
 
+    /// <summary>The routes to nowhere at the very moment the tunnel's route goes, not up to a second later when the
+    /// watchdog looks: while a full tunnel is up the watchdog hands over the routes it would add (Arm), and Windows calls
+    /// back on every IPv4 route change; when the route to the internet then no longer leads into the tunnel, the routes are
+    /// added from that callback. Nothing changes in the routing table while the tunnel holds the route. Once per Arm; the
+    /// watchdog records what was added (its own sync finds the routes there) and removes them as before.</summary>
+    public static class RouteGuard
+    {
+        internal delegate void Callback(IntPtr context, IntPtr row, int type);
+        static readonly Callback cb = OnChange;          // kept alive: Windows holds a pointer to it
+        static readonly object gate = new object();
+        static IntPtr handle = IntPtr.Zero;
+        static ulong tunnel;
+        static uint lo;
+        static string[] prefixes = new string[0];
+        static string armedFlag = "";
+        /// <summary>When the routes were added from the callback (UTC), else DateTime.MinValue.</summary>
+        public static DateTime Fired = DateTime.MinValue;
+
+        /// <summary>Watch for the route leaving tunnelLuid; prefixes are "a.b.c.d/len" for the loopback index lo. Nothing
+        /// is added once flag (VeroScudo's "armed" file) is gone: Off removes it before it hangs up.</summary>
+        public static void Arm(ulong tunnelLuid, uint loIndex, string[] list, string flag)
+        {
+            lock (gate)
+            {
+                tunnel = tunnelLuid; lo = loIndex; prefixes = list ?? new string[0]; armedFlag = flag ?? "";
+                if (handle == IntPtr.Zero)
+                {
+                    uint r = Native.NotifyRouteChange2(2, cb, IntPtr.Zero, false, out handle);
+                    if (r != 0) { handle = IntPtr.Zero; throw new InvalidOperationException("NotifyRouteChange2 failed: " + r); }
+                }
+            }
+        }
+
+        public static void Disarm()
+        {
+            lock (gate) { tunnel = 0; prefixes = new string[0]; }
+        }
+
+        public static bool Armed { get { lock (gate) { return tunnel != 0; } } }
+
+        static void OnChange(IntPtr context, IntPtr row, int type)
+        {
+            try
+            {
+                string[] todo; uint idx;
+                lock (gate)
+                {
+                    if (tunnel == 0 || Iface.BestLuid("1.1.1.1") == tunnel) return;
+                    if (armedFlag.Length == 0 || !System.IO.File.Exists(armedFlag)) { tunnel = 0; prefixes = new string[0]; return; }   // turned off
+                    todo = prefixes; idx = lo; tunnel = 0; prefixes = new string[0];
+                }
+                foreach (string p in todo)
+                {
+                    string[] f = p.Split('/');
+                    try { Route.Add(idx, f[0], int.Parse(f[1])); } catch { }
+                }
+                Fired = DateTime.UtcNow;
+            }
+            catch { }                                     // never let an exception out of a Windows callback
+        }
+    }
+
     /// <summary>A DNS responder on a loopback address that answers ONLY the VPN server's names, with the addresses
     /// VeroScudo has cached - for the NRPT rule that sends exactly those names here while the tunnel is down, so the redial
     /// finds its server without a DNS packet leaving the PC. Every other name: REFUSED. Never reachable from the network.</summary>
@@ -867,6 +929,7 @@ namespace VeroScudo
         [DllImport("iphlpapi.dll")] internal static extern uint DeleteIpForwardEntry2(IntPtr row);
         [DllImport("iphlpapi.dll")] internal static extern uint GetIpForwardTable2(ushort family, out IntPtr table);
         [DllImport("iphlpapi.dll")] internal static extern void FreeMibTable(IntPtr memory);
+        [DllImport("iphlpapi.dll")] internal static extern uint NotifyRouteChange2(ushort family, RouteGuard.Callback callback, IntPtr context, bool initialNotification, out IntPtr handle);
         [DllImport("iphlpapi.dll")] internal static extern uint ConvertInterfaceGuidToLuid(ref Guid guid, out ulong luid);
         [DllImport("rasapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "RasDialW")]
         internal static extern uint RasDial(IntPtr extensions, string phonebook, IntPtr dialParams, uint notifierType, IntPtr notifier, out IntPtr rasConn);

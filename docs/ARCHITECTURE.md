@@ -237,7 +237,10 @@ Their packets are forwarded, not sent by the host, so they need their own contro
   a type VeroScudo dials: `Sync-VeroBlackhole` (62-HyperVAcl.ps1) adds IPv4 routes on the loopback adapter covering
   everything except the VPN server addresses, the adapters' on-link networks and (while the redial's DNS window is open)
   the DNS servers - `Get-VeroBlackholePrefix`, about 30 per excluded address - through `CreateIpForwardEntry2`
-  (`VeroScudo.Route`, metric 7, active store only), recorded in `state\blackhole.json`. At once in the NetDown path (the
+  (`VeroScudo.Route`, metric 7, active store only), recorded in `state\blackhole.json`. While a full tunnel is up the watchdog hands the same routes (the tunnel's own
+  routes make no exception) to `VeroScudo.RouteGuard` (`Update-VeroRouteGuard`): a `NotifyRouteChange2` callback adds them
+  the moment the route to the internet stops leading into the tunnel - nothing changes in the routing table before;
+  the next sync takes them over into the record. At once in the NetDown path (the
   watchdog saw the route leave the tunnel - also while RAS still says "connected"), kept by the sync while that drop is
   unproven (the net-suspect note, at most 30 s) or the tunnel is down - before its route checks (a tunnel that is back
   must not look split); the proof is sent from the tunnel's own address, so the routes do not stand in its way. Removed

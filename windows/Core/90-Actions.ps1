@@ -177,6 +177,7 @@ function Invoke-VeroActionWatchdog {
                 try {
                     Invoke-VeroCheck -Action $Action
                     try { Update-VeroLocalDns -Action $Action } catch { Write-VeroLog "ERROR: local DNS answer: $($_.Exception.Message)" $Action }
+                    try { Update-VeroRouteGuard } catch { Write-VeroLog "ERROR: route guard: $($_.Exception.Message)" $Action }
                     Clear-VeroNativeBlocked -Action $Action                # every good pass (a cheap Test-Path): also clears a short task's record
                     try {
                         $sc = try { Get-VeroConfig } catch { $null }; $armedNow = Test-VeroArmed
