@@ -9,6 +9,14 @@ All notable changes to VeroScudo are recorded here. The format follows
 - Newer Hiddify versions connect in VPN mode through `HiddifyCore.exe`, which the kill-switch did not let out: with
   VeroScudo already on (for example after a switch from WireGuard), Hiddify's tunnel came up but nothing got through.
   `HiddifyCore.exe` from the Hiddify folder is now let out like `Hiddify.exe`.
+- A switch from a VPN VeroScudo dials (WireGuard, Windows VPN, OpenVPN) to Hiddify left the routes to nowhere of the old
+  tunnel's drop in place: all traffic went nowhere while the tray showed green, until Off. They are now removed within a
+  second when the new type wants none.
+
+### Linux, macOS: no DNS leak while Hiddify's tunnel is down
+- While a Hiddify tunnel was down, the system resolver could still send DNS to any address (a permit meant for the
+  redial of the VPNs VeroScudo dials): the names of the sites you visit left the computer. Hiddify is never dialed by
+  VeroScudo and its core resolves its servers through its own permit, so there is now no DNS permit at all for it.
 
 ### Windows: connections WSL already had open stop too when the VPN drops
 - The Hyper-V firewall blocks WSL's new connections at a drop, but ones already open followed the route onto the

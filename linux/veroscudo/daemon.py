@@ -221,9 +221,10 @@ class Guard:
     @staticmethod
     def dns_names(cfg: Config) -> tuple[str, ...] | None:
         """The only names the redial may look up while blocked: the VPN server's (none when it is an address). None for
-        Hiddify - its core resolves its servers itself (its own DNS permits), VeroScudo does not dial it."""
+        Hiddify either: VeroScudo does not dial it and its core resolves its servers through its own permits - a DNS
+        permit for the system resolver would let the names of the sites you visit out while its tunnel is down."""
         if cfg.current.vpn_type == hiddify.KIND:
-            return None
+            return ()
         server = cfg.server.strip()
         try:
             ipaddress.ip_address(server.strip("[]"))

@@ -26,8 +26,8 @@ class DnsPolicy:
     """Who may send DNS while blocked (redial needs to resolve the server): the system resolver's uid, else only the
     configured upstream resolvers; with neither known there is no DNS permit.
     names: the VPN server's host names - then only a UDP query for exactly one of them gets out (qname_match): the names of
-    the sites you visit stay inside while the VPN redials. () = a server given as an address: no DNS at all. None = not
-    narrowed (Hiddify: its core resolves its servers itself)."""
+    the sites you visit stay inside while the VPN redials. () = no DNS at all (a server given as an address; Hiddify, which
+    VeroScudo does not dial). None = not narrowed."""
     uid: int | None = None
     servers: tuple[str, ...] = field(default_factory=tuple)
     names: tuple[str, ...] | None = None

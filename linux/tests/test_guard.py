@@ -558,6 +558,9 @@ def test_dns_names_skip_hiddify_and_servers_given_as_addresses():
     assert daemon.Guard.dns_names(Config.from_text(MULTI)) == ("vpn.example.com",)
     ip = Config.from_text('{"profiles":[{"profile":"W","server":"203.0.113.5"}]}')
     assert daemon.Guard.dns_names(ip) == ()
+    hid = Config.from_text('{"profiles":[{"profile":"H","vpnType":"hiddify",'
+                           '"configPath":"/root/.local/share/app.hiddify.com/data/current-config.json"}]}')
+    assert daemon.Guard.dns_names(hid) == ()            # no DNS permit while its tunnel is down: Hiddify resolves itself
 
 
 def test_pf_blocked_the_servers_name_is_answered_locally_and_the_file_goes_when_up(env, monkeypatch):

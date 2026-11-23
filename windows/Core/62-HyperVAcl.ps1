@@ -398,19 +398,20 @@ function Sync-VeroBlackhole {
        Windows (or security software) refuses is logged once - WSL is then protected as before (the Hyper-V firewall). #>
     [CmdletBinding()] param([Parameter(Mandatory)][bool]$Want, [string[]]$ServerIps = @(), [string[]]$Dns = @(), [string]$Action = 'core')
     $have = @(Get-VeroBlackholeRecord)
-    if (-not $Want -and $have.Count -eq 0) { return }
     $lo4 = [uint32][System.Net.NetworkInformation.NetworkInterface]::LoopbackInterfaceIndex
+    $table = @(Get-VeroRouteTable)
+    # routes the route guard added at the drop (not in the record yet): taken over in every state, so the ones not wanted
+    # go again - also after a switch to a type that wants none (Hiddify), where they would hold all traffic
+    foreach ($line in $table) {
+        $f = $line.Split('|')
+        if ($f.Count -lt 4 -or [uint32]$f[0] -ne $lo4 -or [int]$f[3] -ne $script:RouteMarker -or $f[1].Contains(':') -or $f[1] -like '127.*') { continue }
+        if ($have -notcontains "$lo4|$($f[1])") { $have += "$lo4|$($f[1])" }
+    }
+    if (-not $Want -and $have.Count -eq 0) { return }
     $wantSet = @{}
     if ($Want) {
-        $table = @(Get-VeroRouteTable)
         $ex = Get-VeroBlackholeExclude -ServerIps $ServerIps -Dns $Dns -Table $table -Loopback @($lo4)
         foreach ($p in (Get-VeroBlackholePrefix -Exclude $ex)) { if (-not $p.Contains(':')) { $wantSet["$lo4|$p"] = $true } }
-        # routes the route guard added at the drop (not in the record yet): taken over, so the ones not wanted go again
-        foreach ($line in $table) {
-            $f = $line.Split('|')
-            if ($f.Count -lt 4 -or [uint32]$f[0] -ne $lo4 -or [int]$f[3] -ne $script:RouteMarker -or $f[1].Contains(':') -or $f[1] -like '127.*') { continue }
-            if ($have -notcontains "$lo4|$($f[1])") { $have += "$lo4|$($f[1])" }
-        }
     }
     $keep = New-Object System.Collections.Generic.List[string]
     $failed = $null; $changed = $false
@@ -443,7 +444,7 @@ function Remove-VeroBlackhole {
     foreach ($line in @(Get-VeroRouteTable)) {
         $f = $line.Split('|')
         if ($f.Count -lt 4 -or [uint32]$f[0] -notin $lo -or [int]$f[3] -ne [VeroScudo.Route]::Marker) { continue }
-        if ($f[1] -like '127.*' -or $f[1] -eq '::1/128') { continue }
+        if ($f[1] -like '127.*' -or $f[1] -eq '::1/128' -or -not $f[1].Contains(':')) { continue }   # IPv4: the sync above took them over
         $pp = $f[1].Split('/'); $null = Remove-VeroRoute -IfIndex ([uint32]$f[0]) -Prefix $pp[0] -Length ([int]$pp[1])
     }
     $p = (Get-VeroPath).Blackhole
