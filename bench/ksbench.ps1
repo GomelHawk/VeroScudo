@@ -409,6 +409,7 @@ namespace KsBench
                 foreach (KeyValuePair<int, string> kv in found) Paths[kv.Key] = kv.Value;
                 foreach (int[] r in rows)
                 {
+                    if (r[2] <= 4) continue;           // Windows itself (0: a closed connection's TIME_WAIT, 4: System) - never the VPN app
                     string k = r[0] + "|" + r[1];
                     List<double[]> spans;
                     if (!Held.TryGetValue(k, out spans)) Held[k] = spans = new List<double[]>();

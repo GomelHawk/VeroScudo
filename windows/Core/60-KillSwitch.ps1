@@ -577,9 +577,10 @@ function Get-VeroSyncPlan {
     $wsl = if ($vm) { Get-VeroWslLuid } else { [uint64]0 }
     $sw = Get-VeroSwitchLuid                                               # Get-VeroFilterSpec decides when it is open
     # DNS while down: a type VeroScudo dials gets it only for the redial's own lookup of its server, right before each
-    # dial (Invoke-VeroDnsFirst) - the names of the sites you visit stay inside. Hiddify (not dialed): as before
+    # dial (Invoke-VeroDnsFirst) - the names of the sites you visit stay inside. Hiddify (not dialed): none - its
+    # programs may reach any address and its core asks its own DNS servers
     # the SSTP revocation window (Open-VeroCrlWindow) needs DNS too: the CRL/OCSP servers are known by name
-    $wantDns = (-not $tun) -and ((-not $th.Dials) -or $script:DnsWindow -or [bool](& $th.CrlWindow))
+    $wantDns = (-not $tun) -and ($script:DnsWindow -or [bool](& $th.CrlWindow))
     $dns = @(if ($wantDns) { Get-VeroDnsServer -ProfileName $Config.Profile })    # @(if ...): an if yielding an empty list is $null
     $rasType = & $th.RasTunnelType $Config.Profile                        # the built-in client's protocol (its ports); 'Automatic' for the others
     $crl = [bool](& $th.CrlWindow)
