@@ -13,7 +13,7 @@ All notable changes to VeroScudo are recorded here. The format follows
   tunnel's drop in place: all traffic went nowhere while the tray showed green, until Off. They are now removed within a
   second when the new type wants none.
 
-### Windows, Linux, macOS: Hiddify counts as connected only with its route
+### Linux, macOS: Hiddify counts as connected only with its route
 - Hiddify's tunnel adapter taken down and up again is up without its routes and carries nothing until Hiddify connects
   again - the tray showed green meanwhile. Connected now also needs the route to the internet to lead into the adapter.
 
