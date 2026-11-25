@@ -185,7 +185,9 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         cg_match = f'socket cgroupv2 level {path.count("/") + 1} "{path}"'
         lines.append(f'    {cg_match} accept comment "Hiddify core, cgroup {cid}"')
     groups = group_endpoints(endpoints)
-    for ver, port, protos, addrs in groups:                             # Hiddify: its servers and direct DNS servers
+    # Hiddify: its servers and direct DNS servers, by address - only when its service is not known by its cgroup: an
+    # address permit lets every program there (the system resolver's fallback DNS to 1.1.1.1 while Hiddify is down)
+    for ver, port, protos, addrs in ([] if cg_match else groups):
         fam = "ip" if ver == 4 else "ip6"
         l4 = f"{protos[0]} dport {port}" if len(protos) == 1 else f"meta l4proto {{ {', '.join(protos)} }} th dport {port}"
         lines.append(f"    {fam} daddr {{ {', '.join(addrs)} }} {l4} accept")
