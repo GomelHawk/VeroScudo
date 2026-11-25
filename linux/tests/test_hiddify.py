@@ -431,6 +431,7 @@ def hid(request, tmp_path, monkeypatch):
     monkeypatch.setattr(hiddify, "running", lambda platform=None: state["running"])
     monkeypatch.setattr(hiddify, "interfaces", lambda platform=None: dict(state["ifaces"]))
     monkeypatch.setattr(hiddify, "_is_tun", lambda i: i.startswith("tun"))
+    monkeypatch.setattr(hiddify, "routes_into", lambda ifc, platform=None: state.get("routed", True))
     monkeypatch.setattr(hiddify, "allowed_owners", lambda p: {0, os.getuid()})
     monkeypatch.setattr(hiddify.sys, "platform", "linux")
     monkeypatch.setattr(hiddify, "service_cgroup", lambda *a, **k: state.get("cgroup"))
@@ -454,6 +455,18 @@ def test_backend_dispatch(hid):
     state["running"] = True
     state["ifaces"] = {"tun0": ["172.19.0.2"]}
     assert not vpn.is_connected("Hiddify")                                            # another tunnel's address
+    state["ifaces"], state["routed"] = {"tun0": ["172.19.0.1"]}, False
+    assert not vpn.is_connected("Hiddify")                    # up again without its routes (taken down and up): not connected
+
+
+def test_a_route_into_the_tunnel():
+    linux = "default via 172.19.0.2 table 2022 proto static\n172.19.0.0/28 proto kernel scope link src 172.19.0.1\n"
+    assert hiddify.has_route_into(linux, "tun0", "linux")
+    assert not hiddify.has_route_into("172.19.0.0/28 proto kernel scope link src 172.19.0.1\n", "tun0", "linux")
+    assert hiddify.has_route_into("0.0.0.0/1 table 2022\n128.0.0.0/1 table 2022\n", "tun0", "linux")
+    mac = "   route to: 1.1.1.1\ndestination: 0.0.0.0\n       mask: 128.0.0.0\n    gateway: 172.19.0.1\n  interface: utun5\n"
+    assert hiddify.has_route_into(mac, "utun5", "darwin") and not hiddify.has_route_into(mac, "utun6", "darwin")
+    assert not hiddify.has_route_into(mac.replace("utun5", "en0"), "utun5", "darwin")      # the card's, not the tunnel's
 
 
 def test_tunnel_owners_name_hiddify(hid, monkeypatch):

@@ -49,15 +49,31 @@ function Test-VeroHiddifyRunning {
     [bool](Get-Process -Name 'Hiddify', 'HiddifyCli', 'HiddifyCore' -ErrorAction SilentlyContinue)
 }
 
+function Test-VeroHiddifyRouted([uint64]$Luid) {
+    <# A route to the internet leads into Hiddify's adapter (0.0.0.0/0, or both halves): an adapter disabled and enabled
+       again is up without its routes and carries nothing until Hiddify connects again. A table that cannot be read
+       changes nothing. #>
+    $t = try { @(Get-VeroRouteTable) } catch { return $true }
+    $p = @(foreach ($l in $t) {
+            $f = ([string]$l).Split('|')
+            if ($f.Count -ge 2 -and $f[1] -in '0.0.0.0/0', '0.0.0.0/1', '128.0.0.0/1') { try { if ([VeroScudo.Iface]::LuidFromIndex([uint32]$f[0]) -eq $Luid) { $f[1] } } catch { Write-Verbose 'interface gone' } }
+        })
+    ($p -contains '0.0.0.0/0') -or (($p -contains '0.0.0.0/1') -and ($p -contains '128.0.0.0/1'))
+}
+
 function Test-VeroHiddifyConnected {
-    <# Connected = Hiddify runs and its tunnel adapter is up (VPN mode). #>
-    [bool]((Get-VeroHiddifyNic) -and (Test-VeroHiddifyRunning))
+    <# Connected = Hiddify runs, its tunnel adapter is up (VPN mode) and the route to the internet leads into it.
+       Without the native helper (blocked by App Control): adapter and process only, as before. #>
+    try { [bool](Get-VeroHiddifyTunnelLuid) } catch { [bool]((Get-VeroHiddifyNic) -and (Test-VeroHiddifyRunning)) }
 }
 
 function Get-VeroHiddifyTunnelLuid {
     if (-not (Test-VeroHiddifyRunning)) { return [uint64]0 }
     $nic = Get-VeroHiddifyNic
-    if ($nic) { [VeroScudo.Iface]::LuidFromGuid([guid]$nic.Id) } else { [uint64]0 }
+    if (-not $nic) { return [uint64]0 }
+    Import-VeroNative
+    $luid = [uint64][VeroScudo.Iface]::LuidFromGuid([guid]$nic.Id)
+    if (Test-VeroHiddifyRouted $luid) { $luid } else { [uint64]0 }
 }
 
 function Get-VeroHiddifyPermit {

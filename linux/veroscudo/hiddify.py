@@ -486,16 +486,43 @@ def _is_tun(ifc: str) -> bool:
     return (Path("/sys/class/net") / ifc / "tun_flags").exists()
 
 
+def has_route_into(text: str, ifc: str, platform: str) -> bool:
+    """Whether a route to the internet leads into `ifc`. Linux: `ip -4 route show table all dev IFC` holds a default
+    route or both halves 0/1 + 128/1; macOS: `route -n get 1.1.1.1` names it as the interface (whatever ranges Hiddify
+    split the internet into). Pure."""
+    if platform == "darwin":
+        m = re.search(r"interface:\s*(\S+)", text)
+        return bool(m) and m.group(1) == ifc
+    dests = {line.split()[0] for line in text.splitlines() if line.split()}
+    return "default" in dests or {"0.0.0.0/1", "128.0.0.0/1"} <= dests
+
+
+def routes_into(ifc: str, platform: str | None = None) -> bool:
+    """A route to the internet leads into this interface (Linux: in any table - sing-box keeps its own). An interface
+    taken down and up again is up without its routes: it carries nothing until Hiddify connects again. A listing that
+    cannot be read changes nothing (True)."""
+    platform = platform or sys.platform        # at call time, not import time (tests switch it)
+    argv = ["route", "-n", "get", "1.1.1.1"] if platform == "darwin" else ["ip", "-4", "route", "show", "table", "all", "dev", ifc]
+    try:
+        r = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode != 0 and platform != "darwin":
+        return True
+    return has_route_into(r.stdout, ifc, platform)
+
+
 def tunnel(path: str, platform: str | None = None) -> str | None:
     """Hiddify's tunnel interface for this config file - None unless a Hiddify process runs AND an up tunnel interface
-    holds the tun inbound's IPv4 address (or has its interface_name)."""
+    holds the tun inbound's IPv4 address (or has its interface_name) AND a route to the internet leads into it."""
     platform = platform or sys.platform        # at call time, not import time (tests switch it)
     v4, name = tun_of(path)
     if not v4 and not name:
         return None
     if not running(platform):
         return None
-    return pick_iface(interfaces(platform), v4, name, platform, _is_tun)
+    ifc = pick_iface(interfaces(platform), v4, name, platform, _is_tun)
+    return ifc if ifc and routes_into(ifc, platform) else None
 
 
 def iface(profile: str) -> str | None:

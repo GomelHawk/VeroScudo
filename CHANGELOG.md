@@ -13,6 +13,10 @@ All notable changes to VeroScudo are recorded here. The format follows
   tunnel's drop in place: all traffic went nowhere while the tray showed green, until Off. They are now removed within a
   second when the new type wants none.
 
+### Windows, Linux, macOS: Hiddify counts as connected only with its route
+- Hiddify's tunnel adapter taken down and up again is up without its routes and carries nothing until Hiddify connects
+  again - the tray showed green meanwhile. Connected now also needs the route to the internet to lead into the adapter.
+
 ### Windows, Linux, macOS: no DNS leak while Hiddify's tunnel is down
 - While a Hiddify tunnel was down, the system's DNS client could still ask the network's DNS servers (Windows) or any
   address (Linux, macOS) - a permit meant for the redial of the VPNs VeroScudo dials: the names of the sites you visit
