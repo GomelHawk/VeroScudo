@@ -213,7 +213,11 @@ function Get-VeroTransitionNotice {
                 'connect'   { return @{ Title = 'VeroScudo on - connecting'; Text = "Kill-switch on: traffic is blocked until '$ProfileName' is connected."; Icon = 'Info' } }
                 'switch'    { return $null }
                 'reconnect' { return $null }
-                default     { return @{ Title = 'VPN connection lost - traffic blocked'; Text = 'Reconnecting... nothing leaves this PC until the tunnel is back.'; Icon = 'Warning' } }
+                default     {
+                    # VeroScudo never reconnects Hiddify: say who does (its state text)
+                    $t = if ($Text -like 'Hiddify is not connected*') { $Text } else { 'Reconnecting... nothing leaves this PC until the tunnel is back.' }
+                    return @{ Title = 'VPN connection lost - traffic blocked'; Text = $t; Icon = 'Warning' }
+                }
             }
         }
         'protected' { return @{ Title = 'VPN protected'; Text = 'Tunnel up, kill-switch on.'; Icon = 'Info' } }

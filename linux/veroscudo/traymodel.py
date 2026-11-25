@@ -243,6 +243,8 @@ def transition_notice(last: str | None, v: View, expect: str | None, name: str) 
             return ("VeroScudo on - connecting", f"Kill-switch on: traffic is blocked until '{name}' is connected.", "normal")
         if expect in ("switch", "reconnect"):
             return None
+        if v.title == "Blocked - waiting for Hiddify":                  # VeroScudo never reconnects Hiddify: say who does
+            return ("VPN connection lost - traffic blocked", v.text, "critical")
         return ("VPN connection lost - traffic blocked", "Reconnecting... nothing leaves this computer until the tunnel is back.",
                 "critical")
     if v.state == "protected":

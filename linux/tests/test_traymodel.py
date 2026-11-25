@@ -43,6 +43,8 @@ def test_notifications_on_state_changes_only():
     assert tm.transition_notice("protected", prot, None, "W") is None
     title, _, urgency = tm.transition_notice("protected", lost, None, "W")
     assert title == "VPN connection lost - traffic blocked" and urgency == "critical"
+    hid = tm.tray_state(Facts(name="H", kind="hiddify", armed=True, up=False))
+    assert "connect it in Hiddify" in tm.transition_notice("protected", hid, None, "H")[1]    # never "Reconnecting..."
     assert tm.transition_notice("off", lost, "connect", "W")[0] == "VeroScudo on - connecting"
     assert tm.transition_notice("protected", lost, "reconnect", "W") is None   # the user's own Reconnect already said it
     assert tm.transition_notice("protected", lost, "switch", "W") is None
