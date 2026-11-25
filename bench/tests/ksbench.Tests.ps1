@@ -50,6 +50,10 @@ Describe 'the VPN app''s own programs' {
         [KsBench.Owners]::Near($l, [string[]]@('C:\vpn\vpnd.exe'), 1.0)
         $short.Prog | Should -Be 'C:\vpn\vpnd.exe'
         foreach ($x in $late, $other, $test, $vm) { $x.Prog | Should -BeNullOrEmpty }
+        $a.SPort = 50000; $resend = New-P '203.0.113.9' 70 $null; $resend.SPort = 50000     # its own connection, after a kill
+        $l2 = New-Object 'System.Collections.Generic.List[KsBench.Pkt]'; $l2.Add($a); $l2.Add($resend)
+        [KsBench.Owners]::Near($l2, [string[]]@('C:\vpn\vpnd.exe'), 1.0)
+        $resend.Prog | Should -Be 'C:\vpn\vpnd.exe'
     }
     It 'a port that comes back belongs to the program that held it at that moment' {
         $held = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[double[]]]'

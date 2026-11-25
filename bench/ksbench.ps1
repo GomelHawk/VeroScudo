@@ -368,7 +368,7 @@ namespace KsBench
         }
     }
 
-    // which program owns each local port, looked up every 0.05 s through the run (a packet capture does not tell)
+    // which program owns each local port, looked up every 0.02 s through the run (a packet capture does not tell)
     public static class Owners
     {
         [DllImport("iphlpapi.dll")] static extern uint GetExtendedTcpTable(IntPtr t, ref int size, bool order, int af, int cls, uint res);
@@ -388,7 +388,7 @@ namespace KsBench
         {
             if (T != null) return;
             Stop = false;
-            T = new Thread(delegate () { while (!Stop) { try { Poll(); } catch (Exception) { } Thread.Sleep(50); } });   // a VPN app's short checks too
+            T = new Thread(delegate () { while (!Stop) { try { Poll(); } catch (Exception) { } Thread.Sleep(20); } });   // a VPN app's short checks too
             T.IsBackground = true;
             T.Start();
         }
@@ -483,7 +483,7 @@ namespace KsBench
             return who >= 0 && paths.TryGetValue(who, out f) ? f : null;
         }
 
-        // the program of each packet - once, for packets older than `before` (the look is every 0.05 s)
+        // the program of each packet - once, for packets older than `before` (the look is every 0.02 s)
         public static void Know(List<Pkt> pkts, double before)
         {
             lock (Held)
@@ -491,14 +491,18 @@ namespace KsBench
                     if (!p.Known && p.Ts < before) { p.Prog = p.SPort > 0 ? Program(Held, Paths, p.Proto, p.SPort, p.Ts) : null; p.Known = true; }
         }
 
-        // a packet whose program was not seen (a socket shorter than one look) is the VPN app's when one of its programs sent
-        // to the same address, protocol and port within `window` s - never the bench's own test traffic, never a VM's
+        // a packet whose program was not seen is the VPN app's when it belongs to one of the app's connections (the same
+        // protocol, local port, address and port - also a resend after the app was killed: the system still closes its
+        // connections), or when one of its programs sent to the same address, protocol and port within `window` s (a socket
+        // shorter than one look) - never the bench's own test traffic, never a VM's
         public static void Near(List<Pkt> pkts, ICollection<string> app, double window)
         {
             Dictionary<string, List<Pkt>> seen = new Dictionary<string, List<Pkt>>();
+            Dictionary<string, string> flows = new Dictionary<string, string>();
             foreach (Pkt p in pkts)
             {
                 if (p.Prog == null || !app.Contains(p.Prog)) continue;
+                flows[p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort] = p.Prog;
                 string k = p.Dst + "|" + p.Proto + "|" + p.DPort;
                 List<Pkt> l;
                 if (!seen.TryGetValue(k, out l)) seen[k] = l = new List<Pkt>();
@@ -509,6 +513,8 @@ namespace KsBench
             {
                 List<Pkt> l;
                 if (!p.Known || p.Prog != null || Parse.IsTest(p) || Parse.Forwarded(p.Ttl)) continue;
+                string flow;
+                if (flows.TryGetValue(p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort, out flow)) { p.Prog = flow; continue; }
                 if (!seen.TryGetValue(p.Dst + "|" + p.Proto + "|" + p.DPort, out l)) continue;
                 int lo = 0, hi = l.Count;
                 while (lo < hi) { int mid = (lo + hi) / 2; if (l[mid].Ts < p.Ts - window) lo = mid + 1; else hi = mid; }

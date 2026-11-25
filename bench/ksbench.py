@@ -338,15 +338,39 @@ class Capture:
 
 class Owners:
     """Which program held each local port when, looked up every 0.05 s through the run (macOS: 0.2 s - lsof is slow) - a
-    packet capture does not tell; a VPN app's short checks (a few hundred ms) must be seen too.
+    packet capture does not tell; a VPN app's short checks (a few hundred ms) must be seen too. The VPN app's own
+    programs (focus, once known) every 0.02 s where the system lets that be cheap (`fast`: Linux /proc).
     Ports come back (ephemeral ports): a packet belongs to the program that held its port at that moment."""
 
-    def __init__(self, listing, path):
-        self.listing, self.path = listing, path     # () -> [(proto, port, pid)]; pid -> program file or None
+    def __init__(self, listing, path, fast=None):
+        self.listing, self.path, self.fast = listing, path, fast     # fast: pids -> [(proto, port, pid)]
         self.held, self.paths, self.lock, self.stop_ev = {}, {}, threading.Lock(), threading.Event()
+        self.focus = set()
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
+        if self.fast:
+            threading.Thread(target=self._fast_loop, daemon=True).start()
+
+    def _fast_loop(self):
+        while not self.stop_ev.is_set():
+            with self.lock:
+                pids = [pid for pid, f in self.paths.items() if f in self.focus]
+            try:
+                rows = set(self.fast(pids)) if pids else set()
+            except Exception:               # noqa: BLE001 - a failed look: try again on the next round
+                rows = set()
+            self._record(rows, time.time())
+            self.stop_ev.wait(0.02)
+
+    def _record(self, rows, now):
+        with self.lock:
+            for proto, port, pid in rows:
+                spans = self.held.setdefault((proto, port), [])     # [pid, first seen, last seen]
+                if spans and spans[-1][0] == pid and now - spans[-1][2] < 1.0:
+                    spans[-1][2] = now
+                else:
+                    spans.append([pid, now, now])
 
     def stop(self):
         self.stop_ev.set()
@@ -361,12 +385,7 @@ class Owners:
             paths = {pid: self.path(pid) for _, _, pid in rows if pid not in self.paths}
             with self.lock:
                 self.paths.update(paths)
-                for proto, port, pid in rows:
-                    spans = self.held.setdefault((proto, port), [])     # [pid, first seen, last seen]
-                    if spans and spans[-1][0] == pid and now - spans[-1][2] < 1.0:
-                        spans[-1][2] = now
-                    else:
-                        spans.append([pid, now, now])
+            self._record(rows, now)
             self.stop_ev.wait(0.2 if IS_MAC else 0.05)
 
     def program(self, proto, port, ts):
@@ -394,18 +413,26 @@ def vpn_app(server_progs, progs):
 
 
 def credit_near(items, app, window=1.0):
-    """A packet whose program was not seen (a socket shorter than one look) is the VPN app's when one of its programs
-    sent to the same address, protocol and port within `window` s - never the bench's own test traffic, never a packet
-    forwarded for a VM. items: (ts, Pkt) whose program was looked up."""
-    seen = {}
+    """A packet whose program was not seen is the VPN app's when it belongs to one of the app's connections (the same
+    protocol, local port, address and port - also a resend after the app was killed: the system still closes its
+    connections), or when one of its programs sent to the same address, protocol and port within `window` s (a socket
+    shorter than one look) - never the bench's own test traffic, never a packet forwarded for a VM.
+    items: (ts, Pkt) whose program was looked up."""
+    seen, flows = {}, {}
     for ts, p in items:
         if p.prog in app:
             seen.setdefault((p.dst, p.proto, p.dport), []).append((ts, p.prog))
+            flows[(p.proto, p.sport, p.dst, p.dport)] = p.prog
     for v in seen.values():
         v.sort()
     for ts, p in items:
-        near = seen.get((p.dst, p.proto, p.dport)) if p.known and p.prog is None else None
-        if not near or is_test(p) or forwarded(p.ttl):
+        if not p.known or p.prog is not None or is_test(p) or forwarded(p.ttl):
+            continue
+        if (p.proto, p.sport, p.dst, p.dport) in flows:
+            p.prog = flows[(p.proto, p.sport, p.dst, p.dport)]
+            continue
+        near = seen.get((p.dst, p.proto, p.dport))
+        if not near:
             continue
         i = bisect.bisect_left(near, (ts - window,))
         if i < len(near) and near[i][0] <= ts + window:
@@ -647,6 +674,35 @@ class Linux:
             port = _host_port(f[4])[1]
             for pid in re.findall(r"pid=(\d+)", line):
                 out.append((6 if f[0] == "tcp" else 17, port, int(pid)))
+        return out
+
+    @staticmethod
+    def sockets_of(pids):
+        """(proto, local port, pid) of these processes' sockets, from /proc - cheap enough for every 0.02 s."""
+        inodes = {}
+        for pid in pids:
+            try:
+                fds = os.listdir(f"/proc/{pid}/fd")
+            except OSError:
+                continue
+            for fd in fds:
+                try:
+                    link = os.readlink(f"/proc/{pid}/fd/{fd}")
+                except OSError:
+                    continue
+                if link.startswith("socket:["):
+                    inodes[link[8:-1]] = pid
+        out = []
+        for name, proto in (("tcp", 6), ("tcp6", 6), ("udp", 17), ("udp6", 17)) if inodes else ():
+            try:
+                with open(f"/proc/net/{name}") as f:
+                    next(f, None)
+                    for line in f:
+                        x = line.split()
+                        if len(x) > 9 and x[9] in inodes:
+                            out.append((proto, int(x[1].rsplit(":", 1)[1], 16), inodes[x[9]]))
+            except OSError:
+                pass
         return out
 
     @staticmethod
@@ -968,6 +1024,7 @@ class Bench:
         """The VPN app's program files (vpn_app)."""
         pk = self.known(self.cap.window(0, time.time()))
         app = vpn_app({p.prog for _, _, p in pk if p.dst in self.servers}, self.owners.programs())
+        self.owners.focus = app                 # from now on its programs are looked at every 0.02 s
         credit_near([(ts, p) for ts, _, p in pk], app)
         return app
 
@@ -1353,7 +1410,7 @@ class Bench:
             self.online = ask(ONLINE_PROMPT, True, sys.stdin.isatty()) if sys.stdin.isatty() else False
         self.cap = Capture(self.phys)
         self.cap.start()
-        self.owners = Owners(self.p.sockets, self.p.program)
+        self.owners = Owners(self.p.sockets, self.p.program, getattr(self.p, "sockets_of", None))
         self.owners.start()
         self.t_start = time.time()
 
