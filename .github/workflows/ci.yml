@@ -61,6 +61,16 @@ jobs:
           $cfg.TestResult.Enabled = $true
           $cfg.TestResult.OutputPath = 'TestResults.xml'
           Invoke-Pester -Configuration $cfg
+      - name: Bench unit tests (Windows PowerShell 5.1, the runtime ksbench.ps1 runs in)
+        shell: powershell
+        run: |
+          $env:PSModulePath = (Join-Path $env:RUNNER_TEMP 'psmodules') + ';' + $env:PSModulePath
+          Import-Module Pester -RequiredVersion 5.7.1
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'bench/tests'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $cfg
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -87,6 +97,10 @@ jobs:
       - name: Lint (ruff)
         working-directory: linux
         run: python -m ruff check .
+      - name: Bench unit tests and lint (ksbench.py)
+        run: |
+          python -m pytest -q bench/tests
+          python -m ruff check bench/ksbench.py
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck nftables

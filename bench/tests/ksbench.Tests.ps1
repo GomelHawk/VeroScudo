@@ -1,6 +1,6 @@
 # Pester 5 tests for the parser and classifier in ksbench.ps1 (same vectors as test_ksbench.py).
 BeforeAll {
-    . (Join-Path $PSScriptRoot '..' 'ksbench.ps1')
+    . (Join-Path (Split-Path $PSScriptRoot) 'ksbench.ps1')        # two arguments: Windows PowerShell 5.1 has no third
     $script:Vec = Get-Content -Raw (Join-Path $PSScriptRoot 'vectors.json') | ConvertFrom-Json
 }
 
