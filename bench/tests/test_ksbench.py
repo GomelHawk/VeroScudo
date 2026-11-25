@@ -63,6 +63,9 @@ def test_credit_near_only_the_same_endpoint_within_a_second():
     resend = pkt("203.0.113.9", 50000)                # the app's own connection, 60 s later (killed: the system closes it)
     ksbench.credit_near([(10.0, a), (70.0, resend)], app)
     assert resend.prog == "/opt/vpn/vpnd"
+    frag_a, frag = pkt("203.0.113.9", None, "/opt/vpn/vpnd"), pkt("203.0.113.9", None)   # no port: never one connection
+    ksbench.credit_near([(10.0, frag_a), (70.0, frag)], app)
+    assert frag.prog is None
 
 
 def test_owners_follow_a_port_from_program_to_program():

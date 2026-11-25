@@ -422,13 +422,14 @@ def credit_near(items, app, window=1.0):
     for ts, p in items:
         if p.prog in app:
             seen.setdefault((p.dst, p.proto, p.dport), []).append((ts, p.prog))
-            flows[(p.proto, p.sport, p.dst, p.dport)] = p.prog
+            if p.sport:                                     # a real port (a fragment has none)
+                flows[(p.proto, p.sport, p.dst, p.dport)] = p.prog
     for v in seen.values():
         v.sort()
     for ts, p in items:
         if not p.known or p.prog is not None or is_test(p) or forwarded(p.ttl):
             continue
-        if (p.proto, p.sport, p.dst, p.dport) in flows:
+        if p.sport and (p.proto, p.sport, p.dst, p.dport) in flows:
             p.prog = flows[(p.proto, p.sport, p.dst, p.dport)]
             continue
         near = seen.get((p.dst, p.proto, p.dport))

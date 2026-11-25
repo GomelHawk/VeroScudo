@@ -502,7 +502,7 @@ namespace KsBench
             foreach (Pkt p in pkts)
             {
                 if (p.Prog == null || !app.Contains(p.Prog)) continue;
-                flows[p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort] = p.Prog;
+                if (p.SPort > 0) flows[p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort] = p.Prog;   // a real port (a fragment has none)
                 string k = p.Dst + "|" + p.Proto + "|" + p.DPort;
                 List<Pkt> l;
                 if (!seen.TryGetValue(k, out l)) seen[k] = l = new List<Pkt>();
@@ -514,7 +514,7 @@ namespace KsBench
                 List<Pkt> l;
                 if (!p.Known || p.Prog != null || Parse.IsTest(p) || Parse.Forwarded(p.Ttl)) continue;
                 string flow;
-                if (flows.TryGetValue(p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort, out flow)) { p.Prog = flow; continue; }
+                if (p.SPort > 0 && flows.TryGetValue(p.Proto + "|" + p.SPort + "|" + p.Dst + "|" + p.DPort, out flow)) { p.Prog = flow; continue; }
                 if (!seen.TryGetValue(p.Dst + "|" + p.Proto + "|" + p.DPort, out l)) continue;
                 int lo = 0, hi = l.Count;
                 while (lo < hi) { int mid = (lo + hi) / 2; if (l[mid].Ts < p.Ts - window) lo = mid + 1; else hi = mid; }
