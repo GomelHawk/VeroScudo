@@ -100,7 +100,7 @@ jobs:
       - name: Bench unit tests and lint (ksbench.py)
         run: |
           python -m pytest -q bench/tests
-          python -m ruff check bench/ksbench.py
+          python -m ruff check --config linux/pyproject.toml bench/ksbench.py    # the project's rules: Python 3.9 like linux/
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck nftables
