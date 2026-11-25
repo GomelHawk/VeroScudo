@@ -433,7 +433,7 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         $p = InModuleScope VeroScudo.Core { Get-VeroHiddifyPermit -Config (Get-VeroConfig -Raw '{"profiles":[{"profile":"Hiddify","type":"hiddify"}]}') }
         $p.Kind | Should -Be 'program'; @($p.Apps).Count | Should -Be 2; @($p.Ips).Count | Should -Be 0
     }
-    It 'connected = Hiddify runs and its sing-tun adapter is up; the tunnel is that adapter' {
+    It 'connected = Hiddify runs, its sing-tun adapter is up and the route leads into it; the tunnel is that adapter' {
         # the LUID comes from the real ConvertInterfaceGuidToLuid: give the fake adapter the GUID of an interface this machine
         # has (a GUID from another PC fails with 87 - it did on the CI runner)
         $real = InModuleScope VeroScudo.Core {
@@ -447,8 +447,13 @@ Describe 'Hiddify (VPN mode): kill-switch only' {
         $script:tunReal = $script:tun.PSObject.Copy(); $script:tunReal.Id = $real.Id
         Mock -ModuleName VeroScudo.Core Get-VeroNic { $script:tunReal }
         Mock -ModuleName VeroScudo.Core Get-Process { [pscustomobject]@{ Name = 'Hiddify'; Id = 1 } }
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyRouted { $true }          # the route to the internet leads into it
         Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeTrue
         Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be $real.Luid
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyRouted { $false }         # up again without its routes: carries nothing
+        Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeFalse
+        Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be 0
+        Mock -ModuleName VeroScudo.Core Test-VeroHiddifyRouted { $true }
         Mock -ModuleName VeroScudo.Core Get-Process { }
         Test-VeroVpnConnected 'Hiddify' -Type 'hiddify' | Should -BeFalse          # adapter left behind, app gone: not a tunnel
         Get-VeroTunnelLuid 'Hiddify' -Type 'hiddify' | Should -Be 0
