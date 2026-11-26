@@ -447,6 +447,14 @@ def watch(profiles, on_up, on_down, on_auth=None) -> None:
     for ac in client.get_active_connections():
         hook(ac)
     client.connect("active-connection-added", lambda c, ac: hook(ac))
+
+    def rescan():
+        """A connection that was up before its profile was configured (imported while connected) is hooked now."""
+        for ac in client.get_active_connections():
+            hook(ac)
+        return True                     # keep the timer
+
+    GLib.timeout_add_seconds(2, rescan)
     GLib.MainLoop().run()
 
 

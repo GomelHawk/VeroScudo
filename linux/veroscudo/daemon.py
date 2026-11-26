@@ -35,6 +35,11 @@ DEAD_ROUNDS = 3
 DEAD_PAUSE_SECONDS = 600.0
 
 OFF_STAMP = "off.at"            # when Off last ran (a redial in flight must not undo it); in the run folder
+# pf: the port of the daemon's local DNS answer and the names it answers (a line each), renewed every watchdog pass (in the
+# run folder) - the `veroscudo` command has no responder of its own and reads it there (Windows: state\localdns.json);
+# older than this, it counts as none
+LOCAL_DNS_NOTE = "localdns.port"
+LOCAL_DNS_FRESH_SECONDS = 45.0
 
 
 def force_off(store: StateStore) -> None:
@@ -49,6 +54,11 @@ def force_off(store: StateStore) -> None:
             log.info("DISARMED")
         firewall.clear()
         store.set_applied(None, None)
+    if not firewall.matches_dns_names():
+        try:
+            localdns.sync_files([], None)                      # pf: VeroScudo's resolver file goes with the rules
+        except OSError:
+            log.exception("resolver file")
 
 
 def lockdown(store: StateStore) -> None:
@@ -67,6 +77,7 @@ class Guard:
         self.dead_marker = self.store.home / "dead.marker"    # set with it when the reconnect is the guard's own (dead tunnel)
         self.off_stamp = self.store.home / OFF_STAMP         # when `veroscudo off` last ran (a redial in flight must not undo it)
         self._events = threading.RLock()                     # one VPN event at a time: read the markers, decide, act
+        self._reload = threading.Lock()                      # the watchdog and the VPN events both pick up a changed config
         self._loop_thread: threading.Thread | None = None
         self._applied: str | None = None
         # how many dials a redial loop makes before it hands over: None = until connected (the daemon). The CLI (and so the
@@ -96,19 +107,26 @@ class Guard:
     def reload_config(self) -> bool:
         """Picks up a changed config.json (the tray's Settings, `veroscudo import`) without a restart. A file that does not
         load keeps the running configuration - the kill-switch never loses its profile to a typo - and is logged once."""
-        stamp = self._stamp()
-        if stamp == self._cfg_stamp:
-            return False
-        self._cfg_stamp = stamp
-        try:
-            new = Config.load()
-        except Exception as e:  # noqa: BLE001 - whatever is wrong with the file: the running one stays
-            log.error("config.json changed but cannot be used (%s) - keeping the previous configuration", e)
-            return False
-        self.base = new
+        with self._reload:
+            stamp = self._stamp()
+            if stamp == self._cfg_stamp:
+                return False
+            self._cfg_stamp = stamp
+            try:
+                new = Config.load()
+            except Exception as e:  # noqa: BLE001 - whatever is wrong with the file: the running one stays
+                log.error("config.json changed but cannot be used (%s) - keeping the previous configuration", e)
+                return False
+            self.base = new
         log.info("config.json changed - profiles: %s (default '%s', active '%s')", ", ".join(new.names),
                  new.default_profile, self.cfg.profile)
         return True
+
+    def profile_names(self) -> set[str]:
+        """The configured profiles as the file names them now: the watch and the VPN events must know a profile from the
+        moment it is added - the active one is already switched to it, and its events are judged by this list."""
+        self.reload_config()
+        return set(self.base.names)
 
     @property
     def cfg(self) -> Config:
@@ -277,6 +295,29 @@ class Guard:
         names = self.dns_names(cfg) or ()
         ips = self.cached_server_ips(cfg) if names else []
         self.local.set_answers({n: ips for n in names} if ips else {})
+        try:
+            write_atomic(self.store.home / LOCAL_DNS_NOTE, "\n".join([str(self.local.port), *sorted(self.local.names)]))
+        except OSError:
+            log.exception("local DNS note")
+
+    def local_port(self, names=()) -> int | None:
+        """pf only: where the local DNS answer for `names` listens - this process's own responder (the daemon), else the
+        port the daemon noted: On, Reconnect and a switch run in the `veroscudo` command, which must keep the daemon's
+        resolver file, not take it away. None when the daemon has not renewed its note, or does not answer one of the
+        names yet (a profile just switched to: a resolver file would send its name to a responder that refuses it)."""
+        if self.local.port:
+            return self.local.port
+        note = self.store.home / LOCAL_DNS_NOTE
+        try:
+            if abs(time.time() - note.stat().st_mtime) > LOCAL_DNS_FRESH_SECONDS:
+                return None
+            first, *answered = note.read_text().split("\n")
+            port = int(first)
+        except (OSError, ValueError):
+            return None
+        if not 1024 <= port <= 65535 or any(n.rstrip(".").lower() not in answered for n in names):
+            return None
+        return port
 
     def sync_resolver(self, tun: str | None, remove: bool = False) -> None:
         """pf only: while armed and blocked, /etc/resolver/<server name> sends that name to the local answer - the redial
@@ -285,11 +326,14 @@ class Guard:
         if firewall.matches_dns_names():
             return
         cfg = self.cfg
-        names = list(self.dns_names(cfg) or ()) if not remove and self.store.armed and not tun and self.local.port else []
+        names = [] if remove or tun or not self.store.armed else list(self.dns_names(cfg) or ())
+        port = self.local_port(names) if names else None
+        if not port:
+            names = []
         if names and not self.cached_server_ips(cfg):
             names = []
         try:
-            if localdns.sync_files(names, self.local.port if names else None):
+            if localdns.sync_files(names, port if names else None):
                 log.info("resolver file: %s", f"'{names[0]}' answered locally while the tunnel is down" if names
                          else "VeroScudo's resolver file removed")
         except OSError:
@@ -573,6 +617,7 @@ class Guard:
 
     def on_event_auth(self, profile: str, which: str) -> None:
         with self._events:
+            self.reload_config()
             self._on_event_auth(profile, which)
 
     def _on_event_auth(self, profile: str, which: str) -> None:
@@ -587,6 +632,7 @@ class Guard:
 
     def on_event_up(self, profile: str) -> None:
         with self._events:
+            self.reload_config()
             self._on_event_up(profile)
 
     def _on_event_up(self, profile: str) -> None:
@@ -606,6 +652,7 @@ class Guard:
 
     def on_event_down(self, profile: str, user_requested: bool) -> None:
         with self._events:
+            self.reload_config()
             self._on_event_down(profile, user_requested)
 
     def _on_event_down(self, profile: str, user_requested: bool) -> None:
@@ -802,4 +849,4 @@ class Guard:
 
         threading.Thread(target=tick, daemon=True).start()
         threading.Thread(target=self.quality_loop, daemon=True, name="quality").start()
-        nm.watch(lambda: set(self.base.names), on_up=self.on_event_up, on_down=self.on_event_down, on_auth=self.on_event_auth)
+        nm.watch(self.profile_names, on_up=self.on_event_up, on_down=self.on_event_down, on_auth=self.on_event_auth)

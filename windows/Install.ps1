@@ -43,29 +43,44 @@ if ($weak) { throw "refusing -InstallDir '$InstallDir': '$weak' lets non-adminis
 $p = Get-VeroPath
 # %ProgramData% lets every user create folders. One made before the first install - by another account, or by a program
 # without administrator rights - could hold a config, an OpenVPN file or state the guard would then trust: refused.
-function Assert-HomeTrusted {
-    <# The state folder must be a real folder (not a link to another one), belong to Administrators or SYSTEM, and give
-       nobody else a way to create or change files in it. #>
-    $di = New-Object IO.DirectoryInfo $p.Home
-    if ($di.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing to use '$($p.Home)': it is a link to another folder, not a folder. Remove the link and run Install.ps1 again." }
-    $acl = Get-Acl -LiteralPath $p.Home
+function Assert-FolderTrusted([string]$Dir, [switch]$MadeByAdmins) {
+    <# The state folder and the program folder must each be a real folder (not a link to another one), belong to
+       Administrators or SYSTEM, and give nobody else a way to create or change files in it.
+       -MadeByAdmins: only an administrator can have made this folder (its parent lets nobody else create one). With UAC
+       off, or as the built-in Administrator, it then belongs to that account itself and not to the Administrators group -
+       this account, which is running the installer, counts as trusted too. #>
+    $me = if ($MadeByAdmins) { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } else { '' }
+    $di = New-Object IO.DirectoryInfo $Dir
+    if ($di.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "refusing to use '$Dir': it is a link to another folder, not a folder. Remove the link and run Install.ps1 again." }
+    $acl = Get-Acl -LiteralPath $Dir
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($owner -notmatch '^(S-1-5-18|S-1-5-32-544|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)\z') {
-        throw "refusing to use '$($p.Home)': it exists already and does not belong to Administrators or SYSTEM (owner: $owner), so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
+    if ($owner -notmatch '^(S-1-5-18|S-1-5-32-544|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)\z' -and -not ($me -and $owner -eq $me)) {
+        throw "refusing to use '$Dir': it exists already and does not belong to Administrators or SYSTEM (owner: $owner), so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
     }
-    if (-not (Test-VeroAdminOnlyRules -Contents @($acl.Access | ForEach-Object { $_ }))) {
-        throw "refusing to use '$($p.Home)': it exists already and lets others than Administrators and SYSTEM create or change files in it, so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
+    $rules = @($acl.Access | ForEach-Object { $_ } | Where-Object {
+        $sid = try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { '' }
+        -not ($me -and $sid -eq $me) })
+    if (-not (Test-VeroAdminOnlyRules -Contents $rules)) {
+        throw "refusing to use '$Dir': it exists already and lets others than Administrators and SYSTEM create or change files in it, so its content cannot be trusted. Look at what is in it, rename it, and run Install.ps1 again."
     }
 }
-if (Test-Path -LiteralPath $p.Home) { Assert-HomeTrusted }
-# The state folder is made with its protection (administrators and SYSTEM full, users read) - never with ProgramData's
-# "users may create files" for a moment, in which another account could put something in.
-if (-not (Test-Path -LiteralPath $p.Home)) {
-    $sd = New-Object System.Security.AccessControl.DirectorySecurity
-    $sd.SetSecurityDescriptorSddlForm('O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
-    [void][IO.Directory]::CreateDirectory($p.Home, $sd)
+# The same for the program folder: the elevated tasks run its scripts. Program Files lets no user create it; a custom
+# -InstallDir right under a drive's root does (users may create folders there, and whoever made a folder - or opened it
+# before it was locked - can still replace what is in it afterwards).
+foreach ($dir in $p.Home, $InstallDir) {
+    # the program folder under Program Files (or any parent in which only administrators may create a folder)
+    $up = Split-Path -Parent $dir
+    $byAdmins = $dir -eq $InstallDir -and $up -and (Test-Path -LiteralPath $up) -and (Test-VeroAdminOnlyRules -Contents @((Get-Acl -LiteralPath $up).Access | ForEach-Object { $_ }))
+    if (Test-Path -LiteralPath $dir) { Assert-FolderTrusted $dir -MadeByAdmins:$byAdmins }
+    # made with its protection (administrators and SYSTEM full, users read) - never with the parent's "users may create
+    # files" for a moment, in which another account could put something in
+    if (-not (Test-Path -LiteralPath $dir)) {
+        $sd = New-Object System.Security.AccessControl.DirectorySecurity
+        $sd.SetSecurityDescriptorSddlForm('O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
+        [void][IO.Directory]::CreateDirectory($dir, $sd)
+    }
+    Assert-FolderTrusted $dir -MadeByAdmins:$byAdmins                     # again: also a folder somebody made in the instant between the look and the creation
 }
-Assert-HomeTrusted                                                        # again: also a folder somebody made in the instant between the look and the creation
 New-Item -ItemType Directory -Path $InstallDir, $p.Home, $p.State -Force | Out-Null
 # icacls below walks these folders: a link inside them would carry the walk (and its ownership changes) somewhere else
 function Assert-NoLinkInside([string]$Root) {

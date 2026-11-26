@@ -280,6 +280,19 @@ Describe 'Test-VeroOpenVpnConf is an allow-list that reads lines like OpenVPN' {
     It 'ends an inline block where OpenVPN does (a line starting with the closing tag) and refuses what follows' {
         (Test-VeroOpenVpnConf -Text "remote vpn.example.com`n<ca>`nabc`n</ca>x`nplugin evil.dll").Errors.Count | Should -BeGreaterThan 1
     }
+    It 'takes only OpenVPN''s own white space for white space: a tag next to <what> opens no block, and what follows is checked' -ForEach @(
+        @{ what = 'a no-break space';      sp = [string][char]0xA0 }
+        @{ what = 'an em space';           sp = [string][char]0x2003 }
+        @{ what = 'an ideographic space';  sp = [string][char]0x3000 }
+        @{ what = 'a next-line character'; sp = [string][char]0x85 }
+    ) {
+        foreach ($t in @("$sp<ca>`nplugin evil.dll`n$sp</ca>", "<ca>$sp`nplugin evil.dll`n</ca>$sp")) {
+            (Test-VeroOpenVpnConf -Text ("remote vpn.example.com`nsetenv FORWARD_COMPATIBLE 1`n" + $t)).Errors -join ' ' | Should -Match "'plugin' is not allowed"
+        }
+    }
+    It 'reads a tag letter for letter: one in capitals opens no block' {
+        (Test-VeroOpenVpnConf -Text "remote vpn.example.com`n<CA>`nplugin evil.dll`n</CA>").Errors -join ' ' | Should -Match "'plugin' is not allowed"
+    }
     It 'gives each connection block its own protocol and port' {
         $r = Test-VeroOpenVpnConf -Text "client`nproto udp`n<connection>`nremote a.example.com`nproto udp`nport 1194`n</connection>`n<connection>`nremote b.example.com`nproto tcp-client`nport 443`n</connection>"
         $r.Errors.Count | Should -Be 0

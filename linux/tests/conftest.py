@@ -21,3 +21,9 @@ def no_redial_thread_outlives_its_test(monkeypatch):
 def never_the_real_resolver_dir(monkeypatch, tmp_path):
     """No test may write /etc/resolver: VeroScudo's resolver files go to the test's own folder."""
     monkeypatch.setattr(localdns, "RESOLVER_DIR", tmp_path / "etc-resolver")
+
+
+@pytest.fixture(autouse=True)
+def never_the_real_config(monkeypatch, tmp_path):
+    """A guard under test reads no config.json of this machine (every VPN event looks whether the file changed)."""
+    monkeypatch.setenv("VEROSCUDO_CONFIG", str(tmp_path / "no-config.json"))

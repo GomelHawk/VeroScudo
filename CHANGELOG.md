@@ -5,6 +5,48 @@ All notable changes to VeroScudo are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security review: fixes
+- **Windows, OpenVPN: an imported config could hide options from the check.** The check took any Unicode space (a no-break
+  space, for one) for white space; OpenVPN takes only blank, tab, CR, VT and FF. A tag line with such a character opened
+  a block for the check that OpenVPN read as an unknown option - only a warning once the config says
+  `setenv FORWARD_COMPATIBLE 1` - and the lines "inside" it (`plugin`, `management`, `log` ...) were never checked, yet
+  OpenVPN, run as administrator, read them as options. The check now reads white space and tags exactly as OpenVPN does;
+  the stored configs are checked again at every start, so one imported earlier is refused then.
+- **Linux: a VPN that was connected before its profile was imported** was not watched: disconnecting it in NetworkManager
+  was redialed instead of being taken for your Off. Connections are looked at again every 2 s.
+- **Linux, macOS: a switch to a profile added moments before turned the VPN off.** The daemon read `config.json` only
+  every 15 s. A profile imported and switched to (or connected by hand) within that time was not in its list: the old
+  profile's hang-up during the switch was taken for your Off - armed flag and rules removed -, and a connect by hand did
+  not turn VeroScudo on. Every VPN event now reads the file as it is first.
+- **Windows: `-InstallDir` right under a drive's root.** Users may create folders there, and whoever made the folder (or
+  opened it before the installer locked it) could still replace the scripts the elevated tasks run. The program folder
+  is now created with its protection, and one that exists already is refused unless it is a real folder that belongs to
+  Administrators or SYSTEM and lets nobody else change it - the rule the state folder had. The default folder under
+  Program Files was not affected. An install made into such a folder by an earlier version: uninstall, and install into
+  a new folder.
+- **macOS: On, Reconnect and a switch took the local DNS answer away.** They run in the `veroscudo` command, which has no
+  responder of its own and removed the daemon's resolver file - the dial that followed could open DNS to the network's
+  servers for up to 3 s. The daemon now notes its port and the names it answers (`/var/run/veroscudo/localdns.port`)
+  and the command uses them.
+  Off with a `config.json` that does not load removes the resolver file too.
+- **Linux: DNS while blocked - every packet must be the query for the server's name.** The first packet of a flow was
+  checked; later ones on the same socket passed as "established" whatever they held. Without systemd-resolved (where
+  only its user may send them) any program could so talk to the network's DNS servers on port 53.
+- **Windows: Off went on after a step that failed.** A Hyper-V firewall error while restoring WSL's access ended Off
+  there: the routes to nowhere and the NRPT rule stayed (no internet after Off), and the watchdog did not see them as
+  leftovers. Each step now runs on its own, both count as leftovers the watchdog removes, and a route or rule Windows
+  would not remove stays in VeroScudo's record until it is gone.
+- **Windows: WSL was not blocked when its check failed.** A Hyper-V firewall query that failed read as "no WSL" for that
+  pass. Now WSL counts as there while VeroScudo holds its setting changed.
+- **Windows: two warnings threw instead of being logged** - no free loopback address for the local DNS answer, and an
+  NRPT rule Windows refuses: an error every 15 s, and a rule added in the same pass was not recorded.
+- **Linux, macOS, Hiddify:** a server written as an IPv4-mapped IPv6 address (`::ffff:203.0.113.7`) in Hiddify's config
+  made every ruleset fail to build - blocked until the entry was gone and the saved set replaced. Such an entry is now
+  dropped like any other address that cannot be a server.
+- **Linux, macOS tray:** *Guard: running* looked for the daemon's command line in any account's processes; only root's
+  count now.
+- **Linux, macOS:** the exit-location lookup reads at most 256 KB, as on Windows (was 64 KB).
+
 ### Windows: Hiddify connects while VeroScudo is already on
 - Newer Hiddify versions connect in VPN mode through `HiddifyCore.exe`, which the kill-switch did not let out: with
   VeroScudo already on (for example after a switch from WireGuard), Hiddify's tunnel came up but nothing got through.

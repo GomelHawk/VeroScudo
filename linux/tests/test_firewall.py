@@ -41,6 +41,9 @@ def test_dns_while_blocked_only_for_the_vpn_servers_name():
     # 3 vpn 7 example 3 com 0 - the whole name with its end, from the question's first byte (UDP 8 + DNS header 12 = bit 160)
     assert dns == ["    meta skuid 101 udp dport 53 @th,160,128 0x0376706e076578616d706c6503636f6d @th,288,8 0x00 ct mark set 0x5654 accept"]
     assert "tcp dport 53" not in rs                      # a TCP query cannot be read at a fixed place: none at all
+    # every packet sent must be that query: no "established" rule that lets the flow of one such query carry anything
+    out = rs.split("chain input")[0]
+    assert "ct mark 0x5654 accept" not in out and rs.count("ct state established,related ct mark 0x5654 accept") == 1
 
 
 def test_dns_name_match_in_the_case_given_and_in_lower_case():

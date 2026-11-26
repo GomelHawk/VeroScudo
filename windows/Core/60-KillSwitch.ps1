@@ -323,7 +323,9 @@ function Test-VeroVmWanted {
         }
         return $false
     }
-    [bool](Get-NetFirewallHyperVVMCreator -ErrorAction SilentlyContinue | Where-Object VMCreatorId -eq $script:WslCreator)   # WSL is there
+    # a query that fails must not read as "no WSL" while VeroScudo holds WSL's setting changed: the block would be skipped
+    try { $creators = @(Get-NetFirewallHyperVVMCreator -ErrorAction Stop) } catch { return (Test-Path -LiteralPath (Get-VeroPath).VmBackup) }
+    [bool]($creators | Where-Object VMCreatorId -eq $script:WslCreator)   # WSL is there
 }
 $script:VmWarned = $false
 
@@ -705,9 +707,11 @@ function Disable-VeroKillSwitch {
         if (Test-VeroArmed) { Write-VeroLog 'armed again meanwhile - kill-switch kept' $a; return }
         Clear-VeroWfpFilter
         Remove-Item (Get-VeroPath).WfpState -Force -ErrorAction SilentlyContinue
-        Remove-VeroLegacyFirewall -Action $a
-        Restore-VeroVmAccess
-        Clear-VeroNetSuspect
+        # each step on its own: one that fails must not keep the later ones from running (the routes to nowhere left in
+        # place would leave the PC without internet after Off)
+        try { Remove-VeroLegacyFirewall -Action $a } catch { Write-VeroLog "ERROR: old firewall rules not removed: $($_.Exception.Message) - will retry" $a }
+        try { Restore-VeroVmAccess } catch { Write-VeroLog "ERROR: WSL access not restored: $($_.Exception.Message) - will retry" $a }
+        try { Clear-VeroNetSuspect } catch { Write-VeroLog "ERROR: network note not removed: $($_.Exception.Message)" $a }
         try { $null = Set-VeroVmBlock -Block $false -Action $a } catch { Write-VeroLog "ERROR: Hyper-V port ACLs not removed: $($_.Exception.Message) - will retry" $a }
         $script:AclBlocked = $null
         try { Remove-VeroNrpt -Action $a } catch { Write-VeroLog "ERROR: NRPT rules not removed: $($_.Exception.Message) - will retry" $a }
@@ -719,6 +723,7 @@ function Disable-VeroKillSwitch {
 function Test-VeroKillSwitchPresent {
     # anything VeroScudo changed and has not yet undone, incl. a WSL setting whose restore failed (retried by the watchdog)
     ((Get-VeroWfpCount) -gt 0) -or (Test-Path (Get-VeroPath).Emergency) -or (Test-Path (Get-VeroPath).VmBackup) -or (Test-Path (Get-VeroPath).VmAcl) -or
+        (Test-Path (Get-VeroPath).Blackhole) -or (Test-Path (Get-VeroPath).Nrpt) -or
         [bool](Get-NetFirewallRule -Group $script:LegacyGroup -ErrorAction SilentlyContinue)
 }
 

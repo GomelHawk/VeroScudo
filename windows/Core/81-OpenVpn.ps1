@@ -42,34 +42,39 @@ function Test-VeroOpenVpnConf {
     $inBlock = $null
     $toPort = { param($v) if ($v -match '^\d{1,5}\z' -and [int]$v -ge 1 -and [int]$v -le 65535) { [int]$v } else { -1 } }
     if ($Text.IndexOf([char]0) -ge 0) { $errors.Add('the file contains NUL characters - not a text config') }
+    # OpenVPN's own white space: blank, tab, CR, VT, FF and nothing else. A no-break space or another Unicode space is part
+    # of a word to OpenVPN - trimmed here, a line would open or close a block for this check that OpenVPN reads as an
+    # unknown option (only a warning with FORWARD_COMPATIBLE), and the "block" between them would be options nobody checked.
+    $ws = [char[]]@(' ', "`t", "`r", [char]11, [char]12)
+    $ord = [StringComparison]::Ordinal                                      # tags are compared byte for byte, as OpenVPN does
     foreach ($raw in ($Text -split "`r?`n")) {
-        $line = $raw.Trim()
+        $line = $raw.Trim($ws)
         # a longer line is cut by an OpenVPN that reads into its fixed buffer: the rest would be read as a line of its own,
         # one this check never saw (the end of a block, an option hidden behind a comment). Base64 of one piece (an inlined
         # pkcs12) cannot hold a tag or an option and stays allowed inside a block.
         $tooLong = [Text.Encoding]::UTF8.GetByteCount($raw) -gt $script:OvpnLineMax
         if ($inBlock) {                                                     # inline <ca>...</ca> etc: copied as is
             if ($tooLong -and $line -cnotmatch '^[A-Za-z0-9+/=]+$') { $errors.Add("a line of more than $($script:OvpnLineMax) characters inside <$inBlock>") }
-            if ($line.StartsWith("</$inBlock>")) {
-                if ($line -ne "</$inBlock>") { $errors.Add("text after </$inBlock> on the same line") }
+            if ($line.StartsWith("</$inBlock>", $ord)) {
+                if (-not $line.Equals("</$inBlock>", $ord)) { $errors.Add("text after </$inBlock> on the same line") }
                 $inBlock = $null
-            } elseif ($line.StartsWith('<')) { $errors.Add("a tag line inside <$inBlock>: '$line'") }
+            } elseif ($line.StartsWith('<', $ord)) { $errors.Add("a tag line inside <$inBlock>: '$line'") }
             [void]$out.AppendLine($raw)
             continue
         }
-        if ($line -eq '<connection>') { if ($c) { $errors.Add('nested <connection>') }; $c = @{ Proto = $null; Port = $null }; [void]$out.AppendLine($raw); continue }
-        if ($line -eq '</connection>') { $c = $null; [void]$out.AppendLine($raw); continue }
-        if ($line -match '^<([a-z0-9-]+)>$') {
+        if ($line.Equals('<connection>', $ord)) { if ($c) { $errors.Add('nested <connection>') }; $c = @{ Proto = $null; Port = $null }; [void]$out.AppendLine($raw); continue }
+        if ($line.Equals('</connection>', $ord)) { $c = $null; [void]$out.AppendLine($raw); continue }
+        if ($line -cmatch '^<([a-z0-9-]+)>\z') {
             if ($script:OvpnInline -notcontains $Matches[1]) { $errors.Add("inline <$($Matches[1])> is not allowed"); continue }
             $inBlock = $Matches[1]; [void]$out.AppendLine($raw); continue
         }
-        if ($line.StartsWith('<')) { $errors.Add("unexpected tag line '$line'"); continue }
+        if ($line.StartsWith('<', $ord)) { $errors.Add("unexpected tag line '$line'"); continue }
         if ($tooLong) { $errors.Add("a line of more than $($script:OvpnLineMax) characters ('$($line.Substring(0, [Math]::Min(30, $line.Length)))...') - OpenVPN would cut it"); continue }
         if (-not $line -or $line -match '^[#;]') { [void]$out.AppendLine($raw); continue }
-        $tok = @($line -split '\s+' | Where-Object { $_ })
+        $tok = @($line -split '[ \t\r\x0B\f]+' | Where-Object { $_ })
         $first = $tok[0]
         if ($first.StartsWith('--')) { $first = $first.Substring(2) }
-        if ($first -cnotmatch '^[a-z0-9-]+$') { $errors.Add("'$($tok[0])' is not allowed: option names must be plain (no quotes, escapes or capitals)"); continue }
+        if ($first -cnotmatch '^[a-z0-9-]+\z') { $errors.Add("'$($tok[0])' is not allowed: option names must be plain (no quotes, escapes or capitals)"); continue }
         $d = $first
         $arg = @($tok | Select-Object -Skip 1)
         if ($script:OvpnAllowed -notcontains $d) { $errors.Add("'$d' is not allowed: VeroScudo runs OpenVPN as administrator and accepts only known client options (remove the line)"); continue }

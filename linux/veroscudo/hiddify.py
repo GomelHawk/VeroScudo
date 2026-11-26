@@ -101,8 +101,8 @@ def forbidden(addr: str) -> bool:
         a = ipaddress.ip_address(addr)
     except ValueError:
         return True
-    if getattr(a, "ipv4_mapped", None):
-        a = a.ipv4_mapped
+    if getattr(a, "ipv4_mapped", None) is not None:
+        return True                                     # an IPv4 address written as IPv6: the ruleset refuses it (plain_ip)
     return (a.is_loopback or a.is_link_local or a.is_multicast or a.is_unspecified or a.is_reserved
             or any(a in n for n in _PRIVATE if n.version == a.version)
             or (a.version == 4 and str(a) == "255.255.255.255"))

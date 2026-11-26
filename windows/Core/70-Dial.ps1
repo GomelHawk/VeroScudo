@@ -247,6 +247,8 @@ function Enter-VeroLock {
 $script:DnsFirstSeconds = 3                                              # the redial's DNS window: at most this long
 $script:DnsWindow = $false
 $script:DnsFresh = @{}
+$script:LocalDnsSaid = $false                                                # each of the two warnings below is logged once
+$script:NrptSaid = $null
 
 function Get-VeroDialName {
     <# The names a dial of this profile has to resolve: the server (Windows VPN, WireGuard) or the .ovpn's remotes (OpenVPN).
@@ -408,10 +410,11 @@ function Remove-VeroNrpt {
     <# Off and uninstall: every NRPT rule VeroScudo recorded, and any other carrying its comment (a record lost in a crash). #>
     [CmdletBinding()] param([string]$Action = 'core')
     foreach ($r in @(Get-VeroNrptRecord)) { try { Remove-DnsClientNrptRule -Name ([string]$r.Name) -Force -ErrorAction Stop } catch { Write-Verbose 'NRPT rule already gone' } }
+    $gone = $true                                                             # the record stays until they are: the watchdog tries again
     try { @(Get-DnsClientNrptRule -ErrorAction Stop | Where-Object { [string]$_.Comment -eq $script:NrptComment }) | ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction Stop } }
-    catch { Write-VeroLog "ERROR: NRPT rules of VeroScudo not checked: $($_.Exception.Message) - will retry" $Action }
+    catch { $gone = $false; Write-VeroLog "ERROR: NRPT rules of VeroScudo not checked: $($_.Exception.Message) - will retry" $Action }
     $p = (Get-VeroPath).Nrpt
-    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
+    if ($gone -and (Test-Path -LiteralPath $p)) { Remove-Item -LiteralPath $p -Force }
 }
 
 function Start-VeroRedial {

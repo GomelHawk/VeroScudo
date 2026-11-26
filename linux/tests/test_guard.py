@@ -1,6 +1,7 @@
 """The guard's event handling and profile switching, with the VPN control and the firewall replaced by fakes - run once per
 backend pair: nftables + NetworkManager (Linux) and pf + scutil (macOS). The tests read the applied rulesets only through
 `calls["allows_tunnel"]`, so they know nothing about either syntax."""
+import os
 import threading
 
 import pytest
@@ -589,3 +590,59 @@ def test_pf_blocked_the_servers_name_is_answered_locally_and_the_file_goes_when_
         assert not f.exists()                                   # Off: gone
     finally:
         g.local.stop()
+
+
+def test_pf_the_veroscudo_command_keeps_the_daemons_resolver_file(env, monkeypatch):
+    """On, Reconnect and a switch run in a process of their own, with no responder: they use the port the daemon noted."""
+    g, calls, _ = env
+    if calls["backend"] != "pf":
+        pytest.skip("nftables lets the name out by itself")
+    from veroscudo import localdns
+    monkeypatch.setattr(localdns, "PORTS", (0,))
+    g.store.set_armed(True)
+    g.store.server_cache("Work").parent.mkdir(parents=True, exist_ok=True)
+    g.store.server_cache("Work").write_text("203.0.113.5")
+    try:
+        g.update_local_dns()
+        g.enable_killswitch(tunnel_up=False)
+        f = localdns.RESOLVER_DIR / "vpn.example.com"
+        text = f.read_text()
+        command = daemon.Guard(g.base, g.store)
+        assert command.local.port is None and command.local_port(["vpn.example.com"]) == g.local.port
+        assert command.local_port(["vpn2.example.com"]) is None  # a name the daemon does not answer yet: no file for it
+        command.enable_killswitch(tunnel_up=False)
+        assert f.read_text() == text
+        os.utime(g.store.home / daemon.LOCAL_DNS_NOTE, (1, 1))  # a daemon that stopped renewing its note: no port known
+        assert command.local_port() is None
+        command.enable_killswitch(tunnel_up=False)
+        assert not f.exists()
+    finally:
+        g.local.stop()
+
+
+def test_a_profile_added_while_the_daemon_runs_is_known_to_the_next_vpn_event(env, tmp_path, monkeypatch):
+    """A profile is imported and at once connected or switched to: the daemon judges the event by the file as it is now,
+    not by the list it read up to 15 s ago - the old profile's hang-up during the switch is not your Off."""
+    g, calls, connected = env
+    p = tmp_path / "config.json"
+    p.write_text(MULTI)
+    monkeypatch.setenv("VEROSCUDO_CONFIG", str(p))
+    g._cfg_stamp = g._stamp()
+    added = ',{"profile":"Home","server":"home.example.com"}],"activeProfile"'
+    p.write_text(MULTI.replace('],"activeProfile"', added))
+    os.utime(p, (1, 1))
+    assert g.profile_names() == {"Work", "Backup", "Home"}      # the watch hooks a connection of the new profile
+    p.write_text(MULTI)
+    os.utime(p, (2, 2))
+    connected.add("Work")
+    g.on_event_up("Work")
+    assert g.store.armed and g.cfg.profile == "Work"
+    p.write_text(MULTI.replace('],"activeProfile"', added))     # `veroscudo import`, then `veroscudo use Home`:
+    os.utime(p, (3, 3))
+    g.store.set_active("Home")                                  # the new profile is active first,
+    connected.discard("Work")                                   # then the old tunnel is taken down
+    g.on_event_down("Work", user_requested=True)
+    assert g.store.armed and calls["clear"] == 0
+    connected.add("Home")
+    g.on_event_up("Home")
+    assert g.store.armed and g.cfg.profile == "Home"

@@ -54,7 +54,7 @@ def parse_trace(raw: bytes) -> dict | None:
 
 
 def _get(url: str, timeout: float) -> bytes:
-    return fetch_https(url, timeout, 65536)                      # fixed https addresses; no redirect followed
+    return fetch_https(url, timeout, 262144)                      # fixed https addresses; no redirect followed
 
 
 def lookup(get=_get, timeout: float = TIMEOUT) -> dict:

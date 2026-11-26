@@ -447,6 +447,7 @@ function Remove-VeroBlackhole {
         if ($f[1] -like '127.*' -or $f[1] -eq '::1/128' -or -not $f[1].Contains(':')) { continue }   # IPv4: the sync above took them over
         $pp = $f[1].Split('/'); $null = Remove-VeroRoute -IfIndex ([uint32]$f[0]) -Prefix $pp[0] -Length ([int]$pp[1])
     }
+    # a route Windows would not remove stays in the record: the watchdog sees it as a leftover and tries again
     $p = (Get-VeroPath).Blackhole
-    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
+    if ((Test-Path -LiteralPath $p) -and @(Get-VeroBlackholeRecord).Count -eq 0) { Remove-Item -LiteralPath $p -Force }
 }

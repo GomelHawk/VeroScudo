@@ -78,7 +78,7 @@ def test_endpoints_from_the_live_config():
 
 def test_endpoints_never_allow_local_addresses_and_are_capped():
     for addr in ("10.1.2.3", "172.19.0.1", "100.64.0.1", "169.254.1.1", "224.0.0.1", "0.0.0.0", "::1", "fe80::1",
-                 "fd00::1", "ff02::1", "255.255.255.255", "::ffff:192.168.1.1"):
+                 "fd00::1", "ff02::1", "255.255.255.255", "::ffff:192.168.1.1", "::ffff:203.0.113.7"):
         assert hiddify.forbidden(addr), addr
     for addr in ("203.0.113.7", "198.51.100.1", "2001:db8::1", "1.1.1.1"):
         assert not hiddify.forbidden(addr), addr

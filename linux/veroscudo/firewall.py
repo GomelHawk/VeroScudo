@@ -137,7 +137,9 @@ def render_ruleset(cfg: Config, server_ips: list[str], tun_iface: str | None, vm
         lines.append(f"    oifname {brset} accept")                      # host -> containers/VMs (stays on this machine)
     lines += [
         f"    ct state established,related ct mark {MARK} accept",      # only flows VeroScudo allowed itself
-        *([] if tun_iface else [f"    ct state established,related ct mark {MARK_DNS} accept"]),   # DNS: only while down
+        # DNS, only while down - and only when it is not limited to the server's name: then every packet sent has to be
+        # that query itself (a flow opened by one such query would otherwise carry anything to the resolver afterwards)
+        *([] if tun_iface or dns.names is not None else [f"    ct state established,related ct mark {MARK_DNS} accept"]),
         f"    meta skuid {dhcp_uids()} udp sport 68 udp dport 67 {keep}",      # DHCP: only the DHCP clients
         f"    meta skuid {dhcp_uids()} udp sport 546 udp dport 547 {keep}",    # DHCPv6
         "    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, mld-listener-report } accept",

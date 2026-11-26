@@ -547,10 +547,12 @@ class Runner:
 
 # ---------------------------------------------------------------- facts the tray reads
 def guard_running(pgrep: str | None = None) -> bool:
-    """The root daemon (`veroscudo daemon`) is alive. Any user may see it in the process list."""
+    """The root daemon (`veroscudo daemon`) is alive. Any user may see it in the process list; only root's processes
+    count, so another account's process with that text in its command line is not taken for the guard."""
     exe = pgrep or shutil.which("pgrep") or "/usr/bin/pgrep"
     try:
-        r = subprocess.run([exe, "-f", "bin/veroscudo daemon"], check=False, capture_output=True, text=True, timeout=5)
+        r = subprocess.run([exe, "-u", "0", "-f", "bin/veroscudo daemon"], check=False, capture_output=True, text=True,
+                           timeout=5)
     except (OSError, subprocess.SubprocessError):
         return True                       # cannot tell: do not cry wolf
     return r.returncode == 0
