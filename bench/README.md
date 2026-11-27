@@ -37,6 +37,9 @@ so nothing reaches a third party. The exact rules, weights and scoring are in [S
 
 Connect your VPN and its kill-switch first. Turn off split tunnelling for the test.
 
+Both files are attached to every [release](https://github.com/GomelHawk/VeroScudo/releases/latest) on their own -
+no VeroScudo needed - with their checksums in `SHA256SUMS.txt`.
+
 **Windows 10 (21H2+) / 11** - download [`ksbench.ps1`](ksbench.ps1), then in PowerShell **as administrator**:
 
 ```powershell

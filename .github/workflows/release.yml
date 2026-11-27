@@ -46,7 +46,7 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX))
           $cert = Get-PfxData -FilePath $pfx -Password (ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force)
           $c = $cert.EndEntityCertificates[0]
-          Get-ChildItem windows -Recurse -Include *.ps1, *.psm1 | ForEach-Object {
+          @(Get-ChildItem windows -Recurse -Include *.ps1, *.psm1) + @(Get-Item bench/ksbench.ps1) | ForEach-Object {
             $s = Set-AuthenticodeSignature -FilePath $_.FullName -Certificate $c -TimestampServer 'http://timestamp.digicert.com' -HashAlgorithm SHA256
             if ($s.Status -ne 'Valid') { throw "signing failed: $($_.Name) $($s.StatusMessage)" }
           }
@@ -65,10 +65,13 @@ jobs:
           Copy-Item assets/icons/png, assets/icons/badge, assets/icons/app "$d/icons" -Recurse
           Copy-Item README.md, LICENSE, docs/ARCHITECTURE.md, docs/TESTING.md, docs/SECURITY.md $d
           Compress-Archive -Path $d -DestinationPath "dist/VeroScudo-$v-windows.zip"
+          Copy-Item bench/ksbench.ps1 dist/ksbench.ps1          # the bench on its own: one file, nothing to install (signed above when configured)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-zip
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/ksbench.ps1
 
   release:
     name: Linux + macOS archives, provenance, GitHub release
@@ -113,14 +116,18 @@ jobs:
           cp -r assets/icons/png assets/icons/app dist/VeroScudo-macos/assets/icons/
           cp README.md LICENSE docs/ARCHITECTURE.md docs/SECURITY.md dist/VeroScudo-macos/
           (cd dist && tar -czf "VeroScudo-$VERSION-macos-alpha.tar.gz" VeroScudo-macos)
+      - name: The bench on its own (Linux, macOS)
+        run: cp bench/ksbench.py dist/ksbench.py
       - name: Checksums
-        run: (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS.txt)
+        run: (cd dist && sha256sum ./*.zip ./*.tar.gz ./ksbench.ps1 ./ksbench.py > SHA256SUMS.txt)
       - name: Build provenance (verify with `gh attestation verify <file> --repo GomelHawk/VeroScudo`)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/ksbench.ps1
+            dist/ksbench.py
       - name: Release notes from CHANGELOG.md
         env:
           VERSION: ${{ steps.v.outputs.version }}
@@ -140,4 +147,6 @@ jobs:
           files: |
             dist/*.zip
             dist/*.tar.gz
+            dist/ksbench.ps1
+            dist/ksbench.py
             dist/SHA256SUMS.txt

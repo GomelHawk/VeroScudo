@@ -33,8 +33,9 @@ itself) or a **WireGuard** tunnel from the WireGuard app - see [Profile types](#
 ## Is your current kill-switch good enough? Check it first
 
 Already use a VPN with a kill-switch? Test it before you change anything: [**ksbench**](bench/README.md) is one
-file, nothing to install, about 3 minutes. It breaks the VPN on purpose (server blocked, tunnel down, Wi-Fi off,
-client killed), watches your network adapter for anything that gets out, and ends with a score from 0 to 100 and a
+file, nothing to install, about 3 minutes - `ksbench.ps1` (Windows) and `ksbench.py` (Linux, macOS) are attached to
+every [release](https://github.com/GomelHawk/VeroScudo/releases/latest) on their own. It breaks the VPN on purpose
+(server blocked, tunnel down, Wi-Fi off, client killed), watches your network adapter for anything that gets out, and ends with a score from 0 to 100 and a
 plain verdict - **STRONG**, **FAIR** or **POOR**. Every change it makes is undone, also on Ctrl-C.
 
 ```powershell
