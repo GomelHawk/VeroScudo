@@ -412,7 +412,7 @@ def vpn_app(server_progs, progs):
     return {f for f in set(progs) | apps if f and not system_program(f) and (f in apps or os.path.dirname(f) in dirs)}
 
 
-def credit_near(items, app, window=1.0):
+def credit_near(items, app, window=3.0):
     """A packet whose program was not seen is the VPN app's when it belongs to one of the app's connections (the same
     protocol, local port, address and port - also a resend after the app was killed: the system still closes its
     connections), or when one of its programs sent to the same address, protocol and port within `window` s (a socket
@@ -1125,9 +1125,10 @@ class Bench:
     def fits(self, seconds):
         return time.time() + seconds <= self.deadline
 
-    def outage(self, sid, inject, restore, hold, until_down=False):
-        """until_down: the fault stays until the tunnel goes down (+5 s), at most `hold` s; else exactly `hold` s."""
-        if not self.fits(min(hold, FAULT) + 20):
+    def outage(self, sid, inject, restore, hold, until_down=False, always=False):
+        """until_down: the fault stays until the tunnel goes down (+5 s), at most `hold` s; else exactly `hold` s.
+        always: runs also past the time budget (D2 - it asks first)."""
+        if not always and not self.fits(min(hold, FAULT) + 20):
             self.set(sid, "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
             return
         if not self.tunnel_up():
@@ -1299,13 +1300,11 @@ class Bench:
             if not pids:
                 self.set("D2", "n/a", "no user process owns the VPN connection (the VPN runs in the kernel "
                          "or in a system service) - nothing to kill safely")
-            elif not self.fits(FAULT + 20):
-                self.set("D2", "not run", f"the {BUDGET // 60}-minute limit for the outage tests was reached")
-            else:
+            else:                           # also past the time budget: you are asked first
                 desc = ", ".join(f"{n} (pid {p})" for p, n in sorted(pids.items()))
                 if ask(f"  D2 will kill the VPN client process {desc}. OK? [y/N] ", False, self.interactive) \
                         or self.a.yes:
-                    self.outage("D2", lambda: self._kill(pids), lambda: None, hold, until_down=True)
+                    self.outage("D2", lambda: self._kill(pids), lambda: None, hold, until_down=True, always=True)
                 else:
                     self.set("D2", "skipped", "you chose not to kill " + desc)
         if self.wanted("T2") and not self.stopped:
@@ -1601,7 +1600,7 @@ which IP address they see you coming from. If a leak happens, Cloudflare sees yo
 It does not change the score - it only shows the leaked address and checks the bench itself.
 Run the online check? [Y/n] """
 
-DISRUPT_TEXT = """The next tests break the VPN on purpose - about 3 minutes, 4 at most. A blocked server or a killed client
+DISRUPT_TEXT = """The next tests break the VPN on purpose - about 3 minutes, 4 at most (D2 runs also later - it asks first). A blocked server or a killed client
 stays so until the tunnel goes down (at most %d s); the bench then waits up to %d s for the VPN to come back.
 Each change is undone at once (also on Ctrl-C; 'sudo python3 ksbench.py --restore' if the run dies):
   D1  a firewall rule blocks the VPN server

@@ -3,7 +3,14 @@
 All notable changes to VeroScudo are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer.
 
-## [Unreleased]
+## [1.4.0] - 2026-11-26
+
+Hiddify in VPN mode protected on every platform, WSL and Hyper-V VMs cut off the moment a tunnel drops, a connection check
+that reconnects a tunnel which carries nothing, DNS that stays inside while a VPN redials, statistics, and ksbench - a
+leak bench for any VPN kill-switch.
+
+Tested live with ksbench, every run 100 / 100: Windows 11 (Windows VPN SSTP and IKEv2, OpenVPN, WireGuard, Hiddify) and
+Ubuntu 26.04 in a VM (PrivateVPN, WireGuard, Hiddify). macOS (alpha) changes are covered by unit tests only.
 
 ### Security review: fixes
 - **Windows, OpenVPN: an imported config could hide options from the check.** The check took any Unicode space (a no-break

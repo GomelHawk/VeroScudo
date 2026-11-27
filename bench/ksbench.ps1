@@ -71,7 +71,7 @@ $Recommend = "Recommendation: change your kill-switch to one that blocks at the 
 $NeverKill = @('system', 'idle', 'svchost', 'lsass', 'csrss', 'wininit', 'winlogon', 'services', 'smss', 'registry',
     'explorer', 'powershell', 'pwsh', 'dwm', 'msmpeng', 'conhost')
 $DisruptText = @"
-The next tests break the VPN on purpose - about 3 minutes, 4 at most. A blocked server or a killed client
+The next tests break the VPN on purpose - about 3 minutes, 4 at most (D2 runs also later - it asks first). A blocked server or a killed client
 stays so until the tunnel goes down (at most {0} s); the bench then waits up to {1} s for the VPN to come back.
 Each change is undone at once (also on Ctrl-C; '.\ksbench.ps1 -Restore' if the window was closed during the run):
   D1  a Windows Firewall rule blocks the VPN server
@@ -870,7 +870,7 @@ function Get-AppProgram {
     <# The VPN app's program files - those that sent to the VPN server and the others in their folder. #>
     [KsBench.Owners]::Know($script:Pkts, [KsBench.Probe]::Now() - 0.7)       # 0.5 s margin + one look
     $app = [KsBench.Owners]::App($script:Pkts, [string[]]@($script:Servers.Keys), [string[]]$NeverKill, [Environment]::GetFolderPath('Windows'))
-    [KsBench.Owners]::Near($script:Pkts, $app, 1.0)                           # sockets too short for a look
+    [KsBench.Owners]::Near($script:Pkts, $app, 3.0)                           # sockets too short for a look
     return , $app
 }
 
@@ -941,8 +941,9 @@ function Wait-Recovery([string]$Label) {
 function Test-Fits([int]$Seconds) { return [KsBench.Probe]::Now() + $Seconds -le $script:Deadline }
 
 # -UntilDown: the fault stays until the tunnel goes down (+5 s), at most $HoldSec; otherwise exactly $HoldSec
-function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [scriptblock]$Restore = $null, [switch]$UntilDown) {
-    if (-not (Test-Fits ([Math]::Min($HoldSec, $Fault) + 20))) {
+function Invoke-Outage([string]$Id, [scriptblock]$Inject, [int]$HoldSec, [scriptblock]$Restore = $null, [switch]$UntilDown, [switch]$Always) {
+    # -Always: runs also past the time budget (D2 - it asks first)
+    if (-not $Always -and -not (Test-Fits ([Math]::Min($HoldSec, $Fault) + 20))) {
         Set-Result $Id 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached"; return
     }
     if (-not [KsBench.Probe]::TunnelUp()) {
@@ -1163,12 +1164,10 @@ function Invoke-Disruptive {
         $procs = Get-SafeProcess $ids
         if (-not $procs) {
             Set-Result 'D2' 'n/a' 'no user process owns the VPN connection (the VPN runs inside Windows or in a driver) - nothing to kill safely'
-        } elseif (-not (Test-Fits ($Fault + 20))) {
-            Set-Result 'D2' 'not run' "the $([int]($Budget / 60))-minute limit for the outage tests was reached"
-        } else {
+        } else {                                   # also past the time budget: you are asked first
             $desc = ($procs | ForEach-Object { "$($_.Name) (pid $($_.Id))" }) -join ', '
             if ((Read-YesNo "  D2 will kill the VPN client process $desc. OK? [y/N]" $false) -or $Yes) {
-                Invoke-Outage 'D2' { Stop-ProcessList $procs; $null } $Hold { } -UntilDown
+                Invoke-Outage 'D2' { Stop-ProcessList $procs; $null } $Hold { } -UntilDown -Always
             } else { Set-Result 'D2' 'skipped' "you chose not to kill $desc" }
         }
     }

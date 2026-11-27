@@ -1,7 +1,7 @@
 ﻿# VeroScudo core, part 10: constants, OS-resolved system folders, the install-folder ACL check.
 # Dot-sourced by VeroScudo.Core.psm1 into the module's scope, in order - never run on its own.
 
-$script:Version      = '1.3.0'
+$script:Version      = '1.4.0'
 $script:LegacyGroup  = 'VeroScudo'                                       # Windows Firewall rule group of 1.0.x (migrated away)
 $script:VmRule       = 'VeroScudo-WSL'
 $script:VmBlockRule  = 'VeroScudo-WSL-Block'                            # switched on at a drop, before anything else

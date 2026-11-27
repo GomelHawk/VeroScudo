@@ -12,7 +12,7 @@ including a router on the local network.
 **The VPN app's own traffic** is not counted either: a kill-switch must let the VPN app out, or it could
 never reconnect. While the bench runs it notes which program holds each connection, and a packet belongs to
 the program that held its port at that moment. A socket too short to be seen (a few ms) counts as the VPN app's
-only when one of its programs sent to the same address, protocol and port within a second; a packet of one of the VPN
+only when one of its programs sent to the same address, protocol and port within 3 seconds; a packet of one of the VPN
 app's own connections stays its own, also a resend after the app was killed (the system still closes the connection). The VPN app is the program that sends to the VPN server,
 plus the other programs in its folder (its user interface, its tray). A system program, the bench itself
 and the Windows folder never count as the VPN app. Its packets are listed at the end of the report with their addresses and
@@ -69,7 +69,7 @@ server is unreachable) makes the test **N/A**: nothing could leak, so the kill-s
 
 The steady tests take about 15 s. The outage and tamper tests have a 240 s budget together; a test that
 would not fit is reported as *not run*. The time you take to reconnect the VPN by hand, when the bench
-asks you to, is not counted in the budget. They run in this order, most important first: D1, D3, D4, T1,
+asks you to, is not counted in the budget. D2 runs also when the budget is used up: it asks before it kills anything. They run in this order, most important first: D1, D3, D4, T1,
 D2, T2. A typical run takes about 2-3 minutes: a VPN that notices a blocked server slowly (SSTP) makes D1 longer.
 
 ## Online check (optional)
